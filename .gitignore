@@ -3,5 +3,6 @@ target/
 .donotcommit/
 site/
 docs/HOUSE-SEAL.md
-*.pre-*
 *.pre-modes
+*.pre-*
+
