@@ -1,0 +1,38 @@
+﻿//! Error type shared by every algorithm in the crate.
+
+use thiserror::Error;
+
+/// Result alias used across `seal-algo`.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Everything that can go wrong when building a projection or running an algorithm.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum Error {
+    /// A node id was `>= node_count`.
+    #[error("node {node} is out of range for a projection with {node_count} nodes")]
+    NodeOutOfRange { node: u32, node_count: usize },
+    /// The projection would need more ids than fit in `u32`.
+    #[error("node count {0} does not fit in a u32 node id")]
+    TooManyNodes(usize),
+    /// A weight was NaN or infinite.
+    #[error("edge weight {0} is not finite")]
+    InvalidWeight(f64),
+    /// An algorithm that needs non-negative weights met a negative one.
+    #[error("negative weight {weight} on edge {from} -> {to}")]
+    NegativeWeight { from: u32, to: u32, weight: f64 },
+    /// A negative-weight cycle is reachable from the source.
+    #[error("a negative-weight cycle is reachable from the source")]
+    NegativeCycle,
+    /// A topological order does not exist.
+    #[error("the graph contains a directed cycle")]
+    CycleDetected,
+    /// The algorithm only makes sense on a directed projection.
+    #[error("this algorithm requires a directed projection")]
+    RequiresDirected,
+    /// The graph is too large for an O(n^2)-memory algorithm.
+    #[error("{node_count} nodes exceed the limit of {limit} for this algorithm")]
+    TooLarge { node_count: usize, limit: usize },
+    /// A configuration value was out of its legal range.
+    #[error("invalid parameter: {0}")]
+    InvalidParameter(String),
+}

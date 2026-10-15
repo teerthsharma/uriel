@@ -1,0 +1,188 @@
+//! Record codec: round trips and corruption handling.
+
+use std::collections::BTreeSet;
+
+use crate::codec::{decode_node, decode_rel, decode_value, encode_node, encode_rel, encode_value};
+use crate::error::Error;
+use crate::ids::{NodeId, Props, RelId};
+use crate::Value;
+
+fn sample_values() -> Vec<Value> {
+    let mut m = std::collections::BTreeMap::new();
+    m.insert("k".to_string(), Value::Int(1));
+    m.insert(
+        "".to_string(),
+        Value::List(vec![Value::Null, Value::Float(f64::NAN)]),
+    );
+    vec![
+        Value::Null,
+        Value::Bool(true),
+        Value::Int(i64::MIN),
+        Value::Float(-0.0),
+        Value::Float(f64::NAN),
+        Value::String("h\u{e9}llo\0world".into()),
+        Value::Bytes(vec![0, 255, 7]),
+        Value::List(vec![
+            Value::Int(1),
+            Value::String("x".into()),
+            Value::List(vec![]),
+        ]),
+        Value::Map(m),
+        Value::Vector(vec![0.5, -1.25, f32::INFINITY]),
+        Value::Vector(vec![]),
+    ]
+}
+
+#[test]
+fn values_round_trip_bit_exactly() {
+    for v in sample_values() {
+        let mut buf = Vec::new();
+        encode_value(&v, &mut buf);
+        let back = decode_value(&buf).unwrap();
+        assert_eq!(v, back);
+        // bit-exact: -0.0 must stay -0.0 (Eq treats them equal, storage must not)
+        let mut buf2 = Vec::new();
+        encode_value(&back, &mut buf2);
+        assert_eq!(buf, buf2, "{v:?}");
+    }
+}
+
+#[test]
+fn node_and_rel_records_round_trip() {
+    let labels: BTreeSet<String> = ["Person", "Admin"].iter().map(|s| s.to_string()).collect();
+    let mut props = Props::new();
+    props.insert("name".into(), Value::String("Ada".into()));
+    props.insert("age".into(), Value::Int(36));
+    let bytes = encode_node(&labels, &props);
+    let node = decode_node(NodeId(7), &bytes).unwrap();
+    assert_eq!(node.id, NodeId(7));
+    assert_eq!(node.labels, labels);
+    assert_eq!(node.props, props);
+
+    let bytes = encode_rel(NodeId(1), NodeId(2), "KNOWS", &props);
+    let rel = decode_rel(RelId(9), &bytes).unwrap();
+    assert_eq!((rel.id, rel.src, rel.dst), (RelId(9), NodeId(1), NodeId(2)));
+    assert_eq!(rel.rel_type, "KNOWS");
+    assert_eq!(rel.props, props);
+}
+
+#[test]
+fn every_truncation_of_a_record_is_a_corruption_error_not_a_panic() {
+    let labels: BTreeSet<String> = ["A".to_string()].into();
+    let mut props = Props::new();
+    for (i, v) in sample_values().into_iter().enumerate() {
+        props.insert(format!("p{i}"), v);
+    }
+    let bytes = encode_node(&labels, &props);
+    for cut in 0..bytes.len() {
+        let err = decode_node(NodeId(0), &bytes[..cut]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "cut {cut}: {err:?}");
+    }
+    let rbytes = encode_rel(NodeId(1), NodeId(2), "T", &props);
+    for cut in 0..rbytes.len() {
+        assert!(decode_rel(RelId(0), &rbytes[..cut]).is_err(), "cut {cut}");
+    }
+}
+
+#[test]
+fn trailing_garbage_and_unknown_tags_are_rejected() {
+    let mut bytes = encode_node(&BTreeSet::new(), &Props::new());
+    bytes.push(0);
+    assert!(matches!(
+        decode_node(NodeId(0), &bytes),
+        Err(Error::Corrupt(_))
+    ));
+    assert!(matches!(decode_value(&[0xEE]), Err(Error::Corrupt(_))));
+    // absurd length prefix must not allocate gigabytes or panic
+    let mut evil = vec![5_u8]; // string tag
+    evil.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert!(matches!(decode_value(&evil), Err(Error::Corrupt(_))));
+    let mut evil_list = vec![7_u8];
+    evil_list.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert!(matches!(decode_value(&evil_list), Err(Error::Corrupt(_))));
+}
+
+#[test]
+fn deeply_nested_corrupt_input_does_not_overflow_the_stack() {
+    // list tag + count 1, repeated: depth far beyond any legal value
+    let mut evil = Vec::new();
+    for _ in 0..100_000 {
+        evil.push(7_u8);
+        evil.extend_from_slice(&1_u32.to_le_bytes());
+    }
+    assert!(matches!(decode_value(&evil), Err(Error::Corrupt(_))));
+}
+
+struct Xor(u64);
+impl Xor {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
+fn valid_stored_forms() -> Vec<Vec<u8>> {
+    let labels: BTreeSet<String> = ["Doc".to_string()].into();
+    let mut props = Props::new();
+    for (i, v) in sample_values().into_iter().enumerate() {
+        props.insert(format!("p{i}"), v);
+    }
+    props.insert(
+        "body".into(),
+        Value::from("fox jumps over the dog; ".repeat(60)),
+    );
+    let rec = encode_node(&labels, &props);
+    let mut forms = vec![rec.clone()];
+    for tier in [
+        seal_tier::Tier::Hot,
+        seal_tier::Tier::Warm,
+        seal_tier::Tier::Cold,
+    ] {
+        forms.push(seal_tier::encode_value(&rec, tier, 0));
+    }
+    forms
+}
+
+#[test]
+fn record_decoders_survive_20000_random_byte_strings() {
+    let mut rng = Xor(0x0123_4567_89ab_cdef);
+    for _ in 0..20_000 {
+        let len = (rng.next() % 120) as usize;
+        let mut v: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+        if let Some(first) = v.first_mut() {
+            *first = match rng.next() % 5 {
+                0 => 1,
+                1 => seal_tier::TAG_RAW,
+                2 => seal_tier::TAG_LZ4,
+                3 => seal_tier::TAG_COLD,
+                _ => *first,
+            };
+        }
+        let _ = decode_node(NodeId(0), &v);
+        let _ = decode_rel(RelId(0), &v);
+    }
+}
+
+#[test]
+fn truncated_and_bit_flipped_stored_records_never_panic() {
+    let mut rng = Xor(42);
+    for form in valid_stored_forms() {
+        assert!(decode_node(NodeId(1), &form).is_ok());
+        for cut in 0..form.len() {
+            assert!(
+                decode_node(NodeId(1), &form[..cut]).is_err(),
+                "a record cut at {cut}/{} decoded",
+                form.len()
+            );
+        }
+        for _ in 0..2_000 {
+            let mut m = form.clone();
+            let i = (rng.next() as usize) % m.len();
+            m[i] ^= 1 << (rng.next() % 8);
+            let _ = decode_node(NodeId(1), &m);
+            let _ = decode_rel(RelId(1), &m);
+        }
+    }
+}

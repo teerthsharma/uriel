@@ -1,0 +1,31 @@
+{
+  "schema": "uriel-place.calibration.v1",
+  "date": "2026-10-15",
+  "unit": "picoseconds per dependent load (min over repeats)",
+  "machine": {"NUMBER_OF_PROCESSORS": "28", "OS": "Windows_NT", "PROCESSOR_ARCHITECTURE": "AMD64", "PROCESSOR_IDENTIFIER": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel", "budget_seconds": "12", "elapsed_ms": "12259", "note": "measured on this machine at this moment; not portable", "target_arch": "x86_64", "target_os": "windows"},
+  "points": [
+    {"bytes": 4096, "ps_per_load": 1188, "loads": 2097152},
+    {"bytes": 8192, "ps_per_load": 1180, "loads": 2097152},
+    {"bytes": 16384, "ps_per_load": 1180, "loads": 2097152},
+    {"bytes": 32768, "ps_per_load": 1180, "loads": 2097152},
+    {"bytes": 65536, "ps_per_load": 3343, "loads": 2097152},
+    {"bytes": 131072, "ps_per_load": 3194, "loads": 2097152},
+    {"bytes": 262144, "ps_per_load": 3152, "loads": 2097152},
+    {"bytes": 524288, "ps_per_load": 3549, "loads": 2097152},
+    {"bytes": 1048576, "ps_per_load": 4076, "loads": 2097152},
+    {"bytes": 2097152, "ps_per_load": 4369, "loads": 2097152},
+    {"bytes": 4194304, "ps_per_load": 13699, "loads": 2097152},
+    {"bytes": 8388608, "ps_per_load": 14984, "loads": 2097152},
+    {"bytes": 16777216, "ps_per_load": 72047, "loads": 2097152},
+    {"bytes": 33554432, "ps_per_load": 91893, "loads": 2097152},
+    {"bytes": 67108864, "ps_per_load": 98802, "loads": 2097152},
+    {"bytes": 134217728, "ps_per_load": 95810, "loads": 2097152},
+    {"bytes": 268435456, "ps_per_load": 99985, "loads": 2097152}
+  ],
+  "knees": [
+    {"from_bytes": 32768, "to_bytes": 65536, "ratio_x100": 283},
+    {"from_bytes": 2097152, "to_bytes": 4194304, "ratio_x100": 313},
+    {"from_bytes": 8388608, "to_bytes": 16777216, "ratio_x100": 480}
+  ],
+  "suggested_hot_bytes": 4194304
+}

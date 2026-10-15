@@ -1,0 +1,10 @@
+[package]
+name = "seal-kv"
+description = "Sans-IO resilient KV core for seal: HLC, MVCC, Raft, ranges, deterministic cluster simulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = "2.0.21"

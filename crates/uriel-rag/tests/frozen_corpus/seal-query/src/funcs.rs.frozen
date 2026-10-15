@@ -1,0 +1,619 @@
+//! Built-in scalar functions and aggregates.
+
+use std::collections::BTreeSet;
+
+use seal_cypher::Expr;
+
+use crate::analyze::is_aggregate_name;
+use crate::ctx::Ctx;
+use crate::error::{rt, sem, QResult, QueryError};
+use crate::val::{order_cmp, to_text, GroupKey, PathVal, Row, Val};
+
+fn need(name: &str, args: &[Val], n: usize) -> QResult<()> {
+    if args.len() == n {
+        Ok(())
+    } else {
+        sem(format!(
+            "function {name}() expects {n} argument(s), got {}",
+            args.len()
+        ))
+    }
+}
+
+fn need_range(name: &str, args: &[Val], lo: usize, hi: usize) -> QResult<()> {
+    if args.len() >= lo && args.len() <= hi {
+        Ok(())
+    } else {
+        sem(format!(
+            "function {name}() expects {lo} to {hi} arguments, got {}",
+            args.len()
+        ))
+    }
+}
+
+fn float1(name: &str, v: &Val, f: impl Fn(f64) -> f64) -> QResult<Val> {
+    match v {
+        Val::Null => Ok(Val::Null),
+        x if x.is_number() => Ok(Val::Float(f(x.as_f64().unwrap_or(0.0)))),
+        o => rt(format!("{name}() expects a number, got {}", o.type_name())),
+    }
+}
+
+fn str_of<'v>(name: &str, v: &'v Val) -> QResult<Option<&'v str>> {
+    match v {
+        Val::Null => Ok(None),
+        Val::Str(s) => Ok(Some(s.as_str())),
+        o => rt(format!("{name}() expects a String, got {}", o.type_name())),
+    }
+}
+
+fn int_of(name: &str, v: &Val) -> QResult<i64> {
+    match v {
+        Val::Int(i) => Ok(*i),
+        Val::Float(f) => Ok(*f as i64),
+        o => rt(format!(
+            "{name}() expects an Integer, got {}",
+            o.type_name()
+        )),
+    }
+}
+
+impl Ctx<'_> {
+    pub fn call_function(
+        &mut self,
+        namespace: &[String],
+        name: &str,
+        distinct: bool,
+        args: &[Expr],
+        row: &Row,
+    ) -> QResult<Val> {
+        let lname = name.to_ascii_lowercase();
+        if !namespace.is_empty() {
+            return sem(format!("Unknown function '{}.{name}'", namespace.join(".")));
+        }
+        if is_aggregate_name(&lname) {
+            let Some(rows) = self.group.take() else {
+                return sem(format!("Invalid use of aggregating function {name}()"));
+            };
+            let r = self.aggregate(&lname, distinct, args, &rows);
+            self.group = Some(rows);
+            return r;
+        }
+        if lname == "coalesce" {
+            for a in args {
+                let v = self.eval(a, row)?;
+                if !v.is_null() {
+                    return Ok(v);
+                }
+            }
+            return Ok(Val::Null);
+        }
+        let mut av = Vec::with_capacity(args.len());
+        for a in args {
+            av.push(self.eval(a, row)?);
+        }
+        self.scalar(&lname, name, &av)
+    }
+
+    fn aggregate(
+        &mut self,
+        name: &str,
+        distinct: bool,
+        args: &[Expr],
+        rows: &[Row],
+    ) -> QResult<Val> {
+        let Some(arg) = args.first() else {
+            return sem(format!("{name}() requires an argument"));
+        };
+        let mut vals: Vec<Val> = Vec::new();
+        for r in rows {
+            let v = self.eval(arg, r)?;
+            if !v.is_null() {
+                vals.push(v);
+            }
+        }
+        if distinct {
+            let mut seen = BTreeSet::new();
+            vals.retain(|v| seen.insert(GroupKey(vec![v.clone()])));
+        }
+        match name {
+            "count" => Ok(Val::Int(vals.len() as i64)),
+            "collect" => Ok(Val::List(vals)),
+            "min" => Ok(vals.into_iter().min_by(order_cmp).unwrap_or(Val::Null)),
+            "max" => Ok(vals.into_iter().max_by(order_cmp).unwrap_or(Val::Null)),
+            "sum" => {
+                let mut isum: i64 = 0;
+                let mut fsum = 0.0;
+                let mut any_float = false;
+                for v in &vals {
+                    match v {
+                        Val::Int(i) => {
+                            isum = match isum.checked_add(*i) {
+                                Some(x) => x,
+                                None => return rt("integer overflow"),
+                            };
+                            fsum += *i as f64;
+                        }
+                        Val::Float(f) => {
+                            any_float = true;
+                            fsum += f;
+                        }
+                        o => return rt(format!("sum() over {}", o.type_name())),
+                    }
+                }
+                Ok(if any_float {
+                    Val::Float(fsum)
+                } else {
+                    Val::Int(isum)
+                })
+            }
+            "avg" => {
+                if vals.is_empty() {
+                    return Ok(Val::Null);
+                }
+                let mut s = 0.0;
+                for v in &vals {
+                    match v.as_f64() {
+                        Some(f) => s += f,
+                        None => return rt(format!("avg() over {}", v.type_name())),
+                    }
+                }
+                Ok(Val::Float(s / vals.len() as f64))
+            }
+            "stdev" | "stdevp" => {
+                let xs: Vec<f64> = vals.iter().filter_map(Val::as_f64).collect();
+                let n = xs.len() as f64;
+                if xs.len() < 2 {
+                    return Ok(Val::Float(0.0));
+                }
+                let mean = xs.iter().sum::<f64>() / n;
+                let ss: f64 = xs.iter().map(|x| (x - mean).powi(2)).sum();
+                let d = if name == "stdev" { n - 1.0 } else { n };
+                Ok(Val::Float((ss / d).sqrt()))
+            }
+            "percentilecont" | "percentiledisc" => {
+                let p = match args.get(1) {
+                    Some(e) => {
+                        let first = rows.first().cloned().unwrap_or_default();
+                        self.eval(e, &first)?.as_f64()
+                    }
+                    None => None,
+                };
+                let Some(p) = p.filter(|p| (0.0..=1.0).contains(p)) else {
+                    return rt("percentile must be a number between 0.0 and 1.0");
+                };
+                let mut xs: Vec<f64> = vals.iter().filter_map(Val::as_f64).collect();
+                if xs.is_empty() {
+                    return Ok(Val::Null);
+                }
+                xs.sort_by(|a, b| a.total_cmp(b));
+                if name == "percentiledisc" {
+                    let idx = (p * (xs.len() - 1) as f64).round() as usize;
+                    Ok(Val::Float(xs[idx]))
+                } else {
+                    let pos = p * (xs.len() - 1) as f64;
+                    let lo = pos.floor() as usize;
+                    let hi = pos.ceil() as usize;
+                    Ok(Val::Float(xs[lo] + (xs[hi] - xs[lo]) * (pos - lo as f64)))
+                }
+            }
+            _ => sem(format!("unknown aggregate {name}")),
+        }
+    }
+
+    fn scalar(&mut self, lname: &str, name: &str, a: &[Val]) -> QResult<Val> {
+        match lname {
+            "id" | "elementid" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::Node(n) => Ok(if lname == "id" {
+                        Val::Int(n.0 as i64)
+                    } else {
+                        Val::Str(n.0.to_string())
+                    }),
+                    Val::Rel(r) => Ok(if lname == "id" {
+                        Val::Int(r.0 as i64)
+                    } else {
+                        Val::Str(r.0.to_string())
+                    }),
+                    o => rt(format!(
+                        "id() expects a node or relationship, got {}",
+                        o.type_name()
+                    )),
+                }
+            }
+            "labels" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::Node(id) => Ok(match self.node(*id)? {
+                        Some(n) => Val::List(n.labels.iter().cloned().map(Val::Str).collect()),
+                        None => Val::Null,
+                    }),
+                    o => rt(format!("labels() expects a node, got {}", o.type_name())),
+                }
+            }
+            "type" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::Rel(id) => Ok(match self.rel(*id)? {
+                        Some(r) => Val::Str(r.rel_type.clone()),
+                        None => Val::Null,
+                    }),
+                    o => rt(format!(
+                        "type() expects a relationship, got {}",
+                        o.type_name()
+                    )),
+                }
+            }
+            "keys" | "properties" => {
+                need(name, a, 1)?;
+                let props = match &a[0] {
+                    Val::Null => return Ok(Val::Null),
+                    Val::Node(id) => self.node(*id)?.map(|n| n.props.clone()).unwrap_or_default(),
+                    Val::Rel(id) => self.rel(*id)?.map(|n| n.props.clone()).unwrap_or_default(),
+                    Val::Map(m) => {
+                        return Ok(if lname == "keys" {
+                            Val::List(m.keys().cloned().map(Val::Str).collect())
+                        } else {
+                            Val::Map(m.clone())
+                        })
+                    }
+                    o => {
+                        return rt(format!(
+                            "{name}() expects an entity or map, got {}",
+                            o.type_name()
+                        ))
+                    }
+                };
+                Ok(if lname == "keys" {
+                    Val::List(props.keys().cloned().map(Val::Str).collect())
+                } else {
+                    Val::Map(
+                        props
+                            .iter()
+                            .map(|(k, v)| (k.clone(), Val::from(v)))
+                            .collect(),
+                    )
+                })
+            }
+            "size" | "length" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::List(l) => Ok(Val::Int(l.len() as i64)),
+                    Val::Str(s) => Ok(Val::Int(s.chars().count() as i64)),
+                    Val::Path(p) if lname == "length" => Ok(Val::Int(p.rels.len() as i64)),
+                    o => rt(format!("{name}() not defined for {}", o.type_name())),
+                }
+            }
+            "nodes" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::Path(p) => Ok(Val::List(p.nodes.iter().map(|n| Val::Node(*n)).collect())),
+                    o => rt(format!("nodes() expects a path, got {}", o.type_name())),
+                }
+            }
+            "relationships" | "rels" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::Path(p) => Ok(Val::List(p.rels.iter().map(|n| Val::Rel(*n)).collect())),
+                    o => rt(format!(
+                        "relationships() expects a path, got {}",
+                        o.type_name()
+                    )),
+                }
+            }
+            "startnode" | "endnode" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::Rel(id) => Ok(match self.rel(*id)? {
+                        Some(r) => Val::Node(if lname == "startnode" { r.src } else { r.dst }),
+                        None => Val::Null,
+                    }),
+                    o => rt(format!(
+                        "{name}() expects a relationship, got {}",
+                        o.type_name()
+                    )),
+                }
+            }
+            "head" | "last" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::List(l) => Ok(if lname == "head" { l.first() } else { l.last() }
+                        .cloned()
+                        .unwrap_or(Val::Null)),
+                    o => rt(format!("{name}() expects a List, got {}", o.type_name())),
+                }
+            }
+            "tail" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::List(l) => Ok(Val::List(l.iter().skip(1).cloned().collect())),
+                    o => rt(format!("tail() expects a List, got {}", o.type_name())),
+                }
+            }
+            "range" => {
+                need_range(name, a, 2, 3)?;
+                if a.iter().any(Val::is_null) {
+                    return Ok(Val::Null);
+                }
+                let lo = int_of(name, &a[0])?;
+                let hi = int_of(name, &a[1])?;
+                let step = if a.len() == 3 {
+                    int_of(name, &a[2])?
+                } else {
+                    1
+                };
+                if step == 0 {
+                    return rt("range() step must not be zero");
+                }
+                let mut out = Vec::new();
+                let mut x = lo;
+                while (step > 0 && x <= hi) || (step < 0 && x >= hi) {
+                    out.push(Val::Int(x));
+                    x += step;
+                }
+                Ok(Val::List(out))
+            }
+            "tointeger" => {
+                need(name, a, 1)?;
+                Ok(match &a[0] {
+                    Val::Int(i) => Val::Int(*i),
+                    Val::Float(f) if f.is_finite() => Val::Int(*f as i64),
+                    Val::Str(s) => {
+                        let t = s.trim();
+                        match t.parse::<i64>() {
+                            Ok(i) => Val::Int(i),
+                            Err(_) => t
+                                .parse::<f64>()
+                                .ok()
+                                .filter(|f| f.is_finite())
+                                .map_or(Val::Null, |f| Val::Int(f as i64)),
+                        }
+                    }
+                    Val::Bool(b) => Val::Int(i64::from(*b)),
+                    _ => Val::Null,
+                })
+            }
+            "tofloat" => {
+                need(name, a, 1)?;
+                Ok(match &a[0] {
+                    Val::Int(i) => Val::Float(*i as f64),
+                    Val::Float(f) => Val::Float(*f),
+                    Val::Str(s) => s.trim().parse::<f64>().map_or(Val::Null, Val::Float),
+                    _ => Val::Null,
+                })
+            }
+            "tostring" => {
+                need(name, a, 1)?;
+                Ok(match &a[0] {
+                    Val::Null => Val::Null,
+                    v => to_text(v).map_or(Val::Null, Val::Str),
+                })
+            }
+            "toboolean" => {
+                need(name, a, 1)?;
+                Ok(match &a[0] {
+                    Val::Bool(b) => Val::Bool(*b),
+                    Val::Str(s) if s.eq_ignore_ascii_case("true") => Val::Bool(true),
+                    Val::Str(s) if s.eq_ignore_ascii_case("false") => Val::Bool(false),
+                    _ => Val::Null,
+                })
+            }
+            "tolower" | "toupper" | "trim" | "ltrim" | "rtrim" => {
+                need(name, a, 1)?;
+                Ok(match str_of(name, &a[0])? {
+                    None => Val::Null,
+                    Some(s) => Val::Str(match lname {
+                        "tolower" => s.to_lowercase(),
+                        "toupper" => s.to_uppercase(),
+                        "trim" => s.trim().to_string(),
+                        "ltrim" => s.trim_start().to_string(),
+                        _ => s.trim_end().to_string(),
+                    }),
+                })
+            }
+            "replace" => {
+                need(name, a, 3)?;
+                match (
+                    str_of(name, &a[0])?,
+                    str_of(name, &a[1])?,
+                    str_of(name, &a[2])?,
+                ) {
+                    (Some(s), Some(f), Some(t)) => Ok(Val::Str(s.replace(f, t))),
+                    _ => Ok(Val::Null),
+                }
+            }
+            "split" => {
+                need(name, a, 2)?;
+                match (str_of(name, &a[0])?, str_of(name, &a[1])?) {
+                    (Some(s), Some(d)) => Ok(Val::List(
+                        if d.is_empty() {
+                            s.chars().map(|c| c.to_string()).collect::<Vec<_>>()
+                        } else {
+                            s.split(d).map(String::from).collect()
+                        }
+                        .into_iter()
+                        .map(Val::Str)
+                        .collect(),
+                    )),
+                    _ => Ok(Val::Null),
+                }
+            }
+            "substring" => {
+                need_range(name, a, 2, 3)?;
+                let Some(s) = str_of(name, &a[0])? else {
+                    return Ok(Val::Null);
+                };
+                if a[1..].iter().any(Val::is_null) {
+                    return Ok(Val::Null);
+                }
+                let start = int_of(name, &a[1])?;
+                if start < 0 {
+                    return rt("substring() start must not be negative");
+                }
+                let it = s.chars().skip(start as usize);
+                Ok(Val::Str(if a.len() == 3 {
+                    let len = int_of(name, &a[2])?;
+                    if len < 0 {
+                        return rt("substring() length must not be negative");
+                    }
+                    it.take(len as usize).collect()
+                } else {
+                    it.collect()
+                }))
+            }
+            "left" | "right" => {
+                need(name, a, 2)?;
+                let Some(s) = str_of(name, &a[0])? else {
+                    return Ok(Val::Null);
+                };
+                if a[1].is_null() {
+                    return Ok(Val::Null);
+                }
+                let n = int_of(name, &a[1])?.max(0) as usize;
+                let chars: Vec<char> = s.chars().collect();
+                let n = n.min(chars.len());
+                Ok(Val::Str(if lname == "left" {
+                    chars[..n].iter().collect()
+                } else {
+                    chars[chars.len() - n..].iter().collect()
+                }))
+            }
+            "reverse" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::Str(s) => Ok(Val::Str(s.chars().rev().collect())),
+                    Val::List(l) => Ok(Val::List(l.iter().rev().cloned().collect())),
+                    o => rt(format!("reverse() not defined for {}", o.type_name())),
+                }
+            }
+            "abs" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::Int(i) => i
+                        .checked_abs()
+                        .map(Val::Int)
+                        .ok_or_else(|| QueryError::Runtime("integer overflow".into())),
+                    Val::Float(f) => Ok(Val::Float(f.abs())),
+                    o => rt(format!("abs() expects a number, got {}", o.type_name())),
+                }
+            }
+            "ceil" => {
+                need(name, a, 1)?;
+                float1(name, &a[0], f64::ceil)
+            }
+            "floor" => {
+                need(name, a, 1)?;
+                float1(name, &a[0], f64::floor)
+            }
+            "round" => {
+                need_range(name, a, 1, 2)?;
+                if a.len() == 2 {
+                    let p = int_of(name, &a[1])?;
+                    let m = 10f64.powi(p as i32);
+                    return float1(name, &a[0], |x| (x * m).round() / m);
+                }
+                float1(name, &a[0], f64::round)
+            }
+            "sqrt" => {
+                need(name, a, 1)?;
+                float1(name, &a[0], f64::sqrt)
+            }
+            "exp" => {
+                need(name, a, 1)?;
+                float1(name, &a[0], f64::exp)
+            }
+            "log" => {
+                need(name, a, 1)?;
+                float1(name, &a[0], f64::ln)
+            }
+            "log10" => {
+                need(name, a, 1)?;
+                float1(name, &a[0], f64::log10)
+            }
+            "sin" => {
+                need(name, a, 1)?;
+                float1(name, &a[0], f64::sin)
+            }
+            "cos" => {
+                need(name, a, 1)?;
+                float1(name, &a[0], f64::cos)
+            }
+            "tan" => {
+                need(name, a, 1)?;
+                float1(name, &a[0], f64::tan)
+            }
+            "sign" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::Int(i) => Ok(Val::Int(i.signum())),
+                    Val::Float(f) => Ok(Val::Int(if *f > 0.0 {
+                        1
+                    } else if *f < 0.0 {
+                        -1
+                    } else {
+                        0
+                    })),
+                    o => rt(format!("sign() expects a number, got {}", o.type_name())),
+                }
+            }
+            "pi" => Ok(Val::Float(std::f64::consts::PI)),
+            "e" => Ok(Val::Float(std::f64::consts::E)),
+            "rand" => {
+                self.nondet = true;
+                Ok(Val::Float(self.next_rand()))
+            }
+            "timestamp" => {
+                self.nondet = true;
+                let ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                Ok(Val::Int(ms))
+            }
+            "exists" => {
+                need(name, a, 1)?;
+                Ok(Val::Bool(!a[0].is_null()))
+            }
+            "isempty" => {
+                need(name, a, 1)?;
+                match &a[0] {
+                    Val::Null => Ok(Val::Null),
+                    Val::List(l) => Ok(Val::Bool(l.is_empty())),
+                    Val::Str(s) => Ok(Val::Bool(s.is_empty())),
+                    Val::Map(m) => Ok(Val::Bool(m.is_empty())),
+                    o => rt(format!("isEmpty() not defined for {}", o.type_name())),
+                }
+            }
+            "nullif" => {
+                need(name, a, 2)?;
+                Ok(if crate::val::equals(&a[0], &a[1]) == Some(true) {
+                    Val::Null
+                } else {
+                    a[0].clone()
+                })
+            }
+            _ => sem(format!("Unknown function '{name}'")),
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn empty_path() -> PathVal {
+    PathVal {
+        nodes: Vec::new(),
+        rels: Vec::new(),
+    }
+}

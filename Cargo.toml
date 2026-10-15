@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/uriel-core",
+    "crates/uriel-cypher",
+    "crates/uriel-cache",
+    "crates/uriel-algo",
+    "crates/uriel-query",
+    "crates/uriel-mcp",
+    "crates/uriel-rag",
+    "crates/uriel-house",
+    "crates/uriel-tier",
+    "crates/uriel-kv",
+    "crates/uriel-topo",
+    "crates/uriel-place",
+    "crates/uriel-sys",
+    "crates/uriel-host",
+    "crates/uriel-bench",
+    "crates/uriel-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+
+
+
+
+

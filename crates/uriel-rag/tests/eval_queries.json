@@ -1,0 +1,606 @@
+{
+  "corpus_sha256": "d0b2c76e3d4687e3f4c9618aa73fac2bea91f5259ecf18d1a187694147005652",
+  "files": 207,
+  "queries": [
+    {
+      "file": "seal-algo/src/centrality.rs",
+      "name": "pagerank",
+      "query": "by power iteration Dangling nodes outgoing weight redistribute their mass uniformly so the scores always sum to 1 Parallel arcs add up self loops are ordinary links Complexity time memory",
+      "signature_line": 63
+    },
+    {
+      "file": "seal-algo/src/centrality.rs",
+      "name": "degree_centrality",
+      "query": "the number of arcs their weight sum when and the projection is weighted per node Parallel arcs and self loops count Complexity",
+      "signature_line": 183
+    },
+    {
+      "file": "seal-algo/src/centrality.rs",
+      "name": "closeness_centrality",
+      "query": "from out-arc distances With nodes reachable from and distance sum the score is with it is additionally multiplied by which keeps disconnected graphs comparable Nodes that reach nothing score 0 Direction follows out-arcs Complexity time memory",
+      "signature_line": 383
+    },
+    {
+      "file": "seal-algo/src/community.rs",
+      "name": "modularity",
+      "query": "Newman of a partition is the community label of node values Arcs are treated as undirected edges a self loop of weight adds to both its community's internal and total degree Returns 0 for a graph without edge weight With on unweighted projections every edge has weight 1 Errors if or a used weight is negative Complexity",
+      "signature_line": 55
+    },
+    {
+      "file": "seal-algo/src/community.rs",
+      "name": "aggregate",
+      "query": "Collapses each community into one node",
+      "signature_line": 211
+    },
+    {
+      "file": "seal-algo/src/components.rs",
+      "name": "weakly_connected_components",
+      "query": "via union-find halving union by size Direction is ignored Returns for every node the smallest node id in its component Complexity time memory",
+      "signature_line": 25
+    },
+    {
+      "file": "seal-algo/src/flow.rs",
+      "name": "max_flow",
+      "query": "Dinic's maximum-flow algorithm Arc weights are capacities on unweighted projections every arc is an independent directed arc so an undirected edge allows in either direction Parallel arcs add up and self loops are ignored Errors if and for a negative capacity Complexity worst case on unit-capacity bipartite networks memory The blocking-flow search is iterative",
+      "signature_line": 34
+    },
+    {
+      "file": "seal-algo/src/paths.rs",
+      "name": "dijkstra_core",
+      "query": "with optional early exit and optional exclusions Yen Weights must already be validated as non-negative",
+      "signature_line": 101
+    },
+    {
+      "file": "seal-algo/src/paths.rs",
+      "name": "dijkstra_path",
+      "query": "Shortest from to stopping as soon as is settled if is unreachable Same complexity and errors as",
+      "signature_line": 159
+    },
+    {
+      "file": "seal-algo/src/paths.rs",
+      "name": "yen_k_shortest_paths",
+      "query": "Yen's algorithm the simple from to cheapest first Fewer than are returned if fewer exist are distinct as node sequences between parallel arcs the cheapest is used Errors as weights required Complexity time",
+      "signature_line": 282
+    },
+    {
+      "file": "seal-algo/src/projection.rs",
+      "name": "edge_count",
+      "query": "Number of logical edges undirected counts once",
+      "signature_line": 120
+    },
+    {
+      "file": "seal-algo/src/projection.rs",
+      "name": "out_neighbors",
+      "query": "Out-neighbours of sorted ascending arcs repeat Panics if",
+      "signature_line": 145
+    },
+    {
+      "file": "seal-algo/src/projection.rs",
+      "name": "in_edges",
+      "query": "In-arcs of as the weight is when unweighted",
+      "signature_line": 194
+    },
+    {
+      "file": "seal-algo/src/projection.rs",
+      "name": "edges",
+      "query": "Every logical edge once as Undirected are reported with",
+      "signature_line": 218
+    },
+    {
+      "file": "seal-algo/src/projection.rs",
+      "name": "weighted",
+      "query": "Forces the projection to carry weights weight for plain edges",
+      "signature_line": 287
+    },
+    {
+      "file": "seal-algo/src/projection.rs",
+      "name": "aggregate",
+      "query": "Merges runs of arcs with equal input must be sorted",
+      "signature_line": 364
+    },
+    {
+      "file": "seal-algo/src/rng.rs",
+      "name": "gen_range",
+      "query": "Uniform integer in Panics if Uses Lemire's multiply-shift with rejection so it is unbiased",
+      "signature_line": 44
+    },
+    {
+      "file": "seal-algo/src/similarity.rs",
+      "name": "cosine_similarity",
+      "query": "of the out-neighbour vectors of and binary indicator vectors or arc-weight vectors when and the projection is weighted 0 if either is empty Complexity",
+      "signature_line": 153
+    },
+    {
+      "file": "seal-algo/src/spanning.rs",
+      "name": "kruskal_mst",
+      "query": "Kruskal's algorithm sort edges by weight and add those that join two different components Yields a minimum spanning forest when the graph is disconnected Complexity time memory",
+      "signature_line": 31
+    },
+    {
+      "file": "seal-algo/src/traversal.rs",
+      "name": "dfs",
+      "query": "Depth-first search along out-arcs from iterative recursion so arbitrarily deep graphs are safe is the preorder neighbours are explored in ascending id order Complexity time memory",
+      "signature_line": 57
+    },
+    {
+      "file": "seal-algo/src/triangles.rs",
+      "name": "k_core_decomposition",
+      "query": "k-core bucket peeling Returns each node's number the largest such that the node lies in a subgraph where every node has degree at least Complexity time and memory",
+      "signature_line": 133
+    },
+    {
+      "file": "seal-algo/tests/common/mod.rs",
+      "name": "random_edges",
+      "query": "Seeded edge list and self loops possible with weights in",
+      "signature_line": 265
+    },
+    {
+      "file": "seal-algo/tests/components.rs",
+      "name": "flood_labels",
+      "query": "fill over the undirected view independent of the union-find under test",
+      "signature_line": 42
+    },
+    {
+      "file": "seal-algo/tests/paths.rs",
+      "name": "path_cost",
+      "query": "of a node using the cheapest parallel arc at every hop",
+      "signature_line": 53
+    },
+    {
+      "file": "seal-algo/tests/structure.rs",
+      "name": "peel_oracle",
+      "query": "Reference repeatedly delete nodes of degree k largest k that keeps v",
+      "signature_line": 159
+    },
+    {
+      "file": "seal-algo/tests/tree_walk_flow.rs",
+      "name": "clrs_flow",
+      "query": "fig 26.6 s=0 v1=1 v2=2 v3=3 v4=4 t=5 max 23",
+      "signature_line": 222
+    },
+    {
+      "file": "seal-cache/src/dist.rs",
+      "name": "call",
+      "query": "One round trip connect included bounded by",
+      "signature_line": 107
+    },
+    {
+      "file": "seal-cache/src/dist.rs",
+      "name": "broadcast",
+      "query": "Send to every address concurrently all calls share one deadline",
+      "signature_line": 262
+    },
+    {
+      "file": "seal-cache/src/dist.rs",
+      "name": "put",
+      "query": "Store locally and on the owner replicas Returns remote replicas that acked",
+      "signature_line": 366
+    },
+    {
+      "file": "seal-cache/src/dist.rs",
+      "name": "silent_peer",
+      "query": "A that accepts connections and never answers",
+      "signature_line": 458
+    },
+    {
+      "file": "seal-cache/src/local.rs",
+      "name": "rebalance",
+      "query": "Move window overflow into the main segment through the gate",
+      "signature_line": 367
+    },
+    {
+      "file": "seal-cache/src/local.rs",
+      "name": "invalidate_tag_before",
+      "query": "Drop entries carrying whose epoch is and refuse later inserts for that older than Returns the number removed",
+      "signature_line": 491
+    },
+    {
+      "file": "seal-cache/src/membership.rs",
+      "name": "version",
+      "query": "Increases on every accepted change to the table",
+      "signature_line": 165
+    },
+    {
+      "file": "seal-cache/src/membership.rs",
+      "name": "expire",
+      "query": "Promote overdue suspects to dead reap old tombstones returns new deaths",
+      "signature_line": 271
+    },
+    {
+      "file": "seal-cache/src/membership.rs",
+      "name": "leave_and_stop",
+      "query": "Announce a voluntary to all live peers then",
+      "signature_line": 669
+    },
+    {
+      "file": "seal-cache/src/node.rs",
+      "name": "local_addr",
+      "query": "The address peers use for both gossip and cache requests",
+      "signature_line": 169
+    },
+    {
+      "file": "seal-cache/src/node.rs",
+      "name": "shutdown",
+      "query": "Announce departure to live peers then stop serving",
+      "signature_line": 187
+    },
+    {
+      "file": "seal-cache/src/ring.rs",
+      "name": "add_node",
+      "query": "Returns if the was already present",
+      "signature_line": 66
+    },
+    {
+      "file": "seal-cache/src/ring.rs",
+      "name": "distribution_is_even",
+      "query": "Stated bound with 128 vnodes and 5 nodes key load 1.5",
+      "signature_line": 211
+    },
+    {
+      "file": "seal-core/src/graph.rs",
+      "name": "publish",
+      "query": "Publishes a commit advances the epoch and notifies subscribers Called while the writer gate is still held so notifications are totally ordered by epoch",
+      "signature_line": 125
+    },
+    {
+      "file": "seal-core/src/graph.rs",
+      "name": "open_with",
+      "query": "Opens if absent the database at Fails if the file is already in this or another process and if it was written by an incompatible version",
+      "signature_line": 170
+    },
+    {
+      "file": "seal-core/src/graph.rs",
+      "name": "begin_write",
+      "query": "Starts the transaction waiting until any other transaction has committed or been dropped Dropping the returned without rolls everything back",
+      "signature_line": 277
+    },
+    {
+      "file": "seal-core/src/graph.rs",
+      "name": "unsubscribe",
+      "query": "Removes a subscription Returns if it was already removed",
+      "signature_line": 314
+    },
+    {
+      "file": "seal-core/src/graph.rs",
+      "name": "drop_index",
+      "query": "Drops a property in its own transaction See",
+      "signature_line": 338
+    },
+    {
+      "file": "seal-core/src/graph.rs",
+      "name": "create_exists_constraint",
+      "query": "Creates an existence in its own transaction See",
+      "signature_line": 355
+    },
+    {
+      "file": "seal-core/src/keys.rs",
+      "name": "check_name",
+      "query": "Rejects empty names and names containing",
+      "signature_line": 27
+    },
+    {
+      "file": "seal-core/src/keys.rs",
+      "name": "name_id_key",
+      "query": "used for the label and type indexes",
+      "signature_line": 91
+    },
+    {
+      "file": "seal-core/src/keys.rs",
+      "name": "label_count_key",
+      "query": "in the counts table for a",
+      "signature_line": 213
+    },
+    {
+      "file": "seal-core/src/read.rs",
+      "name": "index_bounds",
+      "query": "Key range inside the property table for if the range is empty",
+      "signature_line": 169
+    },
+    {
+      "file": "seal-core/src/read.rs",
+      "name": "get_node",
+      "query": "Fetches a or if it does not exist",
+      "signature_line": 322
+    },
+    {
+      "file": "seal-core/src/read.rs",
+      "name": "all_rels",
+      "query": "Iterates every relationship in id order",
+      "signature_line": 353
+    },
+    {
+      "file": "seal-core/src/read.rs",
+      "name": "nodes_by_prop",
+      "query": "with whose property equals compare by value so matches in id order Uses the index when one exists and scans the label otherwise the result is identical either way",
+      "signature_line": 404
+    },
+    {
+      "file": "seal-core/src/read.rs",
+      "name": "in_rels",
+      "query": "Incoming relationships of optionally only of",
+      "signature_line": 550
+    },
+    {
+      "file": "seal-core/src/read.rs",
+      "name": "list_constraints",
+      "query": "All sorted by label key then kind before exists",
+      "signature_line": 582
+    },
+    {
+      "file": "seal-core/src/read.rs",
+      "name": "schema_sampled",
+      "query": "of this snapshot inspecting at most nodes per label and relationships per type for property keys and value types Counts are always exact",
+      "signature_line": 605
+    },
+    {
+      "file": "seal-core/src/value.rs",
+      "name": "number_parts",
+      "query": "Splits a into such that comparing the pairs lexicographically equals comparing the exact mathematical values Floats and integers with magnitude up to 2^53 have remainder 0",
+      "signature_line": 96
+    },
+    {
+      "file": "seal-core/src/value.rs",
+      "name": "depth",
+      "query": "Nesting 0 for scalars and vectors for lists and maps empty collection has 1",
+      "signature_line": 165
+    },
+    {
+      "file": "seal-core/src/value.rs",
+      "name": "from_json",
+      "query": "Parses the produced by Any other is accepted too integers that fit become other numbers objects",
+      "signature_line": 283
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "merge_props",
+      "query": "Validates and merges it into removes a key",
+      "signature_line": 83
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "touched",
+      "query": "Labels and relationship types modified so far in this transaction",
+      "signature_line": 232
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "out_edges",
+      "query": "Outgoing adjacency of including uncommitted changes",
+      "signature_line": 262
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "node_ids_by_label",
+      "query": "of nodes carrying including uncommitted changes",
+      "signature_line": 272
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "apply_node_change",
+      "query": "Moves a from state to state does not exist updating the record label index property indexes counters and touched set",
+      "signature_line": 381
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "set_node_props",
+      "query": "Merges into the node's properties listed keys are removes a key other keys are kept",
+      "signature_line": 474
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "detach_delete_node",
+      "query": "Deletes a together with all its incoming and outgoing relationships",
+      "signature_line": 529
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "set_rel_props",
+      "query": "Merges into the relationship's properties removes a key",
+      "signature_line": 590
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "first_duplicate",
+      "query": "two nodes holding an equal value under scanning the index",
+      "signature_line": 750
+    },
+    {
+      "file": "seal-core/src/write.rs",
+      "name": "drop_constraint",
+      "query": "Drops a For a unique that created its own backing index the index is dropped too an index that existed beforehand is kept",
+      "signature_line": 873
+    },
+    {
+      "file": "seal-cypher/src/ast.rs",
+      "name": "write_var",
+      "query": "Variable-like identifier also quote reserved words",
+      "signature_line": 792
+    },
+    {
+      "file": "seal-cypher/src/error.rs",
+      "name": "line_col",
+      "query": "Computes the 1-based column of byte offset in",
+      "signature_line": 47
+    },
+    {
+      "file": "seal-cypher/src/lib.rs",
+      "name": "parse",
+      "query": "Parses a single Cypher statement optional trailing is allowed",
+      "signature_line": 26
+    },
+    {
+      "file": "seal-cypher/src/parser.rs",
+      "name": "parse_name",
+      "query": "Any identifier reserved words included types keys",
+      "signature_line": 171
+    },
+    {
+      "file": "seal-cypher/src/parser.rs",
+      "name": "parse_subscript",
+      "query": "After index or slice consumes the closing",
+      "signature_line": 485
+    },
+    {
+      "file": "seal-cypher/src/parser.rs",
+      "name": "parse_bracket",
+      "query": "At list literal list comprehension or pattern comprehension",
+      "signature_line": 828
+    },
+    {
+      "file": "seal-cypher/tests/fuzz.rs",
+      "name": "run_bounded",
+      "query": "Runs on a thread with the default 2 test stack and fails if it panics overflows the stack aborts the process or runs too long",
+      "signature_line": 29
+    },
+    {
+      "file": "seal-house/src/config.rs",
+      "name": "for_tier",
+      "query": "The slot an executing runs on residents Sonnet leaves nurses Haiku",
+      "signature_line": 49
+    },
+    {
+      "file": "seal-house/src/config.rs",
+      "name": "apply_env",
+      "query": "Applies the environment overrides sets the Dr House slot",
+      "signature_line": 128
+    },
+    {
+      "file": "seal-house/src/governor.rs",
+      "name": "wrap_command",
+      "query": "Wraps a shell for Windows set and below-normal priority",
+      "signature_line": 70
+    },
+    {
+      "file": "seal-house/src/house.rs",
+      "name": "evidence_test",
+      "query": "The that proves a parent the bound of its first live leaf descendant proven because the board demands a behind every",
+      "signature_line": 54
+    },
+    {
+      "file": "seal-house/src/house.rs",
+      "name": "submit_chart",
+      "query": "Validates as s own part and stores it replacing that fellow's previous A refuted goal's fellow spends one re-chart attempt per accepted",
+      "signature_line": 152
+    },
+    {
+      "file": "seal-house/src/house.rs",
+      "name": "next",
+      "query": "The batch ready goals that fit the governor and have no file conflicts Dispatched goals become",
+      "signature_line": 388
+    },
+    {
+      "file": "seal-house/src/house.rs",
+      "name": "status",
+      "query": "A snapshot for the board and the tool",
+      "signature_line": 758
+    },
+    {
+      "file": "seal-house/src/probe.rs",
+      "name": "new",
+      "query": "A probe with of free 8 cores 0 load",
+      "signature_line": 67
+    },
+    {
+      "file": "seal-house/src/sink.rs",
+      "name": "emit",
+      "query": "Handles one event Must not panic failures are the sink's to swallow or log",
+      "signature_line": 13
+    },
+    {
+      "file": "seal-house/src/smart.rs",
+      "name": "cache_key",
+      "query": "The result-cache of a test in the current tree",
+      "signature_line": 36
+    },
+    {
+      "file": "seal-house/src/state.rs",
+      "name": "is_done",
+      "query": "when a child no longer holds its parent open",
+      "signature_line": 210
+    },
+    {
+      "file": "seal-house/src/state.rs",
+      "name": "resolve_parents",
+      "query": "Resolves every non-leaf whose children are all done and which owes no integration test Returns the ids resolved deepest first",
+      "signature_line": 231
+    },
+    {
+      "file": "seal-house/src/types.rs",
+      "name": "new",
+      "query": "Builds an id from any string-like value",
+      "signature_line": 19
+    },
+    {
+      "file": "seal-house/src/types.rs",
+      "name": "token_cap",
+      "query": "per leaf for this tier the means decompose further",
+      "signature_line": 138
+    },
+    {
+      "file": "seal-house/src/types.rs",
+      "name": "is_heavy",
+      "query": "for classes under the global cap",
+      "signature_line": 376
+    },
+    {
+      "file": "seal-house/tests/common/mod.rs",
+      "name": "merged",
+      "query": "Needs stated and the foreman chart",
+      "signature_line": 129
+    },
+    {
+      "file": "seal-query/src/analyze.rs",
+      "name": "write_kind",
+      "query": "Name of the first clause in the statement if any",
+      "signature_line": 8
+    },
+    {
+      "file": "seal-query/src/ctx.rs",
+      "name": "seek",
+      "query": "Index on the committed snapshot when no index applies in write mode",
+      "signature_line": 149
+    },
+    {
+      "file": "seal-query/src/eval.rs",
+      "name": "truth",
+      "query": "Interprets a value as a boolean for null stays null",
+      "signature_line": 36
+    },
+    {
+      "file": "seal-query/src/lib.rs",
+      "name": "to_json_rows",
+      "query": "An array of objects the shape returned by the official server Values use",
+      "signature_line": 130
+    },
+    {
+      "file": "seal-query/src/lib.rs",
+      "name": "with_dist_cache",
+      "query": "Additionally stores and looks up read results in a distributed The calls are bridged a small current-thread runtime owned by the engine",
+      "signature_line": 209
+    },
+    {
+      "file": "seal-query/src/matcher.rs",
+      "name": "equality_keys",
+      "query": "predicates that constrain in the pattern map or the conjuncts the raw material of index seeks",
+      "signature_line": 41
+    },
+    {
+      "file": "seal-query/src/plan.rs",
+      "name": "explain",
+      "query": "Renders the operator tree root first one operator per line",
+      "signature_line": 13
+    },
+    {
+      "file": "seal-query/src/val.rs",
+      "name": "order_cmp",
+      "query": "Total used by grouping and Ascending maps nodes relationships lists paths strings booleans numbers last among numbers then null",
+      "signature_line": 145
+    },
+    {
+      "file": "seal-query/src/val.rs",
+      "name": "fmt_float",
+      "query": "Renders a the way Cypher prints it not",
+      "signature_line": 299
+    }
+  ]
+}

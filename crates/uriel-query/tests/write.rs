@@ -1,0 +1,537 @@
+mod common;
+use std::collections::BTreeMap;
+
+use common::*;
+use uriel_core::Value;
+use uriel_query::{AccessMode, Engine, QueryError};
+
+#[test]
+fn create_reports_stats() {
+    let e = Engine::open_in_memory().unwrap();
+    let r = write(&e, "CREATE (n:Person:Admin {name:'X', age:1})");
+    assert_eq!(r.stats.nodes_created, 1);
+    assert_eq!(r.stats.labels_added, 2);
+    assert_eq!(r.stats.properties_set, 2);
+    let r = write(&e, "CREATE (a:A {v:1})-[:R {w:2}]->(b:B) RETURN a.v, b");
+    assert_eq!(r.stats.nodes_created, 2);
+    assert_eq!(r.stats.rels_created, 1);
+    assert_eq!(r.stats.properties_set, 2);
+    assert_eq!(r.columns, vec!["a.v", "b"]);
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(count_nodes(&e), 3);
+}
+
+#[test]
+fn create_returns_values_in_write_mode() {
+    let e = Engine::open_in_memory().unwrap();
+    let r = write(&e, "CREATE (n:T {x:1}) RETURN n.x");
+    assert_eq!(render(&r), vec!["[1]"]);
+    let r = write(
+        &e,
+        "UNWIND range(1,3) AS i CREATE (:Num {v:i}) RETURN count(*)",
+    );
+    assert_eq!(render(&r), vec!["[3]"]);
+    assert_eq!(r.stats.nodes_created, 3);
+    check(&e, "MATCH (n:Num) RETURN sum(n.v)", &["[6]"]);
+    let r = write(
+        &e,
+        "CREATE (a:P {n:1}), (b:P {n:2}), (a)-[:L]->(b) RETURN a.n, b.n",
+    );
+    assert_eq!(render(&r), vec!["[1,2]"]);
+    check(&e, "MATCH (a:P)-[:L]->(b:P) RETURN a.n, b.n", &["[1,2]"]);
+    // null properties are not stored
+    write(&e, "CREATE (:Nul {a: null, b: 1})");
+    check(&e, "MATCH (n:Nul) RETURN keys(n)", &["[[\"b\"]]"]);
+}
+
+#[test]
+fn merge_is_idempotent() {
+    let e = Engine::open_in_memory().unwrap();
+    let q = "MERGE (c:City {name:'Rome'}) ON CREATE SET c.created = true ON MATCH SET c.seen = true RETURN c.created, c.seen";
+    let r1 = write(&e, q);
+    assert_eq!(render(&r1), vec!["[true,null]"]);
+    assert_eq!(r1.stats.nodes_created, 1);
+    assert_eq!(count_nodes(&e), 1);
+    let r2 = write(&e, q);
+    assert_eq!(render(&r2), vec!["[true,true]"]);
+    assert_eq!(r2.stats.nodes_created, 0);
+    assert_eq!(count_nodes(&e), 1);
+
+    let e = fixture();
+    let before = count_rels(&e);
+    let q = "MATCH (a:Person {name:'Alice'}),(b:Person {name:'Dave'}) MERGE (a)-[r:FRIEND]->(b)";
+    write(&e, q);
+    assert_eq!(count_rels(&e), before + 1);
+    write(&e, q);
+    assert_eq!(count_rels(&e), before + 1);
+
+    write(&e, "UNWIND [1,1,2,2,2] AS x MERGE (:Num {v:x})");
+    check(&e, "MATCH (n:Num) RETURN count(n)", &["[2]"]);
+    // MERGE of a whole path creates only what is missing
+    let n = count_nodes(&e);
+    write(
+        &e,
+        "MATCH (a:Person {name:'Alice'}) MERGE (a)-[:LIVES_IN]->(c:City {name:'London'})",
+    );
+    assert_eq!(count_nodes(&e), n + 1);
+    write(
+        &e,
+        "MATCH (a:Person {name:'Alice'}) MERGE (a)-[:LIVES_IN]->(c:City {name:'London'})",
+    );
+    assert_eq!(count_nodes(&e), n + 1);
+    // MERGE binds an existing node
+    assert_eq!(
+        render(&write(&e, "MERGE (p:Person {name:'Bob'}) RETURN p.age")),
+        vec!["[25]"]
+    );
+    assert_eq!(count_nodes(&e), n + 1);
+    // MERGE with a null property is an error
+    assert!(run(&e, "MERGE (:Bad {k: null})").is_err());
+}
+
+#[test]
+fn set_and_remove() {
+    let e = fixture();
+    assert_eq!(
+        render(&write(
+            &e,
+            "MATCH (n:Person {name:'Frank'}) SET n.age = 50, n:Senior RETURN n.age, labels(n)"
+        )),
+        vec!["[50,[\"Person\",\"Senior\"]]"]
+    );
+    let r = write(&e, "MATCH (n:Person {name:'Frank'}) SET n.age = 51");
+    assert_eq!(r.stats.properties_set, 1);
+    let r = write(&e, "MATCH (n:Person {name:'Frank'}) SET n:Senior:Vip");
+    assert_eq!(r.stats.labels_added, 1);
+    write(&e, "MATCH (n:Person {name:'Eve'}) SET n = {name:'Eve2'}");
+    check(
+        &e,
+        "MATCH (n:Person {name:'Eve2'}) RETURN keys(n)",
+        &["[[\"name\"]]"],
+    );
+    write(&e, "MATCH (n:Person {name:'Dave'}) SET n += {x:1, age:99}");
+    check(
+        &e,
+        "MATCH (n:Person {name:'Dave'}) RETURN n.x, n.age, n.city",
+        &["[1,99,\"Berlin\"]"],
+    );
+    write(&e, "MATCH (n:Person {name:'Dave'}) SET n.x = null");
+    check(
+        &e,
+        "MATCH (n:Person {name:'Dave'}) RETURN n.x IS NULL, keys(n)",
+        &["[true,[\"age\",\"city\",\"name\"]]"],
+    );
+    write(
+        &e,
+        "MATCH ()-[r:KNOWS {since:2015}]->() SET r.since = 2016, r.close = true",
+    );
+    check(
+        &e,
+        "MATCH ()-[r:KNOWS]->() WHERE r.close RETURN r.since",
+        &["[2016]"],
+    );
+    write(
+        &e,
+        "MATCH (n:Person {name:'Alice'}) REMOVE n.city, n:Person",
+    );
+    check(
+        &e,
+        "MATCH (n {name:'Alice'}) RETURN keys(n), labels(n)",
+        &["[[\"age\",\"name\"],[]]"],
+    );
+    let r = write(&e, "MATCH (n:Senior) REMOVE n:Senior");
+    assert_eq!(r.stats.labels_removed, 1);
+    // SET sees its own earlier writes in the same query
+    assert_eq!(render(&write(&e, "MATCH (n:Movie {title:'Dune'}) SET n.year = n.year + 1 SET n.year = n.year * 2 RETURN n.year")), vec!["[4044]"]);
+}
+
+#[test]
+fn delete_and_detach_delete() {
+    let e = fixture();
+    let r = write(&e, "MATCH (n:Person {name:'Frank'}) DELETE n");
+    assert_eq!(r.stats.nodes_deleted, 1);
+    assert_eq!(count_nodes(&e), 8);
+    // a node with relationships cannot be deleted without DETACH, and nothing changes
+    let before = (count_nodes(&e), count_rels(&e));
+    assert!(run(&e, "MATCH (n:Person {name:'Alice'}) DELETE n").is_err());
+    assert_eq!((count_nodes(&e), count_rels(&e)), before);
+    let r = write(&e, "MATCH (n:Person {name:'Alice'}) DETACH DELETE n");
+    assert_eq!(r.stats.nodes_deleted, 1);
+    assert_eq!(r.stats.rels_deleted, 3); // KNOWS x2, ACTED_IN x1
+    assert_eq!(count_nodes(&e), 7);
+    let r = write(&e, "MATCH ()-[r:DIRECTED]->() DELETE r");
+    assert_eq!(r.stats.rels_deleted, 1);
+    // deleting a relationship and both ends in one clause is allowed
+    write(
+        &e,
+        "MATCH (a:Person {name:'Eve'})<-[r:KNOWS]-(b) DELETE r, a",
+    );
+    check(
+        &e,
+        "MATCH (n:Person {name:'Eve'}) RETURN count(n)",
+        &["[0]"],
+    );
+    write(&e, "MATCH (n) DETACH DELETE n");
+    assert_eq!(count_nodes(&e), 0);
+    assert_eq!(count_rels(&e), 0);
+}
+
+#[test]
+fn writes_are_atomic() {
+    let e = fixture();
+    write(
+        &e,
+        "CREATE CONSTRAINT person_email FOR (p:Person) REQUIRE p.email IS UNIQUE",
+    );
+    write(&e, "MATCH (n:Person {name:'Alice'}) SET n.email = 'a@x'");
+    let before = (count_nodes(&e), count_rels(&e));
+    let epoch = e.graph().epoch();
+    let err = run(
+        &e,
+        "CREATE (:Person {name:'Z1', email:'z@x'}) CREATE (:Person {name:'Z2', email:'z@x'})",
+    )
+    .unwrap_err();
+    assert!(matches!(err, QueryError::Core(_)), "{err}");
+    assert_eq!((count_nodes(&e), count_rels(&e)), before);
+    assert_eq!(e.graph().epoch(), epoch);
+    check(
+        &e,
+        "MATCH (n:Person) WHERE n.name STARTS WITH 'Z' RETURN count(n)",
+        &["[0]"],
+    );
+    // violation caused by a SET after earlier successful writes in the same query
+    let err = run(
+        &e,
+        "CREATE (:Marker) WITH 1 AS x MATCH (b:Person {name:'Bob'}) SET b.email = 'a@x'",
+    )
+    .unwrap_err();
+    assert!(matches!(err, QueryError::Core(_)));
+    check(&e, "MATCH (m:Marker) RETURN count(m)", &["[0]"]);
+    check(
+        &e,
+        "MATCH (b:Person {name:'Bob'}) RETURN b.email",
+        &["[null]"],
+    );
+    // runtime error mid-query
+    let err = run(
+        &e,
+        "CREATE (:X) WITH 1 AS one UNWIND [1,0] AS d RETURN one / d",
+    )
+    .unwrap_err();
+    assert!(matches!(err, QueryError::Runtime(_)), "{err}");
+    check(&e, "MATCH (x:X) RETURN count(x)", &["[0]"]);
+    // existence constraint
+    write(
+        &e,
+        "CREATE CONSTRAINT movie_title FOR (m:Movie) REQUIRE m.title IS NOT NULL",
+    );
+    assert!(run(&e, "CREATE (:Movie {year: 1})").is_err());
+    check(&e, "MATCH (m:Movie) RETURN count(m)", &["[3]"]);
+    // semantic error mid-write
+    assert!(run(&e, "CREATE (:Y) RETURN undefined_var").is_err());
+    check(&e, "MATCH (y:Y) RETURN count(y)", &["[0]"]);
+}
+
+#[test]
+fn read_only_rejection() {
+    let e = fixture();
+    let before = (count_nodes(&e), count_rels(&e));
+    for q in [
+        "CREATE (:X)",
+        "MERGE (:X {a:1})",
+        "MATCH (n:Person) SET n.a = 1",
+        "MATCH (n:Person) REMOVE n.age",
+        "MATCH (n:Person {name:'Frank'}) DELETE n",
+        "MATCH (n:Person) DETACH DELETE n",
+        "CREATE INDEX FOR (p:Person) ON (p.name)",
+        "CREATE CONSTRAINT FOR (p:Person) REQUIRE p.name IS UNIQUE",
+        "DROP INDEX nope IF EXISTS",
+        "DROP CONSTRAINT nope IF EXISTS",
+        "MATCH (n:Person) CALL { WITH n CREATE (:Y) } RETURN n",
+        "EXPLAIN CREATE (:X)",
+        "MATCH (n:Person) SET n:Extra",
+        "UNWIND [1] AS x CREATE (:Z {v: x}) RETURN x",
+    ] {
+        let err = e.execute(q, &no_params(), AccessMode::Read).unwrap_err();
+        assert!(
+            matches!(err, QueryError::ReadOnlyViolation(_)),
+            "{q}: {err}"
+        );
+    }
+    assert_eq!((count_nodes(&e), count_rels(&e)), before);
+    // reads and SHOW are fine in Read mode
+    assert!(e
+        .execute("SHOW INDEXES", &no_params(), AccessMode::Read)
+        .is_ok());
+    assert!(e
+        .execute("EXPLAIN MATCH (n) RETURN n", &no_params(), AccessMode::Read)
+        .is_ok());
+    assert!(e
+        .execute(
+            "MATCH (n:Person) RETURN n.name",
+            &no_params(),
+            AccessMode::Read
+        )
+        .is_ok());
+}
+
+#[test]
+fn parameters() {
+    let e = fixture();
+    let mut p = BTreeMap::new();
+    p.insert("name".to_string(), Value::from("Alice"));
+    let r = e
+        .execute(
+            "MATCH (n:Person {name:$name}) RETURN n.age",
+            &p,
+            AccessMode::Read,
+        )
+        .unwrap();
+    assert_eq!(render(&r), vec!["[30]"]);
+    let r = e
+        .execute(
+            "MATCH (n:Person) WHERE n.name = $name RETURN n.age",
+            &p,
+            AccessMode::Read,
+        )
+        .unwrap();
+    assert_eq!(render(&r), vec!["[30]"]);
+    p.insert(
+        "xs".to_string(),
+        Value::List(vec![Value::Int(1), Value::Int(2)]),
+    );
+    let r = e
+        .execute("UNWIND $xs AS x RETURN x + 1", &p, AccessMode::Read)
+        .unwrap();
+    assert_eq!(render(&r), vec!["[2]", "[3]"]);
+    p.insert("n".to_string(), Value::Int(2));
+    let r = e
+        .execute(
+            "MATCH (n:Person) RETURN n.name ORDER BY n.name LIMIT $n",
+            &p,
+            AccessMode::Read,
+        )
+        .unwrap();
+    assert_eq!(render(&r), vec!["[\"Alice\"]", "[\"Bob\"]"]);
+    let err = e
+        .execute("RETURN $missing", &no_params(), AccessMode::Read)
+        .unwrap_err();
+    assert!(matches!(err, QueryError::Semantic(_)));
+    let mut m = BTreeMap::new();
+    m.insert("name".to_string(), Value::from("Zed"));
+    m.insert("age".to_string(), Value::Int(3));
+    let mut p2 = BTreeMap::new();
+    p2.insert("props".to_string(), Value::Map(m));
+    e.execute("CREATE (n:Person $props)", &p2, AccessMode::Write)
+        .unwrap();
+    check(&e, "MATCH (n:Person {name:'Zed'}) RETURN n.age", &["[3]"]);
+}
+
+#[test]
+fn error_kinds() {
+    let e = fixture();
+    assert!(matches!(
+        run(&e, "MATCH (n RETURN n").unwrap_err(),
+        QueryError::Parse(_)
+    ));
+    assert!(matches!(
+        run(&e, "RETURN nope(1)").unwrap_err(),
+        QueryError::Semantic(_)
+    ));
+    assert!(matches!(
+        run(&e, "RETURN x").unwrap_err(),
+        QueryError::Semantic(_)
+    ));
+    assert!(matches!(
+        run(&e, "RETURN 1 / 0").unwrap_err(),
+        QueryError::Runtime(_)
+    ));
+    assert!(matches!(
+        run(&e, "RETURN 'a' - 1").unwrap_err(),
+        QueryError::Runtime(_)
+    ));
+    assert!(matches!(
+        run(&e, "RETURN 9223372036854775807 + 1").unwrap_err(),
+        QueryError::Runtime(_)
+    ));
+    assert!(matches!(
+        run(&e, "CALL no.such()").unwrap_err(),
+        QueryError::Semantic(_)
+    ));
+    assert!(matches!(
+        run(&e, "MATCH (n) RETURN n SKIP -1").unwrap_err(),
+        QueryError::Runtime(_)
+    ));
+    assert!(matches!(
+        run(&e, "RETURN 1 UNION RETURN 2 AS y").unwrap_err(),
+        QueryError::Semantic(_)
+    ));
+}
+
+#[test]
+fn schema_commands_and_index_use() {
+    let e = fixture();
+    let plan = |q: &str| -> String {
+        match &read(&e, q).rows[0][0] {
+            Value::String(s) => s.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let q1 = "EXPLAIN MATCH (p:Person {name:'Alice'}) RETURN p";
+    let q2 = "EXPLAIN MATCH (p:Person) WHERE p.name = 'Alice' RETURN p";
+    assert!(plan(q1).contains("NodeByLabelScan"), "{}", plan(q1));
+    assert!(!plan(q1).contains("NodeIndexSeek"));
+    assert!(plan("EXPLAIN MATCH (n) RETURN n").contains("AllNodesScan"));
+    let r = write(&e, "CREATE INDEX person_name FOR (p:Person) ON (p.name)");
+    assert_eq!(r.stats.indexes_added, 1);
+    assert!(plan(q1).contains("NodeIndexSeek"), "{}", plan(q1));
+    assert!(plan(q2).contains("NodeIndexSeek"), "{}", plan(q2));
+    assert!(plan("EXPLAIN MATCH (p:Person {city:'Paris'}) RETURN p").contains("NodeByLabelScan"));
+    assert!(
+        plan("EXPLAIN MATCH (p:Person) WHERE p.name STARTS WITH 'A' RETURN p")
+            .contains("NodeByLabelScan")
+    );
+    assert!(plan("EXPLAIN MATCH (a:Person)-[:KNOWS]->(b) RETURN b").contains("Expand(All)"));
+    assert!(
+        plan("EXPLAIN MATCH (a:Person)-[:KNOWS*1..3]->(b) RETURN b").contains("VarLengthExpand")
+    );
+    // identical answers through the index
+    check(
+        &e,
+        "MATCH (p:Person {name:'Alice'}) RETURN p.age",
+        &["[30]"],
+    );
+    check(
+        &e,
+        "MATCH (p:Person) WHERE p.name = 'Bob' RETURN p.age",
+        &["[25]"],
+    );
+    check(
+        &e,
+        "MATCH (p:Person) WHERE 'Carol' = p.name RETURN p.age",
+        &["[35]"],
+    );
+    check(&e, "MATCH (p:Person {name:'Nobody'}) RETURN p.age", &[]);
+    check(
+        &e,
+        "MATCH (p:Person {name:'Alice', age: 31}) RETURN p.age",
+        &[],
+    );
+    check(
+        &e,
+        "MATCH (p:Person) WHERE p.name = 'Alice' AND p.age > 100 RETURN p",
+        &[],
+    );
+    check(
+        &e,
+        "MATCH (p:Person)-[:KNOWS]->(q:Person) WHERE q.name = p.name RETURN count(*)",
+        &["[0]"],
+    );
+    // an index created after the data sees existing nodes; later writes are indexed
+    write(&e, "CREATE (:Person {name:'Alice', age: 99})");
+    check(
+        &e,
+        "MATCH (p:Person {name:'Alice'}) RETURN p.age ORDER BY p.age",
+        &["[30]", "[99]"],
+    );
+    let r = read(&e, "SHOW INDEXES");
+    assert_eq!(r.columns[0], "name");
+    assert_eq!(r.rows.len(), 1);
+    assert!(
+        render(&r)[0].starts_with("[\"person_name\",\"RANGE\",\"NODE\",[\"Person\"],[\"name\"]"),
+        "{:?}",
+        render(&r)
+    );
+    // IF NOT EXISTS is idempotent, plain duplicate is an error
+    let r = write(
+        &e,
+        "CREATE INDEX person_name IF NOT EXISTS FOR (p:Person) ON (p.name)",
+    );
+    assert_eq!(r.stats.indexes_added, 0);
+    assert!(run(&e, "CREATE INDEX FOR (p:Person) ON (p.name)").is_err());
+    write(&e, "DROP INDEX person_name");
+    assert!(plan(q1).contains("NodeByLabelScan"));
+    assert!(run(&e, "DROP INDEX person_name").is_err());
+    write(&e, "DROP INDEX person_name IF EXISTS");
+    // constraints
+    write(
+        &e,
+        "CREATE CONSTRAINT uniq_title FOR (m:Movie) REQUIRE m.title IS UNIQUE",
+    );
+    let r = read(&e, "SHOW CONSTRAINTS");
+    assert_eq!(
+        render(&r)[0],
+        "[\"uniq_title\",\"UNIQUENESS\",\"NODE\",[\"Movie\"],[\"title\"]]"
+    );
+    assert!(run(&e, "CREATE (:Movie {title:'Dune'})").is_err());
+    write(&e, "DROP CONSTRAINT uniq_title");
+    write(&e, "CREATE (:Movie {title:'Dune'})");
+    check(
+        &e,
+        "MATCH (m:Movie {title:'Dune'}) RETURN count(m)",
+        &["[2]"],
+    );
+    assert!(run(
+        &e,
+        "CREATE CONSTRAINT FOR (m:Movie) REQUIRE m.title IS UNIQUE"
+    )
+    .is_err());
+    let r = write(
+        &e,
+        "CREATE CONSTRAINT FOR (m:Movie) REQUIRE m.title IS NOT NULL",
+    );
+    assert_eq!(r.stats.constraints_added, 1);
+}
+
+#[test]
+fn profile_reports_row_count() {
+    let e = fixture();
+    let r = read(&e, "PROFILE MATCH (n:Person) RETURN n.name ORDER BY n.name");
+    assert_eq!(r.rows.len(), 6);
+    assert_eq!(r.stats.rows_returned, 6);
+    let r = read(&e, "EXPLAIN MATCH (n:Person) RETURN n.name ORDER BY n.name");
+    assert_eq!(r.columns, vec!["plan"]);
+    let Value::String(s) = &r.rows[0][0] else {
+        panic!()
+    };
+    assert!(s.starts_with("+ProduceResults"), "{s}");
+    assert!(s.contains("Sort") && s.contains("NodeByLabelScan"), "{s}");
+    // EXPLAIN does not run the query
+    let epoch = e.graph().epoch();
+    e.execute("EXPLAIN CREATE (:Never)", &no_params(), AccessMode::Write)
+        .unwrap();
+    assert_eq!(e.graph().epoch(), epoch);
+    assert_eq!(count_nodes(&e), 9);
+}
+
+#[test]
+fn schema_json_lists_everything() {
+    let e = fixture();
+    write(&e, "CREATE INDEX FOR (p:Person) ON (p.name)");
+    let j = e.schema_json();
+    assert_eq!(j["node_count"], 9);
+    assert_eq!(j["rel_count"], 10);
+    let labels: Vec<&str> = j["labels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, vec!["Movie", "Person"]);
+    assert_eq!(j["indexes"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn persistent_open_roundtrip() {
+    let dir = std::env::temp_dir().join(format!("uriel-query-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("g.seal");
+    {
+        let e = Engine::open(&path).unwrap();
+        write(&e, "CREATE (:Keep {v: 1})");
+    }
+    let e = Engine::open(&path).unwrap();
+    check(&e, "MATCH (k:Keep) RETURN k.v", &["[1]"]);
+    drop(e);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,0 +1,7 @@
+target/
+*.bak
+.donotcommit/
+site/
+docs/HOUSE-SEAL.md
+*.pre-*
+*.pre-modes

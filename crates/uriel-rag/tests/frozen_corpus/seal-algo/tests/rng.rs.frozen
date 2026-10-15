@@ -1,0 +1,68 @@
+use seal_algo::XorShift64;
+
+#[test]
+fn same_seed_same_sequence() {
+    let mut a = XorShift64::new(42);
+    let mut b = XorShift64::new(42);
+    for _ in 0..100 {
+        assert_eq!(a.next_u64(), b.next_u64());
+    }
+}
+
+#[test]
+fn different_seeds_differ() {
+    let mut a = XorShift64::new(1);
+    let mut b = XorShift64::new(2);
+    let va: Vec<u64> = (0..8).map(|_| a.next_u64()).collect();
+    let vb: Vec<u64> = (0..8).map(|_| b.next_u64()).collect();
+    assert_ne!(va, vb);
+}
+
+#[test]
+fn zero_seed_is_not_stuck() {
+    let mut r = XorShift64::new(0);
+    let v: Vec<u64> = (0..8).map(|_| r.next_u64()).collect();
+    assert!(v.iter().any(|&x| x != 0));
+    assert!(v.windows(2).all(|w| w[0] != w[1]));
+}
+
+#[test]
+fn next_f64_is_in_unit_interval_with_mean_half() {
+    let mut r = XorShift64::new(7);
+    let mut sum = 0.0;
+    for _ in 0..20_000 {
+        let x = r.next_f64();
+        assert!((0.0..1.0).contains(&x));
+        sum += x;
+    }
+    assert!((sum / 20_000.0 - 0.5).abs() < 0.01);
+}
+
+#[test]
+fn gen_range_is_bounded_and_roughly_uniform() {
+    let mut r = XorShift64::new(99);
+    let mut counts = [0u32; 10];
+    for _ in 0..20_000 {
+        counts[r.gen_range(10) as usize] += 1;
+    }
+    for c in counts {
+        assert!((1700..2300).contains(&c), "bucket count {c}");
+    }
+    assert_eq!(r.gen_range(1), 0);
+}
+
+#[test]
+#[should_panic]
+fn gen_range_zero_panics() {
+    XorShift64::new(1).gen_range(0);
+}
+
+#[test]
+fn shuffle_is_a_permutation_and_reorders() {
+    let mut r = XorShift64::new(5);
+    let mut v: Vec<u32> = (0..50).collect();
+    r.shuffle(&mut v);
+    assert_ne!(v, (0..50).collect::<Vec<u32>>());
+    v.sort_unstable();
+    assert_eq!(v, (0..50).collect::<Vec<u32>>());
+}

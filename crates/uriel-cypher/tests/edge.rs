@@ -1,0 +1,141 @@
+//! Round-trip regressions for constructs that are ambiguous when printed.
+
+use uriel_cypher::*;
+
+fn roundtrip(q: &str) -> Query {
+    let a = parse(q).unwrap_or_else(|e| panic!("`{q}` failed: {e}"));
+    let printed = a.to_string();
+    let b = parse(&printed).unwrap_or_else(|e| panic!("re-parse of `{printed}` failed: {e}"));
+    assert_eq!(a, b, "`{q}` printed as `{printed}`");
+    a
+}
+
+fn first_return_expr(q: &Query) -> Expr {
+    let QueryBody::Regular(r) = &q.body else {
+        panic!("not a regular query")
+    };
+    match r.first.clauses.last() {
+        Some(Clause::Return(ret)) => ret.body.items[0].expr.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn list_with_in_expression_is_not_a_comprehension() {
+    let q = roundtrip("RETURN [(x IN l)]");
+    assert!(matches!(first_return_expr(&q), Expr::List(_)));
+}
+
+#[test]
+fn bare_in_inside_brackets_is_a_comprehension() {
+    let q = roundtrip("RETURN [x IN l]");
+    assert!(matches!(
+        first_return_expr(&q),
+        Expr::ListComprehension { .. }
+    ));
+}
+
+#[test]
+fn function_named_all_with_in_argument_stays_a_function() {
+    let q = roundtrip("RETURN all((x IN l)), `any`(x IN l), `reduce`(a = 1, b)");
+    let QueryBody::Regular(r) = &q.body else {
+        panic!()
+    };
+    let Some(Clause::Return(ret)) = r.first.clauses.last() else {
+        panic!()
+    };
+    assert!(ret
+        .body
+        .items
+        .iter()
+        .all(|i| matches!(i.expr, Expr::FunctionCall { .. })));
+}
+
+#[test]
+fn quantifier_still_parses_unquoted() {
+    let q = roundtrip("RETURN all(x IN l WHERE x > 1)");
+    assert!(matches!(first_return_expr(&q), Expr::ListPredicate { .. }));
+}
+
+#[test]
+fn ordinary_functions_are_not_quoted() {
+    let q = roundtrip("RETURN count(n), exists(n.x), size(l)");
+    assert_eq!(q.to_string(), "RETURN count(n), exists(n.x), size(l)");
+}
+
+#[test]
+fn pattern_comprehension_versus_equality_list() {
+    let q = roundtrip("MATCH (a) RETURN [p = (a)-->(b) | b]");
+    assert!(matches!(
+        first_return_expr(&q),
+        Expr::PatternComprehension { .. }
+    ));
+    let q = roundtrip("MATCH (a) RETURN [(a)-->(b)]");
+    assert!(matches!(first_return_expr(&q), Expr::List(_)));
+}
+
+#[test]
+fn power_with_signed_exponent() {
+    roundtrip("RETURN 2 ^ -1, 2 ^ +3 ^ 2");
+}
+
+#[test]
+fn negative_literal_boundary() {
+    roundtrip("RETURN -9223372036854775807, -(9223372036854775807)");
+    assert!(parse("RETURN -9223372036854775809").is_err());
+}
+
+#[test]
+fn label_predicate_with_postfix_chain() {
+    roundtrip("MATCH (n) WHERE (n:A).x = 1 AND n.y[0]:B RETURN n");
+}
+
+#[test]
+fn nested_subqueries_round_trip() {
+    roundtrip("CALL { CALL { RETURN 1 AS x } RETURN x } RETURN x");
+}
+
+#[test]
+fn keyword_named_schema_objects_round_trip() {
+    roundtrip("CREATE INDEX `for` FOR (n:L) ON (n.p)");
+    roundtrip("CREATE INDEX `if` IF NOT EXISTS FOR (n:L) ON (n.p)");
+    roundtrip("DROP INDEX `on` IF EXISTS");
+    roundtrip("CREATE CONSTRAINT match FOR (`return`:L) REQUIRE `return`.p IS UNIQUE");
+}
+
+#[test]
+fn reserved_words_quote_on_print() {
+    let q = roundtrip("WITH 1 AS `end`, 2 AS `null` RETURN `end`, `null`");
+    assert_eq!(
+        q.to_string(),
+        "WITH 1 AS `end`, 2 AS `null` RETURN `end`, `null`"
+    );
+}
+
+#[test]
+fn expression_chain_limit_is_an_error_not_a_crash() {
+    let q = format!("RETURN {}", vec!["1"; 5000].join(" + "));
+    let e = parse(&q).unwrap_err();
+    assert!(e.message.contains("too long"), "{}", e.message);
+}
+
+#[test]
+fn moderate_chains_are_accepted() {
+    let q = format!("RETURN {}", vec!["1"; 200].join(" + "));
+    roundtrip(&q);
+}
+
+#[test]
+fn nested_depth_limit_is_an_error() {
+    let q = format!("RETURN {}1{}", "(".repeat(500), ")".repeat(500));
+    assert!(parse(&q).unwrap_err().message.contains("nested too deeply"));
+    let q = format!("RETURN {}1{}", "(".repeat(20), ")".repeat(20));
+    roundtrip(&q);
+}
+
+#[test]
+fn backtracking_blowup_terminates() {
+    // Pattern-looking parentheses that fall back to expressions.
+    let q = format!("RETURN {}1{} - -b", "({a: ".repeat(30), "})".repeat(30));
+    let _ = parse(&q);
+}

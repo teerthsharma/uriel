@@ -1,0 +1,10 @@
+[package]
+name = "seal-cypher"
+description = "Hand-written openCypher (Neo4j 5 dialect) lexer, parser and typed AST for seal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = "2"

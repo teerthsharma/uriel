@@ -1,0 +1,21 @@
+[package]
+name = "uriel-query"
+description = "Cypher query engine for seal: tree-walking executor over uriel-core with result cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+uriel-core = { path = "../uriel-core" }
+uriel-cypher = { path = "../uriel-cypher" }
+uriel-algo = { path = "../uriel-algo" }
+uriel-cache = { path = "../uriel-cache" }
+thiserror = "2"
+serde_json = "1"
+regex = "1"
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "net"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }

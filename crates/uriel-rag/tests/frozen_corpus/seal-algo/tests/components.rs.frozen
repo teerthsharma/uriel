@@ -1,0 +1,241 @@
+#![allow(clippy::needless_range_loop)]
+use seal_algo::{
+    component_count, component_sizes, strongly_connected_components, topological_sort,
+    weakly_connected_components, Error, Projection, XorShift64,
+};
+
+mod common;
+use common::random_edges;
+
+fn pairs(edges: Vec<(u32, u32, f64)>) -> Vec<(u32, u32)> {
+    edges.into_iter().map(|(u, v, _)| (u, v)).collect()
+}
+
+#[test]
+fn wcc_two_triangles_and_an_isolated_node() {
+    let g = Projection::from_edges(7, &[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)], false)
+        .unwrap();
+    let c = weakly_connected_components(&g);
+    assert_eq!(c, vec![0, 0, 0, 3, 3, 3, 6]);
+    assert_eq!(component_count(&c), 3);
+    assert_eq!(component_sizes(&c), vec![(0, 3), (3, 3), (6, 1)]);
+}
+
+#[test]
+fn wcc_ignores_direction() {
+    let g = Projection::from_edges(4, &[(1, 0), (2, 1), (3, 3)], true).unwrap();
+    assert_eq!(weakly_connected_components(&g), vec![0, 0, 0, 3]);
+}
+
+#[test]
+fn wcc_edge_cases() {
+    let g = Projection::from_edges(0, &[], true).unwrap();
+    assert!(weakly_connected_components(&g).is_empty());
+    assert_eq!(component_count(&[]), 0);
+    let g = Projection::from_edges(1, &[], true).unwrap();
+    assert_eq!(weakly_connected_components(&g), vec![0]);
+    let g = Projection::from_edges(3, &[(0, 0), (1, 1)], true).unwrap();
+    assert_eq!(weakly_connected_components(&g), vec![0, 1, 2]);
+}
+
+/// Flood fill over the undirected view, independent of the union-find under test.
+fn flood_labels(g: &Projection) -> Vec<u32> {
+    let n = g.node_count();
+    let mut label = vec![u32::MAX; n];
+    for s in 0..n as u32 {
+        if label[s as usize] != u32::MAX {
+            continue;
+        }
+        let mut stack = vec![s];
+        label[s as usize] = s;
+        while let Some(u) = stack.pop() {
+            for (v, _) in g.neighbors_any(u) {
+                if label[v as usize] == u32::MAX {
+                    label[v as usize] = s;
+                    stack.push(v);
+                }
+            }
+        }
+    }
+    label
+}
+
+#[test]
+fn wcc_partitions_every_node_exactly_once_on_random_graphs() {
+    let mut rng = XorShift64::new(31);
+    for case in 0..100 {
+        let n = 1 + rng.gen_range(60) as u32;
+        let m = rng.gen_range(n as u64 + 1) as usize;
+        let g = Projection::from_edges(
+            n as usize,
+            &pairs(random_edges(&mut rng, n, m, 0.0, 1.0)),
+            case % 2 == 0,
+        )
+        .unwrap();
+        let c = weakly_connected_components(&g);
+        assert_eq!(c.len(), n as usize);
+        assert_eq!(c, flood_labels(&g), "case {case}");
+        let total: usize = component_sizes(&c).iter().map(|&(_, s)| s).sum();
+        assert_eq!(total, n as usize);
+    }
+}
+
+/// CLRS fig. 22.9: a..h = 0..7.
+#[test]
+fn scc_textbook_example() {
+    let g = Projection::from_edges(
+        8,
+        &[
+            (0, 1),
+            (1, 2),
+            (1, 4),
+            (1, 5),
+            (2, 3),
+            (2, 6),
+            (3, 2),
+            (3, 7),
+            (4, 0),
+            (4, 5),
+            (5, 6),
+            (6, 5),
+            (6, 7),
+            (7, 7),
+        ],
+        true,
+    )
+    .unwrap();
+    let c = strongly_connected_components(&g);
+    assert_eq!(c, vec![0, 0, 2, 2, 0, 5, 5, 7]);
+    assert_eq!(component_count(&c), 4);
+}
+
+#[test]
+fn scc_on_undirected_equals_wcc() {
+    let g = Projection::from_edges(6, &[(0, 1), (2, 3), (3, 4)], false).unwrap();
+    assert_eq!(
+        strongly_connected_components(&g),
+        weakly_connected_components(&g)
+    );
+}
+
+#[test]
+fn scc_edge_cases() {
+    let g = Projection::from_edges(0, &[], true).unwrap();
+    assert!(strongly_connected_components(&g).is_empty());
+    let g = Projection::from_edges(3, &[(0, 0), (0, 1), (0, 1)], true).unwrap();
+    assert_eq!(strongly_connected_components(&g), vec![0, 1, 2]);
+}
+
+#[test]
+fn scc_matches_mutual_reachability_oracle() {
+    let mut rng = XorShift64::new(8);
+    for case in 0..100 {
+        let n = 2 + rng.gen_range(24) as usize;
+        let m = rng.gen_range(3 * n as u64) as usize;
+        let edges = pairs(random_edges(&mut rng, n as u32, m, 0.0, 1.0));
+        let g = Projection::from_edges(n, &edges, true).unwrap();
+        let mut reach = vec![vec![false; n]; n];
+        for i in 0..n {
+            reach[i][i] = true;
+        }
+        for &(u, v) in &edges {
+            reach[u as usize][v as usize] = true;
+        }
+        for k in 0..n {
+            for i in 0..n {
+                for j in 0..n {
+                    if reach[i][k] && reach[k][j] {
+                        reach[i][j] = true;
+                    }
+                }
+            }
+        }
+        let c = strongly_connected_components(&g);
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(
+                    c[i] == c[j],
+                    reach[i][j] && reach[j][i],
+                    "case {case} ({i},{j})"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scc_survives_a_200k_node_path_without_stack_overflow() {
+    let n = 200_000u32;
+    let edges: Vec<(u32, u32)> = (0..n - 1).map(|i| (i, i + 1)).collect();
+    let g = Projection::from_edges(n as usize, &edges, true).unwrap();
+    let c = strongly_connected_components(&g);
+    assert_eq!(component_count(&c), n as usize);
+    assert!(c.iter().enumerate().all(|(i, &l)| l as usize == i));
+}
+
+#[test]
+fn scc_survives_a_200k_node_cycle() {
+    let n = 200_000u32;
+    let edges: Vec<(u32, u32)> = (0..n).map(|i| (i, (i + 1) % n)).collect();
+    let g = Projection::from_edges(n as usize, &edges, true).unwrap();
+    let c = strongly_connected_components(&g);
+    assert_eq!(component_count(&c), 1);
+    assert!(c.iter().all(|&l| l == 0));
+}
+
+#[test]
+fn topological_sort_of_a_diamond() {
+    let g = Projection::from_edges(4, &[(0, 1), (0, 2), (1, 3), (2, 3)], true).unwrap();
+    assert_eq!(topological_sort(&g).unwrap(), vec![0, 1, 2, 3]);
+}
+
+#[test]
+fn topological_sort_detects_cycles_and_self_loops() {
+    let g = Projection::from_edges(3, &[(0, 1), (1, 2), (2, 1)], true).unwrap();
+    assert_eq!(topological_sort(&g).unwrap_err(), Error::CycleDetected);
+    let g = Projection::from_edges(2, &[(0, 1), (1, 1)], true).unwrap();
+    assert_eq!(topological_sort(&g).unwrap_err(), Error::CycleDetected);
+}
+
+#[test]
+fn topological_sort_edge_cases() {
+    let g = Projection::from_edges(0, &[], true).unwrap();
+    assert!(topological_sort(&g).unwrap().is_empty());
+    let g = Projection::from_edges(3, &[], true).unwrap();
+    assert_eq!(topological_sort(&g).unwrap(), vec![0, 1, 2]);
+    let g = Projection::from_edges(2, &[(0, 1)], false).unwrap();
+    assert_eq!(topological_sort(&g).unwrap_err(), Error::RequiresDirected);
+    // parallel edges must not corrupt in-degree bookkeeping
+    let g = Projection::from_edges(2, &[(0, 1), (0, 1)], true).unwrap();
+    assert_eq!(topological_sort(&g).unwrap(), vec![0, 1]);
+}
+
+#[test]
+fn topological_order_respects_all_edges_on_random_dags() {
+    let mut rng = XorShift64::new(64);
+    for case in 0..100 {
+        let n = 2 + rng.gen_range(60) as u32;
+        let mut perm: Vec<u32> = (0..n).collect();
+        rng.shuffle(&mut perm);
+        let edges: Vec<(u32, u32)> = (0..3 * n)
+            .filter_map(|_| {
+                let (a, b) = (
+                    rng.gen_range(n as u64) as usize,
+                    rng.gen_range(n as u64) as usize,
+                );
+                (a < b).then_some((perm[a], perm[b]))
+            })
+            .collect();
+        let g = Projection::from_edges(n as usize, &edges, true).unwrap();
+        let order = topological_sort(&g).unwrap();
+        assert_eq!(order.len(), n as usize);
+        let mut pos = vec![usize::MAX; n as usize];
+        for (i, &u) in order.iter().enumerate() {
+            assert_eq!(pos[u as usize], usize::MAX, "node repeated");
+            pos[u as usize] = i;
+        }
+        for &(u, v) in &edges {
+            assert!(pos[u as usize] < pos[v as usize], "case {case}: {u}->{v}");
+        }
+    }
+}

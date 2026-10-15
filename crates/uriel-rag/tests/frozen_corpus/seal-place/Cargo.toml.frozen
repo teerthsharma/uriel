@@ -1,0 +1,13 @@
+[package]
+name = "seal-place"
+description = "Deterministic tier placement for seal: a pure function of an ordered event log (fixed-point scores, logical clock, TinyLFU admission), plus a cache-latency calibrator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seal-tier = { path = "../seal-tier" }
+sha2 = "0.10"
+
+[dev-dependencies]

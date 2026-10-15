@@ -1,0 +1,15 @@
+[package]
+name = "uriel-topo"
+description = "Topology of block centroids for seal: 0-D persistence, causal context schedules, needle-recall evaluation and a topology-sorted node layout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+uriel-algo = { path = "../uriel-algo" }
+thiserror = "2"
+
+[dev-dependencies]
+rayon = "1"

@@ -1,0 +1,294 @@
+use std::alloc::{alloc_zeroed, dealloc, Layout};
+use std::path::Path;
+use std::ptr::NonNull;
+
+use crate::cap::Word;
+use crate::error::SysError;
+use crate::region::{Backend, FallbackReason};
+use crate::rss::{LargePageStatus, ProcessMemory};
+
+#[cfg(windows)]
+mod win;
+#[cfg(windows)]
+mod winio;
+
+#[cfg(windows)]
+pub(crate) use winio::{RawJob, UnbufferedFile};
+
+const PREFETCH_LINES: usize = 16;
+const LINE_BYTES: usize = 64;
+const MIN_BLOCK_ALIGN: usize = 8;
+
+enum Release {
+    #[cfg(windows)]
+    VirtualPages,
+    StdLayout(Layout),
+}
+
+pub(crate) struct Block {
+    ptr: NonNull<u8>,
+    len: usize,
+    release: Release,
+}
+
+pub(crate) struct Allocation {
+    pub block: Block,
+    pub backend: Backend,
+    pub fallback: Option<FallbackReason>,
+}
+
+unsafe impl Send for Block {}
+unsafe impl Sync for Block {}
+
+fn allocate_zeroed_with_nonzero_layout(layout: Layout) -> Option<NonNull<u8>> {
+    NonNull::new(unsafe { alloc_zeroed(layout) })
+}
+
+fn free_pointer_obtained_from_same_layout(ptr: NonNull<u8>, layout: Layout) {
+    unsafe { dealloc(ptr.as_ptr(), layout) }
+}
+
+fn load_after_bounds_and_alignment_validated<T: Word>(ptr: *const u8) -> T {
+    unsafe { ptr.cast::<T>().read() }
+}
+
+fn store_after_bounds_and_alignment_validated<T: Word>(ptr: *mut u8, value: T) {
+    unsafe { ptr.cast::<T>().write(value) }
+}
+
+fn shared_slice_after_bounds_and_alignment_validated<'a, T: Word>(
+    ptr: *const u8,
+    count: usize,
+) -> &'a [T] {
+    unsafe { std::slice::from_raw_parts(ptr.cast::<T>(), count) }
+}
+
+fn mutable_slice_after_bounds_and_alignment_validated<'a, T: Word>(
+    ptr: *mut u8,
+    count: usize,
+) -> &'a mut [T] {
+    unsafe { std::slice::from_raw_parts_mut(ptr.cast::<T>(), count) }
+}
+
+fn std_allocate(
+    bytes: usize,
+    align: usize,
+    fallback: Option<FallbackReason>,
+) -> Result<Allocation, SysError> {
+    let layout = Layout::from_size_align(bytes, align).map_err(|_| SysError::TooLarge)?;
+    let ptr = allocate_zeroed_with_nonzero_layout(layout).ok_or(SysError::OutOfMemory)?;
+    Ok(Allocation {
+        block: Block {
+            ptr,
+            len: bytes,
+            release: Release::StdLayout(layout),
+        },
+        backend: Backend::StdAlloc,
+        fallback,
+    })
+}
+
+#[cfg(windows)]
+fn platform_allocate(bytes: usize, align: usize, prefer_huge: bool) -> Result<Allocation, SysError> {
+    let mut fallback = None;
+    if prefer_huge {
+        match win::large_page_status() {
+            LargePageStatus::Ready { minimum } if align <= minimum => {
+                let rounded = bytes.checked_next_multiple_of(minimum);
+                match rounded.map(|r| win::allocate_pages(r, true)) {
+                    Some(Ok(ptr)) => {
+                        return Ok(Allocation {
+                            block: Block {
+                                ptr,
+                                len: bytes,
+                                release: Release::VirtualPages,
+                            },
+                            backend: Backend::LargePages,
+                            fallback: None,
+                        })
+                    }
+                    Some(Err(code)) => fallback = Some(FallbackReason::AllocationFailed(code)),
+                    None => fallback = Some(FallbackReason::AllocationFailed(0)),
+                }
+            }
+            LargePageStatus::Ready { .. } => fallback = Some(FallbackReason::AlignmentTooLarge),
+            LargePageStatus::PrivilegeMissing => fallback = Some(FallbackReason::PrivilegeMissing),
+            LargePageStatus::Unsupported => fallback = Some(FallbackReason::LargePagesUnsupported),
+        }
+    }
+    if align <= win::ALLOCATION_GRANULARITY {
+        let ptr = win::allocate_pages(bytes, false).map_err(|_| SysError::OutOfMemory)?;
+        return Ok(Allocation {
+            block: Block {
+                ptr,
+                len: bytes,
+                release: Release::VirtualPages,
+            },
+            backend: Backend::NormalPages,
+            fallback,
+        });
+    }
+    std_allocate(bytes, align, fallback)
+}
+
+#[cfg(not(windows))]
+fn platform_allocate(bytes: usize, align: usize, prefer_huge: bool) -> Result<Allocation, SysError> {
+    let fallback = prefer_huge.then_some(FallbackReason::NotWindows);
+    std_allocate(bytes, align, fallback)
+}
+
+#[cfg(windows)]
+pub(crate) fn alignment_unit(path: &Path) -> usize {
+    winio::sector_unit(path)
+}
+
+#[cfg(not(windows))]
+pub(crate) fn alignment_unit(_path: &Path) -> usize {
+    4096
+}
+
+#[cfg(windows)]
+pub(crate) fn process_memory() -> Result<ProcessMemory, SysError> {
+    win::process_memory()
+}
+
+#[cfg(all(not(windows), target_os = "linux"))]
+pub(crate) fn process_memory() -> Result<ProcessMemory, SysError> {
+    let statm = std::fs::read_to_string("/proc/self/statm")
+        .map_err(|e| SysError::Io(e.kind()))?;
+    let mut fields = statm.split_whitespace().map(|f| f.parse::<u64>().ok());
+    let virtual_pages = fields.next().flatten().ok_or(SysError::Unsupported)?;
+    let resident_pages = fields.next().flatten().ok_or(SysError::Unsupported)?;
+    Ok(ProcessMemory {
+        working_set: resident_pages * 4096,
+        private_bytes: virtual_pages * 4096,
+    })
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
+pub(crate) fn process_memory() -> Result<ProcessMemory, SysError> {
+    Err(SysError::Unsupported)
+}
+
+#[cfg(windows)]
+pub(crate) fn large_page_status() -> LargePageStatus {
+    win::large_page_status()
+}
+
+#[cfg(not(windows))]
+pub(crate) fn large_page_status() -> LargePageStatus {
+    LargePageStatus::Unsupported
+}
+
+impl Block {
+    pub(crate) fn allocate(
+        bytes: usize,
+        align: usize,
+        prefer_huge: bool,
+    ) -> Result<Allocation, SysError> {
+        platform_allocate(bytes, align.max(MIN_BLOCK_ALIGN), prefer_huge)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn alignment_at(&self, offset: usize) -> usize {
+        let address = (self.ptr.as_ptr() as usize).wrapping_add(offset);
+        1usize << address.trailing_zeros().min(30)
+    }
+
+    fn typed_span_checked<T: Word>(&self, offset: usize, count: usize) -> Result<(), SysError> {
+        let bytes = count
+            .checked_mul(size_of::<T>())
+            .ok_or(SysError::OutOfRange)?;
+        let end = offset.checked_add(bytes).ok_or(SysError::OutOfRange)?;
+        if end > self.len {
+            return Err(SysError::OutOfRange);
+        }
+        let address = (self.ptr.as_ptr() as usize).wrapping_add(offset);
+        if !address.is_multiple_of(align_of::<T>()) {
+            return Err(SysError::Misaligned);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_checked<T: Word>(&self, offset: usize) -> Result<T, SysError> {
+        self.typed_span_checked::<T>(offset, 1)?;
+        Ok(load_after_bounds_and_alignment_validated::<T>(
+            self.ptr.as_ptr().wrapping_add(offset),
+        ))
+    }
+
+    pub(crate) fn write_checked<T: Word>(&mut self, offset: usize, value: T) -> Result<(), SysError> {
+        self.typed_span_checked::<T>(offset, 1)?;
+        store_after_bounds_and_alignment_validated::<T>(
+            self.ptr.as_ptr().wrapping_add(offset),
+            value,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn slice_checked<T: Word>(&self, offset: usize, count: usize) -> Result<&[T], SysError> {
+        self.typed_span_checked::<T>(offset, count)?;
+        Ok(shared_slice_after_bounds_and_alignment_validated::<T>(
+            self.ptr.as_ptr().wrapping_add(offset),
+            count,
+        ))
+    }
+
+    pub(crate) fn slice_mut_checked<T: Word>(
+        &mut self,
+        offset: usize,
+        count: usize,
+    ) -> Result<&mut [T], SysError> {
+        self.typed_span_checked::<T>(offset, count)?;
+        Ok(mutable_slice_after_bounds_and_alignment_validated::<T>(
+            self.ptr.as_ptr().wrapping_add(offset),
+            count,
+        ))
+    }
+
+    #[cfg(windows)]
+    pub(super) fn span_ptr_checked(&mut self, offset: usize, len: usize) -> Result<*mut u8, SysError> {
+        let end = offset.checked_add(len).ok_or(SysError::OutOfRange)?;
+        if len == 0 || end > self.len {
+            return Err(SysError::OutOfRange);
+        }
+        Ok(self.ptr.as_ptr().wrapping_add(offset))
+    }
+
+    pub(crate) fn prefetch_checked(&self, offset: usize, len: usize) {
+        let end = offset.saturating_add(len).min(self.len);
+        for line in 0..PREFETCH_LINES {
+            let at = offset.saturating_add(line * LINE_BYTES);
+            if at >= end {
+                break;
+            }
+            prefetch_hint_has_no_architectural_effect_on_any_address(self.ptr.as_ptr().wrapping_add(at));
+        }
+    }
+
+    fn release_by_recorded_origin(&mut self) {
+        match &self.release {
+            #[cfg(windows)]
+            Release::VirtualPages => win::release_pages(self.ptr),
+            Release::StdLayout(layout) => free_pointer_obtained_from_same_layout(self.ptr, *layout),
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn prefetch_hint_has_no_architectural_effect_on_any_address(ptr: *const u8) {
+    use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+    unsafe { _mm_prefetch::<_MM_HINT_T0>(ptr.cast::<i8>()) }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn prefetch_hint_has_no_architectural_effect_on_any_address(_ptr: *const u8) {}
+
+impl Drop for Block {
+    fn drop(&mut self) {
+        self.release_by_recorded_origin();
+    }
+}

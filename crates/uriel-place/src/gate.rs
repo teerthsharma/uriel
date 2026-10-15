@@ -1,0 +1,191 @@
+use crate::event::PlaceError;
+
+const ROWS: usize = 4;
+const SEEDS: [u64; ROWS] = [
+    0x9e37_79b9_7f4a_7c15,
+    0xc2b2_ae3d_27d4_eb4f,
+    0x1656_67b1_9e37_79f9,
+    0x27d4_eb2f_1656_67c5,
+];
+const MAX_COUNT: u8 = 15;
+pub(crate) const MAX_WIDTH: usize = 1 << 22;
+
+fn mix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FreqGate {
+    enabled: bool,
+    table: Vec<u8>,
+    width: usize,
+    additions: usize,
+    sample_size: usize,
+    resets: u64,
+}
+
+impl FreqGate {
+    pub fn new(capacity: usize, enabled: bool) -> FreqGate {
+        let capacity = capacity.clamp(4, MAX_WIDTH / 4);
+        FreqGate::with_sample(capacity * 4, capacity * 10, enabled)
+    }
+
+    pub fn with_sample(width: usize, sample_size: usize, enabled: bool) -> FreqGate {
+        let width = width.clamp(16, MAX_WIDTH).next_power_of_two();
+        FreqGate {
+            enabled,
+            table: vec![0; ROWS * width / 2],
+            width,
+            additions: 0,
+            sample_size: sample_size.max(1),
+            resets: 0,
+        }
+    }
+
+    fn slot(&self, row: usize, hash: u64) -> (usize, u32) {
+        let col = (mix(hash ^ SEEDS[row]) as usize) & (self.width - 1);
+        let idx = row * self.width + col;
+        (idx >> 1, ((idx & 1) * 4) as u32)
+    }
+
+    pub fn estimate(&self, hash: u64) -> u8 {
+        (0..ROWS)
+            .map(|r| {
+                let (b, s) = self.slot(r, hash);
+                (self.table[b] >> s) & 0x0f
+            })
+            .min()
+            .unwrap_or(0)
+    }
+
+    pub fn increment(&mut self, hash: u64) {
+        if !self.enabled {
+            return;
+        }
+        let slots: [(usize, u32); ROWS] = std::array::from_fn(|r| self.slot(r, hash));
+        let get = |t: &[u8], (b, s): (usize, u32)| (t[b] >> s) & 0x0f;
+        let min = slots
+            .iter()
+            .map(|&sl| get(&self.table, sl))
+            .min()
+            .unwrap_or(0);
+        if min < MAX_COUNT {
+            for &(b, s) in &slots {
+                if (self.table[b] >> s) & 0x0f == min {
+                    self.table[b] += 1 << s;
+                }
+            }
+        }
+        self.additions += 1;
+        if self.additions >= self.sample_size {
+            for b in &mut self.table {
+                *b = (*b >> 1) & 0x77;
+            }
+            self.additions /= 2;
+            self.resets += 1;
+        }
+    }
+
+    pub fn admit(&self, candidate: u64, victim: u64) -> bool {
+        !self.enabled || self.estimate(candidate) > self.estimate(victim)
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        out.push(u8::from(self.enabled));
+        out.extend_from_slice(&(self.width as u64).to_le_bytes());
+        out.extend_from_slice(&(self.additions as u64).to_le_bytes());
+        out.extend_from_slice(&(self.sample_size as u64).to_le_bytes());
+        out.extend_from_slice(&self.resets.to_le_bytes());
+        out.extend_from_slice(&self.table);
+    }
+
+    pub(crate) fn decode(r: &mut crate::place::Reader<'_>) -> Result<FreqGate, PlaceError> {
+        let enabled = match r.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(PlaceError::BadCheckpoint("gate enabled flag")),
+        };
+        let width = r.u64()? as usize;
+        let additions = r.u64()? as usize;
+        let sample_size = r.u64()? as usize;
+        let resets = r.u64()?;
+        if !(16..=MAX_WIDTH).contains(&width) || !width.is_power_of_two() {
+            return Err(PlaceError::BadCheckpoint("gate width"));
+        }
+        if sample_size == 0 || additions > sample_size {
+            return Err(PlaceError::BadCheckpoint("gate sample"));
+        }
+        let table = r.take(ROWS * width / 2)?.to_vec();
+        Ok(FreqGate {
+            enabled,
+            table,
+            width,
+            additions,
+            sample_size,
+            resets,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::replay::SplitMix;
+    use uriel_tier::{stable_hash, Gate};
+
+    #[test]
+    fn matches_seal_tier_gate_on_random_streams() {
+        let mut compared = 0u64;
+        for (cap, seed) in [(8usize, 1u64), (64, 2), (128, 3), (1024, 4)] {
+            let mut mine = FreqGate::new(cap, true);
+            let mut theirs = Gate::new(cap);
+            let mut rng = SplitMix(seed);
+            for _ in 0..(cap * 10 * 6) {
+                let k = (rng.below(97) * rng.below(97) / 97) as u32;
+                let h = stable_hash(&k);
+                mine.increment(h);
+                theirs.record_hash(h);
+            }
+            assert!(mine.resets >= 4, "stream did not exercise aging");
+            for k in 0..120u32 {
+                let h = stable_hash(&k);
+                assert_eq!(
+                    mine.estimate(h),
+                    theirs.estimate_hash(h),
+                    "cap {cap} key {k}"
+                );
+                let h2 = stable_hash(&(k + 1000));
+                assert_eq!(mine.admit(h, h2), theirs.admit_hash(h, h2));
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, 480);
+    }
+
+    #[test]
+    fn disabled_gate_admits_everything_and_counts_nothing() {
+        let mut g = FreqGate::new(16, false);
+        g.increment(5);
+        assert_eq!(g.estimate(5), 0);
+        assert!(g.admit(1, 2));
+        assert!(!g.is_enabled());
+    }
+
+    #[test]
+    fn one_hit_key_cannot_displace_a_hot_one() {
+        let mut g = FreqGate::new(64, true);
+        for _ in 0..8 {
+            g.increment(1);
+        }
+        g.increment(2);
+        assert!(!g.admit(2, 1));
+        assert!(g.admit(1, 2));
+    }
+}

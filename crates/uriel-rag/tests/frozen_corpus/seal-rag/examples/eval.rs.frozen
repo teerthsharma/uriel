@@ -1,0 +1,17 @@
+use std::path::PathBuf;
+
+fn main() {
+    let mut args = std::env::args().skip(1);
+    let root = args
+        .next()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."));
+    let n: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(100);
+    match seal_rag::eval::run(&root, n) {
+        Ok(report) => print!("{report}"),
+        Err(e) => {
+            eprintln!("eval failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}

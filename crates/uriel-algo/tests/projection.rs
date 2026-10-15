@@ -1,0 +1,290 @@
+use uriel_algo::{Aggregation, Error, Orientation, Projection, XorShift64};
+
+mod common;
+
+#[test]
+fn directed_has_sorted_out_and_in_adjacency() {
+    let g = Projection::from_edges(4, &[(0, 2), (0, 1), (2, 1), (3, 0)], true).unwrap();
+    assert!(g.is_directed());
+    assert!(!g.is_weighted());
+    assert_eq!(g.node_count(), 4);
+    assert_eq!(g.edge_count(), 4);
+    assert_eq!(g.arc_count(), 4);
+    assert_eq!(g.out_neighbors(0), &[1, 2]);
+    assert_eq!(g.out_neighbors(1), &[] as &[u32]);
+    assert_eq!(g.in_neighbors(1), &[0, 2]);
+    assert_eq!(g.in_neighbors(0), &[3]);
+    assert_eq!((g.out_degree(0), g.in_degree(0), g.degree(0)), (2, 1, 3));
+    assert_eq!(g.out_weights(0), None);
+}
+
+#[test]
+fn undirected_stores_both_directions() {
+    let g = Projection::from_edges(3, &[(0, 1), (1, 2)], false).unwrap();
+    assert!(!g.is_directed());
+    assert_eq!(g.edge_count(), 2);
+    assert_eq!(g.arc_count(), 4);
+    assert_eq!(g.out_neighbors(1), &[0, 2]);
+    assert_eq!(g.in_neighbors(1), &[0, 2]);
+    assert_eq!(g.degree(1), 2);
+    assert_eq!(
+        g.neighbors_any(1).map(|(v, _)| v).collect::<Vec<_>>(),
+        vec![0, 2]
+    );
+}
+
+#[test]
+fn weights_stay_aligned_with_sorted_targets() {
+    let g =
+        Projection::from_weighted_edges(3, &[(0, 2, 5.0), (0, 1, 7.0), (1, 2, 1.5)], true).unwrap();
+    assert!(g.is_weighted());
+    assert_eq!(g.out_neighbors(0), &[1, 2]);
+    assert_eq!(g.out_weights(0), Some(&[7.0, 5.0][..]));
+    assert_eq!(g.in_neighbors(2), &[0, 1]);
+    assert_eq!(g.in_weights(2), Some(&[5.0, 1.5][..]));
+    let e: Vec<_> = g.out_edges(0).collect();
+    assert_eq!(e, vec![(1, 7.0), (2, 5.0)]);
+}
+
+#[test]
+fn unweighted_edges_iterate_with_weight_one() {
+    let g = Projection::from_edges(2, &[(0, 1)], true).unwrap();
+    assert_eq!(g.out_edges(0).collect::<Vec<_>>(), vec![(1, 1.0)]);
+    assert_eq!(g.in_edges(1).collect::<Vec<_>>(), vec![(0, 1.0)]);
+}
+
+#[test]
+fn directed_keeps_parallel_edges_and_self_loops() {
+    let g = Projection::from_edges(2, &[(0, 1), (0, 1), (1, 1)], true).unwrap();
+    assert_eq!(g.edge_count(), 3);
+    assert_eq!(g.out_neighbors(0), &[1, 1]);
+    assert_eq!(g.out_neighbors(1), &[1]);
+    assert_eq!(g.in_neighbors(1), &[0, 0, 1]);
+    assert_eq!(g.out_degree(1), 1);
+}
+
+#[test]
+fn undirected_self_loop_is_a_single_arc() {
+    let g = Projection::from_edges(2, &[(0, 1), (1, 1)], false).unwrap();
+    assert_eq!(g.edge_count(), 2);
+    assert_eq!(g.arc_count(), 3);
+    assert_eq!(g.out_neighbors(1), &[0, 1]);
+    assert_eq!(g.edges(), vec![(0, 1, 1.0), (1, 1, 1.0)]);
+}
+
+#[test]
+fn undirected_parallel_edges_are_both_kept() {
+    let g = Projection::from_edges(2, &[(0, 1), (1, 0)], false).unwrap();
+    assert_eq!(g.edge_count(), 2);
+    assert_eq!(g.out_neighbors(0), &[1, 1]);
+    assert_eq!(g.out_neighbors(1), &[0, 0]);
+}
+
+#[test]
+fn out_of_range_node_is_an_error() {
+    let e = Projection::from_edges(2, &[(0, 2)], true).unwrap_err();
+    assert_eq!(
+        e,
+        Error::NodeOutOfRange {
+            node: 2,
+            node_count: 2
+        }
+    );
+    let g = Projection::from_edges(2, &[], true).unwrap();
+    assert!(g.check_node(1).is_ok());
+    assert_eq!(
+        g.check_node(2),
+        Err(Error::NodeOutOfRange {
+            node: 2,
+            node_count: 2
+        })
+    );
+}
+
+#[test]
+fn non_finite_weights_are_rejected() {
+    assert!(matches!(
+        Projection::from_weighted_edges(2, &[(0, 1, f64::NAN)], true),
+        Err(Error::InvalidWeight(_))
+    ));
+    assert!(matches!(
+        Projection::from_weighted_edges(2, &[(0, 1, f64::INFINITY)], true),
+        Err(Error::InvalidWeight(_))
+    ));
+}
+
+#[test]
+fn empty_and_single_node_projections() {
+    let g = Projection::from_edges(0, &[], true).unwrap();
+    assert_eq!((g.node_count(), g.edge_count(), g.arc_count()), (0, 0, 0));
+    assert!(g.edges().is_empty());
+    let g = Projection::from_edges(1, &[], false).unwrap();
+    assert_eq!(g.out_neighbors(0), &[] as &[u32]);
+    assert_eq!(g.degree(0), 0);
+}
+
+#[test]
+fn isolated_trailing_nodes_have_empty_adjacency() {
+    let g = Projection::from_edges(5, &[(0, 1)], true).unwrap();
+    for u in 2..5 {
+        assert_eq!(g.out_degree(u), 0);
+        assert_eq!(g.in_degree(u), 0);
+    }
+}
+
+#[test]
+fn reverse_orientation_flips_edges() {
+    let g = Projection::builder(3)
+        .orientation(Orientation::Reverse)
+        .add_edge(0, 1)
+        .add_edge(1, 2)
+        .build()
+        .unwrap();
+    assert!(g.is_directed());
+    assert_eq!(g.out_neighbors(1), &[0]);
+    assert_eq!(g.out_neighbors(2), &[1]);
+    assert_eq!(g.out_neighbors(0), &[] as &[u32]);
+}
+
+#[test]
+fn undirected_orientation_symmetrises() {
+    let g = Projection::builder(3)
+        .orientation(Orientation::Undirected)
+        .add_edge(0, 1)
+        .add_edge(2, 1)
+        .build()
+        .unwrap();
+    assert!(!g.is_directed());
+    assert_eq!(g.out_neighbors(1), &[0, 2]);
+}
+
+#[test]
+fn builder_default_is_natural() {
+    let g = Projection::builder(2).add_edge(0, 1).build().unwrap();
+    assert!(g.is_directed());
+    assert_eq!(g.out_neighbors(0), &[1]);
+    assert_eq!(g.out_neighbors(1), &[] as &[u32]);
+}
+
+fn parallel(agg: Aggregation) -> Projection {
+    Projection::builder(3)
+        .aggregation(agg)
+        .add_weighted_edge(0, 1, 2.0)
+        .add_weighted_edge(0, 1, 5.0)
+        .add_weighted_edge(0, 1, 3.0)
+        .add_weighted_edge(0, 2, 1.0)
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn aggregation_none_keeps_every_parallel_edge() {
+    let g = parallel(Aggregation::None);
+    assert_eq!(g.out_neighbors(0), &[1, 1, 1, 2]);
+    assert_eq!(g.out_weights(0), Some(&[2.0, 5.0, 3.0, 1.0][..]));
+}
+
+#[test]
+fn aggregation_single_keeps_first() {
+    let g = parallel(Aggregation::Single);
+    assert_eq!(g.out_neighbors(0), &[1, 2]);
+    assert_eq!(g.out_weights(0), Some(&[2.0, 1.0][..]));
+    assert_eq!(g.in_weights(1), Some(&[2.0][..]));
+}
+
+#[test]
+fn aggregation_sum_min_max() {
+    assert_eq!(
+        parallel(Aggregation::Sum).out_weights(0),
+        Some(&[10.0, 1.0][..])
+    );
+    assert_eq!(
+        parallel(Aggregation::Min).out_weights(0),
+        Some(&[2.0, 1.0][..])
+    );
+    assert_eq!(
+        parallel(Aggregation::Max).out_weights(0),
+        Some(&[5.0, 1.0][..])
+    );
+    assert_eq!(parallel(Aggregation::Sum).edge_count(), 2);
+}
+
+#[test]
+fn aggregation_on_undirected_merges_both_orientations() {
+    let g = Projection::builder(2)
+        .orientation(Orientation::Undirected)
+        .aggregation(Aggregation::Sum)
+        .add_weighted_edge(0, 1, 2.0)
+        .add_weighted_edge(1, 0, 3.0)
+        .build()
+        .unwrap();
+    assert_eq!(g.out_neighbors(0), &[1]);
+    assert_eq!(g.out_weights(0), Some(&[5.0][..]));
+    assert_eq!(g.out_weights(1), Some(&[5.0][..]));
+    assert_eq!(g.edge_count(), 1);
+}
+
+#[test]
+fn weighted_flag_forces_unit_weights() {
+    let g = Projection::builder(2)
+        .weighted(true)
+        .add_edge(0, 1)
+        .build()
+        .unwrap();
+    assert!(g.is_weighted());
+    assert_eq!(g.out_weights(0), Some(&[1.0][..]));
+}
+
+#[test]
+fn mixing_weighted_and_plain_edges_defaults_plain_to_one() {
+    let g = Projection::builder(3)
+        .add_edge(0, 1)
+        .add_weighted_edge(1, 2, 4.0)
+        .build()
+        .unwrap();
+    assert!(g.is_weighted());
+    assert_eq!(g.out_weights(0), Some(&[1.0][..]));
+    assert_eq!(g.out_weights(1), Some(&[4.0][..]));
+}
+
+#[test]
+fn has_edge_binary_search() {
+    let g = Projection::from_edges(4, &[(0, 3), (0, 1), (2, 0)], true).unwrap();
+    assert!(g.has_edge(0, 1) && g.has_edge(0, 3) && g.has_edge(2, 0));
+    assert!(!g.has_edge(1, 0) && !g.has_edge(0, 2) && !g.has_edge(3, 3));
+}
+
+#[test]
+fn edges_round_trip_directed_and_undirected() {
+    let list = [(0, 1, 2.0), (1, 2, 3.0), (2, 2, 1.0), (0, 1, 4.0)];
+    let g = Projection::from_weighted_edges(3, &list, true).unwrap();
+    let mut got = g.edges();
+    got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut want = list.to_vec();
+    want.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_eq!(got, want);
+
+    let g = Projection::from_weighted_edges(3, &[(1, 0, 2.0), (1, 2, 3.0)], false).unwrap();
+    assert_eq!(g.edges(), vec![(0, 1, 2.0), (1, 2, 3.0)]);
+}
+
+#[test]
+fn random_projection_invariants() {
+    let mut rng = XorShift64::new(11);
+    for directed in [true, false] {
+        let edges = common::random_edges(&mut rng, 50, 300, 0.1, 9.0);
+        let g = Projection::from_weighted_edges(50, &edges, directed).unwrap();
+        assert_eq!(g.edge_count(), 300);
+        let mut out_total = 0;
+        let mut in_total = 0;
+        for u in 0..50u32 {
+            assert!(g.out_neighbors(u).windows(2).all(|w| w[0] <= w[1]));
+            assert!(g.in_neighbors(u).windows(2).all(|w| w[0] <= w[1]));
+            assert_eq!(g.out_weights(u).unwrap().len(), g.out_neighbors(u).len());
+            out_total += g.out_degree(u);
+            in_total += g.in_degree(u);
+        }
+        assert_eq!(out_total, g.arc_count());
+        assert_eq!(in_total, g.arc_count());
+    }
+}

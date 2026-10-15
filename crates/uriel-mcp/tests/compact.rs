@@ -1,0 +1,215 @@
+mod common;
+
+use common::*;
+use uriel_mcp::compact::{decode_pack, decode_table, proxy_tokens, Pack};
+use serde_json::{json, Value};
+
+fn indexed(p: &Proj, extra: &[&str]) -> Session {
+    let mut s = p.session(extra, &[]);
+    s.ok("rag_index", json!({}));
+    s
+}
+
+fn search(s: &mut Session, args: Value) -> String {
+    s.text("rag_search", args)
+}
+
+fn pack(text: &str) -> Pack {
+    decode_pack(text).unwrap_or_else(|e| panic!("not a compact pack ({e}): {text}"))
+}
+
+const Q: &str = "scheduler priority job age";
+
+#[test]
+fn cypher_is_compact_by_default_and_decodes_to_the_json_rows() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    s.ok(
+        "write_neo4j_cypher",
+        json!({"query": "UNWIND range(1, 40) AS i CREATE (:Row {n: i, name: 'crates/uriel-house/src/file' + toString(i) + '.rs', ok: i % 2 = 0})"}),
+    );
+    let q = "MATCH (r:Row) RETURN r.n AS n, r.name AS name, r.ok AS ok ORDER BY n";
+    let compact = s.text("read_neo4j_cypher", json!({"query": q}));
+    let rows = s.ok("read_neo4j_cypher", json!({"query": q, "format": "json"}));
+    assert!(compact.starts_with("#40\n"), "{compact}");
+    assert_eq!(decode_table(&compact).expect("decode").to_rows(), rows.as_array().cloned().unwrap_or_default());
+    let json_text = rows.to_string();
+    assert!(proxy_tokens(&compact) * 2 < proxy_tokens(&json_text), "{} vs {}", compact.len(), json_text.len());
+    assert!(compact.contains("@a=crates/uriel-house/src/"), "{compact}");
+}
+
+#[test]
+fn empty_and_non_uniform_results_stay_readable() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    assert_eq!(s.text("read_neo4j_cypher", json!({"query": "MATCH (n:Nope) RETURN n.x AS x"})), "#0");
+    let one = s.text("read_neo4j_cypher", json!({"query": "RETURN 1 AS one, 'a' AS s"}));
+    assert_eq!(one, "#1\none\ts\n1\ta");
+}
+
+#[test]
+fn server_format_flag_sets_the_default_and_a_call_overrides_it() {
+    let p = Proj::new();
+    let mut s = p.session(&["--format", "json"], &[]);
+    let by_default = s.text("read_neo4j_cypher", json!({"query": "RETURN 1 AS one"}));
+    assert_eq!(by_default, r#"[{"one":1}]"#);
+    let asked = s.text("read_neo4j_cypher", json!({"query": "RETURN 1 AS one", "format": "compact"}));
+    assert_eq!(asked, "#1\none\n1");
+    s.ok("rag_index", json!({}));
+    let v1 = search(&mut s, json!({"query": Q}));
+    let v: Value = serde_json::from_str(&v1).expect("json by default under --format json");
+    assert!(v["text"].as_str().unwrap_or("").contains("// "), "{v1}");
+    assert!(v["hits"][0].get("level").is_none(), "ladder is off in json: {v1}");
+    let bad = s.err("read_neo4j_cypher", json!({"query": "RETURN 1", "format": "xml"}));
+    assert!(bad.contains("format"), "{bad}");
+}
+
+#[test]
+fn rag_search_is_compact_with_the_ladder_by_default() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    let text = search(&mut s, json!({"query": Q, "k": 6}));
+    let pk = pack(&text);
+    assert!(pk.hits.len() >= 2, "{text}");
+    assert_eq!(pk.hits[0].level, 1, "top hit at L1: {text}");
+    for h in &pk.hits[1..pk.hits.len().min(4)] {
+        assert_eq!(h.level, 2, "hits 2..4 at L2: {text}");
+    }
+    for h in pk.hits.iter().skip(4) {
+        assert!(h.level >= 2, "{text}");
+    }
+    for h in &pk.hits {
+        assert!(h.body.is_some() && !h.file.is_empty() && h.end >= h.start, "{text}");
+        assert!(text.contains(&format!("#{}", h.chunk_id)));
+    }
+    let flat = pack(&search(&mut s, json!({"query": Q, "k": 6, "ladder": false, "fresh": true})));
+    assert!(flat.hits.iter().all(|h| h.level == 2));
+}
+
+#[test]
+fn compact_search_never_exceeds_its_budget() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    let mut saw_dropped = false;
+    for budget in [1usize, 5, 12, 25, 40, 60, 90, 150, 400, 2000] {
+        let text = search(&mut s, json!({"query": Q, "k": 8, "budget_tokens": budget, "fresh": true}));
+        assert!(proxy_tokens(&text) <= budget, "{} > {budget}: {text}", proxy_tokens(&text));
+        let pk = pack(&text);
+        saw_dropped |= pk.omitted > 0;
+        for h in &pk.hits {
+            assert!(h.body.is_some() && !h.file.is_empty());
+        }
+    }
+    assert!(saw_dropped, "the sweep must reach the dropping regime");
+}
+
+#[test]
+fn json_with_ladder_true_reports_levels_and_citations() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    let v = s.ok("rag_search", json!({"query": Q, "ladder": true}));
+    let hits = v["hits"].as_array().expect("hits");
+    assert_eq!(hits[0]["level"], 1, "{v}");
+    for h in hits {
+        let header = format!("// {}:{}-{} #{}", h["file"].as_str().unwrap_or(""), h["start_line"], h["end_line"], h["chunk_id"]);
+        assert!(v["text"].as_str().unwrap_or("").contains(&header), "{header} in {v}");
+    }
+}
+
+#[test]
+fn rag_expand_zooms_one_hit_to_a_level() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    let pk = pack(&search(&mut s, json!({"query": "backoff delay payment gateway retry", "k": 3})));
+    let id = pk.hits[0].chunk_id;
+    let l0 = s.text("rag_expand", json!({"chunk_id": id}));
+    assert!(l0.contains("pub fn backoff_delay"), "{l0}");
+    let l3 = s.text("rag_expand", json!({"chunk_id": id, "level": 3}));
+    assert!(!l3.contains('\n') && l3.starts_with("pub fn backoff_delay"), "{l3}");
+    let l2 = s.text("rag_expand", json!({"chunk_id": id, "level": 2}));
+    let l1 = s.text("rag_expand", json!({"chunk_id": id, "level": 1}));
+    assert!(l3.len() < l0.len() && l2.len() <= l1.len() && l1.len() <= l0.len(), "{} {} {} {}", l3.len(), l2.len(), l1.len(), l0.len());
+    for bad in [json!({"chunk_id": id, "level": 4}), json!({"chunk_id": id, "level": "x"}), json!({"chunk_id": id, "level": -1})] {
+        s.err("rag_expand", bad);
+    }
+}
+
+#[test]
+fn a_repeat_search_is_at_least_5x_smaller_and_reset_restores_the_text() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    let first = search(&mut s, json!({"query": Q}));
+    let again = search(&mut s, json!({"query": Q}));
+    let (a, b) = (proxy_tokens(&first), proxy_tokens(&again));
+    assert!(b * 5 <= a, "repeat {b} proxy tokens vs first {a}\n{first}\n--\n{again}");
+    let (p1, p2) = (pack(&first), pack(&again));
+    assert_eq!(p1.hits.len(), p2.hits.len());
+    for (x, y) in p1.hits.iter().zip(&p2.hits) {
+        assert_eq!(x.chunk_id, y.chunk_id, "same hits, same order");
+        assert!(y.body.is_none(), "a repeat is a reference: {again}");
+    }
+    let bare = format!(">#{}", p1.hits[0].chunk_id);
+    assert!(
+        again.lines().any(|l| l.strip_prefix(bare.as_str()).is_some_and(|rest| rest.ends_with('r') && !rest.starts_with(|c: char| c.is_ascii_digit()))),
+        "{again}"
+    );
+    let fresh = search(&mut s, json!({"query": Q, "fresh": true}));
+    assert_eq!(fresh, first);
+    let cleared = s.ok("session_reset", json!({}));
+    assert!(cleared["cleared"].as_u64().unwrap_or(0) >= 1, "{cleared}");
+    assert_eq!(search(&mut s, json!({"query": Q})), first);
+}
+
+#[test]
+fn a_changed_chunk_is_marked_and_resent() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    let q = "backoff delay payment gateway retry";
+    let first = pack(&search(&mut s, json!({"query": q, "k": 1, "expand_hops": 0})));
+    let id = first.hits[0].chunk_id;
+    assert!(first.hits[0].body.is_some() && !first.hits[0].changed);
+    s.ok(
+        "write_neo4j_cypher",
+        json!({"query": "MATCH (c:Chunk {file: 'src/backoff.rs'}) SET c.text = c.text + '\n// edited'"}),
+    );
+    let after = pack(&search(&mut s, json!({"query": q, "k": 1, "expand_hops": 0})));
+    assert_eq!(after.hits[0].chunk_id, id);
+    assert!(after.hits[0].changed, "text changed since delivery");
+    assert!(after.hits[0].body.is_some(), "changed chunks are resent");
+    let repeat = pack(&search(&mut s, json!({"query": q, "k": 1, "expand_hops": 0})));
+    assert!(repeat.hits[0].body.is_none() && !repeat.hits[0].changed);
+}
+
+#[test]
+fn zooming_counts_as_delivery() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    let q = "backoff delay payment gateway retry";
+    let first = pack(&search(&mut s, json!({"query": q, "k": 1, "expand_hops": 0, "fresh": true})));
+    let id = first.hits[0].chunk_id;
+    s.text("rag_expand", json!({"chunk_id": id}));
+    let again = pack(&search(&mut s, json!({"query": q, "k": 1, "expand_hops": 0})));
+    assert!(again.hits[0].body.is_none(), "the full text was already delivered");
+}
+
+#[test]
+fn json_format_is_never_deduplicated() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    let a = search(&mut s, json!({"query": Q, "format": "json"}));
+    let b = search(&mut s, json!({"query": Q, "format": "json"}));
+    assert_eq!(a, b, "format=json is the exact v1 behaviour, repeat or not");
+}
+
+#[test]
+fn seal_recall_shares_the_session() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    s.ok("seal_remember", json!({"text": "The retry ceiling is capped at ten seconds.", "tags": ["retry"]}));
+    let first = s.text("seal_recall", json!({"query": "retry ceiling capped seconds", "k": 2}));
+    let again = s.text("seal_recall", json!({"query": "retry ceiling capped seconds", "k": 2}));
+    let (p1, p2) = (pack(&first), pack(&again));
+    assert!(p1.hits[0].remembered, "{first}");
+    assert!(p2.hits.iter().all(|h| h.body.is_none()), "{again}");
+    assert!(proxy_tokens(&again) < proxy_tokens(&first));
+}

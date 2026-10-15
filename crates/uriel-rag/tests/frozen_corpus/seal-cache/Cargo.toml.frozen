@@ -1,0 +1,13 @@
+﻿[package]
+name = "seal-cache"
+description = "Distributed cache for seal: W-TinyLFU local cache, consistent-hash ring, SWIM-lite gossip, TCP cache protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"

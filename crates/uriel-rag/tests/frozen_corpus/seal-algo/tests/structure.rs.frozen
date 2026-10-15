@@ -1,0 +1,362 @@
+//! Triangle count, clustering coefficient, k-core, node similarity.
+#![allow(clippy::needless_range_loop)]
+
+use seal_algo::{
+    cosine_similarity, jaccard_similarity, k_core_decomposition, local_clustering_coefficient,
+    node_similarity, triangle_count, Error, Projection, SimilarityConfig, SimilarityMetric,
+    XorShift64,
+};
+
+mod common;
+use common::{
+    approx, assert_vec_approx, karate, random_edges, KARATE_AVG_CLUSTERING, KARATE_CLUSTERING,
+    KARATE_CORE, KARATE_TRIANGLES,
+};
+
+fn pairs(e: Vec<(u32, u32, f64)>) -> Vec<(u32, u32)> {
+    e.into_iter().map(|(u, v, _)| (u, v)).collect()
+}
+
+/// Simple undirected adjacency matrix (no loops, no multiplicity).
+fn matrix(n: usize, edges: &[(u32, u32)]) -> Vec<Vec<bool>> {
+    let mut m = vec![vec![false; n]; n];
+    for &(u, v) in edges {
+        if u != v {
+            m[u as usize][v as usize] = true;
+            m[v as usize][u as usize] = true;
+        }
+    }
+    m
+}
+
+#[test]
+fn triangles_karate_match_networkx() {
+    let t = triangle_count(&karate());
+    assert_eq!(t.per_node, KARATE_TRIANGLES.to_vec());
+    assert_eq!(t.total, 45);
+}
+
+#[test]
+fn clustering_karate_matches_networkx() {
+    let c = local_clustering_coefficient(&karate());
+    assert_vec_approx(&c.coefficients, &KARATE_CLUSTERING, 1e-9);
+    assert!(approx(c.average, KARATE_AVG_CLUSTERING, 1e-12));
+}
+
+#[test]
+fn triangles_k4_and_k4_minus_edge() {
+    let k4 = Projection::from_edges(4, &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)], false)
+        .unwrap();
+    let t = triangle_count(&k4);
+    assert_eq!((t.total, t.per_node), (4, vec![3, 3, 3, 3]));
+    assert_eq!(local_clustering_coefficient(&k4).coefficients, vec![1.0; 4]);
+    let k4m = Projection::from_edges(4, &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3)], false).unwrap();
+    let t = triangle_count(&k4m);
+    assert_eq!((t.total, t.per_node), (2, vec![2, 2, 1, 1]));
+    let c = local_clustering_coefficient(&k4m).coefficients;
+    assert_vec_approx(&c, &[2.0 / 3.0, 2.0 / 3.0, 1.0, 1.0], 1e-12);
+}
+
+#[test]
+fn triangles_ignore_direction_duplicates_and_self_loops() {
+    let g = Projection::from_edges(
+        4,
+        &[(0, 1), (1, 2), (2, 0), (0, 1), (1, 0), (3, 3), (2, 2)],
+        true,
+    )
+    .unwrap();
+    let t = triangle_count(&g);
+    assert_eq!((t.total, t.per_node), (1, vec![1, 1, 1, 0]));
+    let c = local_clustering_coefficient(&g);
+    assert_eq!(c.coefficients, vec![1.0, 1.0, 1.0, 0.0]);
+    assert!(approx(c.average, 0.75, 1e-12));
+}
+
+#[test]
+fn triangle_edge_cases() {
+    let g = Projection::from_edges(0, &[], false).unwrap();
+    let t = triangle_count(&g);
+    assert_eq!((t.total, t.per_node.len()), (0, 0));
+    let c = local_clustering_coefficient(&g);
+    assert!(c.coefficients.is_empty());
+    assert_eq!(c.average, 0.0);
+    let g = Projection::from_edges(1, &[], false).unwrap();
+    assert_eq!(triangle_count(&g).per_node, vec![0]);
+    let path = Projection::from_edges(3, &[(0, 1), (1, 2)], false).unwrap();
+    assert_eq!(triangle_count(&path).total, 0);
+}
+
+#[test]
+fn triangles_match_brute_force_on_random_graphs() {
+    let mut rng = XorShift64::new(404);
+    for case in 0..100 {
+        let n = 1 + rng.gen_range(25) as usize;
+        let m = rng.gen_range(5 * n as u64) as usize;
+        let edges = pairs(random_edges(&mut rng, n as u32, m, 0.0, 1.0));
+        let g = Projection::from_edges(n, &edges, case % 2 == 0).unwrap();
+        let a = matrix(n, &edges);
+        let mut per = vec![0u64; n];
+        let mut total = 0;
+        for i in 0..n {
+            for j in i + 1..n {
+                for k in j + 1..n {
+                    if a[i][j] && a[j][k] && a[i][k] {
+                        total += 1;
+                        per[i] += 1;
+                        per[j] += 1;
+                        per[k] += 1;
+                    }
+                }
+            }
+        }
+        let t = triangle_count(&g);
+        assert_eq!(t.total, total, "case {case}");
+        assert_eq!(t.per_node, per, "case {case}");
+        assert_eq!(t.per_node.iter().sum::<u64>(), 3 * t.total);
+        let c = local_clustering_coefficient(&g).coefficients;
+        for u in 0..n {
+            let d = a[u].iter().filter(|&&x| x).count() as f64;
+            let want = if d < 2.0 {
+                0.0
+            } else {
+                2.0 * per[u] as f64 / (d * (d - 1.0))
+            };
+            assert!(approx(c[u], want, 1e-12));
+        }
+    }
+}
+
+#[test]
+fn k_core_karate_matches_networkx() {
+    let c = k_core_decomposition(&karate());
+    assert_eq!(c, KARATE_CORE.to_vec());
+    let four: Vec<usize> = (0..34).filter(|&i| c[i] == 4).collect();
+    assert_eq!(four, vec![0, 1, 2, 3, 7, 8, 13, 30, 32, 33]);
+}
+
+#[test]
+fn k_core_small_graphs() {
+    let path = Projection::from_edges(4, &[(0, 1), (1, 2), (2, 3)], false).unwrap();
+    assert_eq!(k_core_decomposition(&path), vec![1; 4]);
+    // K4 with a pendant node and an isolated node
+    let g = Projection::from_edges(
+        6,
+        &[(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3), (3, 4)],
+        false,
+    )
+    .unwrap();
+    assert_eq!(k_core_decomposition(&g), vec![3, 3, 3, 3, 1, 0]);
+    // a self loop and parallel edges do not raise the core number
+    let g = Projection::from_edges(3, &[(0, 0), (0, 1), (0, 1), (1, 2)], false).unwrap();
+    assert_eq!(k_core_decomposition(&g), vec![1, 1, 1]);
+    // directed input is symmetrised
+    let tri = Projection::from_edges(3, &[(0, 1), (1, 2), (2, 0)], true).unwrap();
+    assert_eq!(k_core_decomposition(&tri), vec![2, 2, 2]);
+    assert!(k_core_decomposition(&Projection::from_edges(0, &[], false).unwrap()).is_empty());
+}
+
+/// Reference: repeatedly delete nodes of degree < k; core(v) = largest k that keeps v.
+fn peel_oracle(n: usize, edges: &[(u32, u32)]) -> Vec<u32> {
+    let a = matrix(n, edges);
+    let mut core = vec![0u32; n];
+    for k in 1..=n as u32 {
+        let mut alive = vec![true; n];
+        loop {
+            let mut changed = false;
+            for u in 0..n {
+                if alive[u] {
+                    let d = (0..n).filter(|&v| alive[v] && a[u][v]).count() as u32;
+                    if d < k {
+                        alive[u] = false;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for u in 0..n {
+            if alive[u] {
+                core[u] = k;
+            }
+        }
+    }
+    core
+}
+
+#[test]
+fn k_core_matches_peeling_oracle_on_random_graphs() {
+    let mut rng = XorShift64::new(55);
+    for case in 0..100 {
+        let n = 1 + rng.gen_range(30) as usize;
+        let m = rng.gen_range(6 * n as u64) as usize;
+        let edges = pairs(random_edges(&mut rng, n as u32, m, 0.0, 1.0));
+        let g = Projection::from_edges(n, &edges, case % 2 == 0).unwrap();
+        assert_eq!(
+            k_core_decomposition(&g),
+            peel_oracle(n, &edges),
+            "case {case}"
+        );
+    }
+}
+
+fn bipartite() -> Projection {
+    // people 0,1,2 -> items 10,11,12
+    Projection::from_edges(
+        13,
+        &[(0, 10), (0, 11), (1, 10), (1, 11), (1, 12), (2, 12)],
+        true,
+    )
+    .unwrap()
+}
+
+#[test]
+fn jaccard_and_cosine_pairwise() {
+    let g =
+        Projection::from_edges(6, &[(0, 2), (0, 3), (0, 4), (1, 3), (1, 4), (1, 5)], true).unwrap();
+    assert!(approx(jaccard_similarity(&g, 0, 1).unwrap(), 0.5, 1e-12));
+    assert!(approx(
+        cosine_similarity(&g, 0, 1, false).unwrap(),
+        2.0 / 3.0,
+        1e-12
+    ));
+    assert_eq!(jaccard_similarity(&g, 0, 0).unwrap(), 1.0);
+    assert_eq!(jaccard_similarity(&g, 2, 3).unwrap(), 0.0); // both empty
+    assert_eq!(cosine_similarity(&g, 2, 3, false).unwrap(), 0.0);
+    assert!(matches!(
+        jaccard_similarity(&g, 0, 99),
+        Err(Error::NodeOutOfRange { .. })
+    ));
+}
+
+#[test]
+fn weighted_cosine_uses_weight_vectors() {
+    let g = Projection::from_weighted_edges(
+        6,
+        &[(0, 2, 1.0), (0, 3, 2.0), (1, 2, 3.0), (1, 3, 4.0)],
+        true,
+    )
+    .unwrap();
+    let want = 11.0 / (5.0f64.sqrt() * 5.0);
+    assert!(approx(
+        cosine_similarity(&g, 0, 1, true).unwrap(),
+        want,
+        1e-12
+    ));
+    assert!(approx(
+        cosine_similarity(&g, 0, 1, false).unwrap(),
+        1.0,
+        1e-12
+    ));
+}
+
+#[test]
+fn parallel_edges_do_not_inflate_neighbour_sets() {
+    let g = Projection::from_edges(4, &[(0, 2), (0, 2), (0, 3), (1, 2)], true).unwrap();
+    assert!(approx(jaccard_similarity(&g, 0, 1).unwrap(), 0.5, 1e-12));
+}
+
+fn jaccard_cfg() -> SimilarityConfig {
+    SimilarityConfig::default()
+}
+
+#[test]
+fn node_similarity_lists_pairs_sharing_a_neighbour() {
+    let r = node_similarity(&bipartite(), &jaccard_cfg()).unwrap();
+    let got: Vec<(u32, u32)> = r.iter().map(|p| (p.a, p.b)).collect();
+    assert_eq!(got, vec![(0, 1), (1, 2)]);
+    assert!(approx(r[0].score, 2.0 / 3.0, 1e-12));
+    assert!(approx(r[1].score, 1.0 / 3.0, 1e-12));
+}
+
+#[test]
+fn node_similarity_top_k_and_cutoff() {
+    let g = bipartite();
+    let r = node_similarity(
+        &g,
+        &SimilarityConfig {
+            top_k: Some(1),
+            ..jaccard_cfg()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        r.iter().map(|p| (p.a, p.b)).collect::<Vec<_>>(),
+        vec![(0, 1), (1, 2)]
+    );
+    let r = node_similarity(
+        &g,
+        &SimilarityConfig {
+            cutoff: 0.5,
+            ..jaccard_cfg()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        r.iter().map(|p| (p.a, p.b)).collect::<Vec<_>>(),
+        vec![(0, 1)]
+    );
+    let cos = SimilarityConfig {
+        metric: SimilarityMetric::Cosine,
+        ..jaccard_cfg()
+    };
+    let r = node_similarity(&g, &cos).unwrap();
+    assert!(approx(r[0].score, 2.0 / 6.0f64.sqrt(), 1e-12));
+    assert!(matches!(
+        node_similarity(
+            &g,
+            &SimilarityConfig {
+                top_k: Some(0),
+                ..jaccard_cfg()
+            }
+        ),
+        Err(Error::InvalidParameter(_))
+    ));
+}
+
+#[test]
+fn node_similarity_matches_pairwise_functions_on_random_graphs() {
+    let mut rng = XorShift64::new(606);
+    for case in 0..30 {
+        let n = 12u32;
+        let edges = random_edges(&mut rng, n, 40, 0.5, 4.0);
+        let g = Projection::from_weighted_edges(n as usize, &edges, case % 2 == 0).unwrap();
+        for (metric, weighted) in [
+            (SimilarityMetric::Jaccard, false),
+            (SimilarityMetric::Cosine, true),
+        ] {
+            let cfg = SimilarityConfig {
+                metric,
+                weighted,
+                ..jaccard_cfg()
+            };
+            let got = node_similarity(&g, &cfg).unwrap();
+            let mut expect = Vec::new();
+            for a in 0..n {
+                for b in a + 1..n {
+                    let s = match metric {
+                        SimilarityMetric::Jaccard => jaccard_similarity(&g, a, b).unwrap(),
+                        SimilarityMetric::Cosine => cosine_similarity(&g, a, b, weighted).unwrap(),
+                    };
+                    if s > 0.0 {
+                        expect.push((a, b, s));
+                    }
+                }
+            }
+            assert_eq!(got.len(), expect.len(), "case {case} {metric:?}");
+            for (p, e) in got.iter().zip(&expect) {
+                assert_eq!((p.a, p.b), (e.0, e.1));
+                assert!(approx(p.score, e.2, 1e-12));
+            }
+        }
+    }
+}
+
+#[test]
+fn node_similarity_edge_cases() {
+    let g = Projection::from_edges(0, &[], true).unwrap();
+    assert!(node_similarity(&g, &jaccard_cfg()).unwrap().is_empty());
+    let g = Projection::from_edges(3, &[], true).unwrap();
+    assert!(node_similarity(&g, &jaccard_cfg()).unwrap().is_empty());
+}

@@ -1,0 +1,255 @@
+mod common;
+
+use common::Rng;
+use seal_sys::{
+    large_page_privilege_held, Backend, FallbackReason, Region, Request, SysError, Width,
+};
+
+fn region(bytes: usize) -> Region {
+    Region::allocate(Request {
+        bytes,
+        align: 64,
+        prefer_huge: false,
+    })
+    .unwrap()
+}
+
+#[test]
+fn hostile_requests_return_errors_without_panicking() {
+    let bad = [
+        (0usize, 64usize, SysError::ZeroSize),
+        (64, 0, SysError::InvalidAlign),
+        (64, 3, SysError::InvalidAlign),
+        (64, usize::MAX, SysError::InvalidAlign),
+        (64, 1 << 31, SysError::InvalidAlign),
+        (usize::MAX, 64, SysError::TooLarge),
+        (isize::MAX as usize + 1, 64, SysError::TooLarge),
+    ];
+    for (bytes, align, want) in bad {
+        let got = Region::allocate(Request {
+            bytes,
+            align,
+            prefer_huge: false,
+        });
+        assert_eq!(got.err(), Some(want), "bytes={bytes} align={align}");
+    }
+    let huge = Region::allocate(Request {
+        bytes: isize::MAX as usize,
+        align: 64,
+        prefer_huge: true,
+    });
+    assert!(huge.is_err());
+}
+
+#[test]
+fn fresh_region_is_zeroed_and_round_trips_every_width() {
+    let mut r = region(4096);
+    let w8 = r.cap_write(0, 64, Width::W8).unwrap();
+    let w16 = r.cap_write(64, 64, Width::W16).unwrap();
+    let w32 = r.cap_write(128, 64, Width::W32).unwrap();
+    let w64 = r.cap_write(192, 64, Width::W64).unwrap();
+    assert_eq!(r.read::<u8>(&w8.downgrade(), 7).unwrap(), 0);
+    r.write::<u8>(&w8, 7, 0xAB).unwrap();
+    r.write::<u16>(&w16, 6, 0xBEEF).unwrap();
+    r.write::<u32>(&w32, 8, 0xDEAD_BEEF).unwrap();
+    r.write::<u64>(&w64, 56, 0x0123_4567_89AB_CDEF).unwrap();
+    assert_eq!(r.read::<u8>(&w8.downgrade(), 7).unwrap(), 0xAB);
+    assert_eq!(r.read::<u16>(&w16.downgrade(), 6).unwrap(), 0xBEEF);
+    assert_eq!(r.read::<u32>(&w32.downgrade(), 8).unwrap(), 0xDEAD_BEEF);
+    assert_eq!(r.read::<u64>(&w64.downgrade(), 56).unwrap(), 0x0123_4567_89AB_CDEF);
+}
+
+#[test]
+fn out_of_range_access_is_rejected_including_overflowing_offsets() {
+    let mut r = region(256);
+    let cap = r.cap_write(64, 64, Width::W32).unwrap();
+    let rd = cap.downgrade();
+    assert_eq!(r.read::<u32>(&rd, 64), Err(SysError::OutOfRange));
+    assert_eq!(r.read::<u32>(&rd, 60).is_ok(), true);
+    assert_eq!(r.read::<u32>(&rd, usize::MAX), Err(SysError::OutOfRange));
+    assert_eq!(r.read::<u32>(&rd, usize::MAX - 3), Err(SysError::OutOfRange));
+    assert_eq!(r.write::<u32>(&cap, 64, 1), Err(SysError::OutOfRange));
+    assert_eq!(r.cap_read(250, 16, Width::W8).err(), Some(SysError::OutOfRange));
+    assert_eq!(r.cap_read(usize::MAX, 2, Width::W8).err(), Some(SysError::OutOfRange));
+    assert_eq!(r.cap_read(2, usize::MAX, Width::W8).err(), Some(SysError::OutOfRange));
+    assert_eq!(r.cap_read(0, 0, Width::W8).err(), Some(SysError::ZeroSize));
+}
+
+#[test]
+fn misaligned_access_and_caps_are_rejected() {
+    let r = region(256);
+    let cap = r.cap_read(0, 64, Width::W32).unwrap();
+    assert_eq!(r.read::<u32>(&cap, 2), Err(SysError::Misaligned));
+    assert_eq!(r.read::<u32>(&cap, 1), Err(SysError::Misaligned));
+    assert_eq!(r.read::<u32>(&cap, 4).is_ok(), true);
+    assert_eq!(r.cap_read(1, 8, Width::W32).err(), Some(SysError::Misaligned));
+    assert_eq!(r.cap_read(0, 6, Width::W32).err(), Some(SysError::Misaligned));
+    assert_eq!(r.cap_read(4, 8, Width::W64).err(), Some(SysError::Misaligned));
+    assert_eq!(r.cap_read(2, 8, Width::W16).is_ok(), true);
+}
+
+#[test]
+fn wrong_width_access_is_rejected() {
+    let mut r = region(256);
+    let cap = r.cap_write(0, 64, Width::W32).unwrap();
+    let rd = cap.downgrade();
+    assert_eq!(r.read::<u64>(&rd, 0), Err(SysError::WrongWidth));
+    assert_eq!(r.read::<u8>(&rd, 0), Err(SysError::WrongWidth));
+    assert_eq!(r.read::<u16>(&rd, 0), Err(SysError::WrongWidth));
+    assert_eq!(r.write::<u8>(&cap, 0, 1), Err(SysError::WrongWidth));
+    assert_eq!(r.view::<u64>(&rd).err(), Some(SysError::WrongWidth));
+    assert_eq!(r.view_mut::<u8>(&cap).err(), Some(SysError::WrongWidth));
+}
+
+#[test]
+fn capability_from_another_region_or_revoked_epoch_is_rejected() {
+    let a = region(256);
+    let mut b = region(256);
+    let cap_a = a.cap_read(0, 64, Width::W8).unwrap();
+    assert_eq!(b.read::<u8>(&cap_a, 0), Err(SysError::WrongRegion));
+    assert_eq!(b.prefetch(&cap_a), Err(SysError::WrongRegion));
+    assert_eq!(b.alignment_of(&cap_a), Err(SysError::WrongRegion));
+    let cap_b = b.cap_read(0, 64, Width::W8).unwrap();
+    assert!(b.read::<u8>(&cap_b, 0).is_ok());
+    b.revoke_all_caps();
+    assert_eq!(b.read::<u8>(&cap_b, 0), Err(SysError::WrongRegion));
+}
+
+#[test]
+fn views_cover_exactly_the_capability_range() {
+    let mut r = region(1024);
+    let cap = r.cap_write(128, 256, Width::W32).unwrap();
+    {
+        let v = r.view_mut::<u32>(&cap).unwrap();
+        assert_eq!(v.len(), 64);
+        for (i, x) in v.iter_mut().enumerate() {
+            *x = i as u32 * 3 + 1;
+        }
+    }
+    let v = r.view::<u32>(&cap.downgrade()).unwrap();
+    assert_eq!(v.len(), 64);
+    assert!(v.iter().enumerate().all(|(i, &x)| x == i as u32 * 3 + 1));
+    let before = r.cap_read(0, 128, Width::W8).unwrap();
+    let after = r.cap_read(384, 640, Width::W8).unwrap();
+    assert!(r.view::<u8>(&before).unwrap().iter().all(|&b| b == 0));
+    assert!(r.view::<u8>(&after).unwrap().iter().all(|&b| b == 0));
+}
+
+#[test]
+fn alignment_is_at_least_the_request_for_every_power_of_two() {
+    let mut align = 1usize;
+    while align <= (1 << 21) {
+        let r = Region::allocate(Request {
+            bytes: 4096,
+            align,
+            prefer_huge: false,
+        })
+        .unwrap();
+        let cap = r.cap_read(0, 8, Width::W8).unwrap();
+        assert!(r.alignment_of(&cap).unwrap() >= align, "align={align}");
+        align <<= 1;
+    }
+}
+
+#[test]
+fn prefer_huge_falls_back_cleanly_without_the_privilege() {
+    let held = large_page_privilege_held();
+    let r = Region::allocate(Request {
+        bytes: 3 << 20,
+        align: 64,
+        prefer_huge: true,
+    })
+    .unwrap();
+    println!("large page privilege held: {held}; backend: {:?}; reason: {:?}", r.backend(), r.fallback_reason());
+    if !held {
+        assert_ne!(r.backend(), Backend::LargePages);
+        assert!(r.fallback_reason().is_some());
+        #[cfg(windows)]
+        {
+            assert_eq!(r.backend(), Backend::NormalPages);
+            assert_eq!(r.fallback_reason(), Some(FallbackReason::PrivilegeMissing));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(r.backend(), Backend::StdAlloc);
+            assert_eq!(r.fallback_reason(), Some(FallbackReason::NotWindows));
+        }
+    }
+    assert_eq!(r.len(), 3 << 20);
+    let last = r.cap_read((3 << 20) - 8, 8, Width::W64).unwrap();
+    assert_eq!(r.read::<u64>(&last, 0).unwrap(), 0);
+    assert_eq!(r.cap_read(3 << 20, 8, Width::W8).err(), Some(SysError::OutOfRange));
+}
+
+#[test]
+fn normal_request_reports_no_fallback_reason() {
+    let r = region(4096);
+    assert_eq!(r.fallback_reason(), None);
+    #[cfg(windows)]
+    assert_eq!(r.backend(), Backend::NormalPages);
+    #[cfg(not(windows))]
+    assert_eq!(r.backend(), Backend::StdAlloc);
+}
+
+#[test]
+fn oversized_alignment_on_windows_uses_the_std_allocator() {
+    let r = Region::allocate(Request {
+        bytes: 4096,
+        align: 1 << 20,
+        prefer_huge: false,
+    })
+    .unwrap();
+    let cap = r.cap_read(0, 8, Width::W8).unwrap();
+    assert!(r.alignment_of(&cap).unwrap() >= 1 << 20);
+    assert_eq!(r.backend(), Backend::StdAlloc);
+}
+
+#[test]
+fn prefetch_is_capability_gated() {
+    let r = region(8192);
+    let cap = r.cap_read(64, 4096, Width::W64).unwrap();
+    assert!(r.prefetch(&cap).is_ok());
+    let other = region(8192);
+    assert_eq!(other.prefetch(&cap), Err(SysError::WrongRegion));
+}
+
+#[test]
+fn random_capability_access_matches_a_bounds_model() {
+    let len = 4096usize;
+    let mut r = region(len);
+    let mut rng = Rng(0xC0FFEE);
+    let widths = [Width::W8, Width::W16, Width::W32, Width::W64];
+    let (mut accepted, mut rejected) = (0u32, 0u32);
+    for _ in 0..20_000 {
+        let width = widths[rng.below(4) as usize];
+        let w = width.bytes();
+        let pick = |rng: &mut Rng| match rng.below(4) {
+            0 => rng.next() as usize,
+            1 => usize::MAX - rng.below(16) as usize,
+            _ => rng.below(len as u64 + 64) as usize,
+        };
+        let offset = pick(&mut rng);
+        let cap_len = pick(&mut rng);
+        let model_ok = cap_len != 0
+            && offset.checked_add(cap_len).is_some_and(|e| e <= len)
+            && offset % w == 0
+            && cap_len % w == 0;
+        let got = r.cap_write(offset, cap_len, width);
+        assert_eq!(got.is_ok(), model_ok, "offset={offset} len={cap_len} w={w}");
+        if let Ok(cap) = got {
+            accepted += 1;
+            let at = pick(&mut rng);
+            let access_ok = at.checked_add(w).is_some_and(|e| e <= cap_len) && at % w == 0;
+            let res = match width {
+                Width::W8 => r.write::<u8>(&cap, at, 1),
+                Width::W16 => r.write::<u16>(&cap, at, 1),
+                Width::W32 => r.write::<u32>(&cap, at, 1),
+                Width::W64 => r.write::<u64>(&cap, at, 1),
+            };
+            assert_eq!(res.is_ok(), access_ok);
+        } else {
+            rejected += 1;
+        }
+    }
+    assert!(accepted > 100 && rejected > 100, "accepted={accepted} rejected={rejected}");
+}

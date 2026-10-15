@@ -1,0 +1,78 @@
+//! # uriel-core
+//!
+//! The storage engine of seal: an embedded, ACID property graph on top of
+//! [`redb`](https://docs.rs/redb). It owns the value model, ids, transactions, label and
+//! property indexes, constraints, and schema introspection. It has no query language and
+//! no async runtime; higher crates build Cypher execution and caching on top.
+//!
+//! ```
+//! use uriel_core::{Graph, Props, Value};
+//!
+//! # fn main() -> uriel_core::Result<()> {
+//! let graph = Graph::open_in_memory()?;
+//! graph.create_index("Person", "name")?;
+//!
+//! let mut tx = graph.begin_write()?;
+//! let mut props = Props::new();
+//! props.insert("name".into(), Value::from("Ada"));
+//! let ada = tx.create_node(&["Person"], props)?;
+//! let bob = tx.create_node(&["Person"], Props::new())?;
+//! tx.create_rel(ada, bob, "KNOWS", Props::new())?;
+//! tx.commit()?; // dropping `tx` instead would roll everything back
+//!
+//! let read = graph.begin_read()?;
+//! let found: Vec<_> = read
+//!     .nodes_by_prop("Person", "name", &Value::from("Ada"))?
+//!     .collect::<Result<_, _>>()?;
+//! assert_eq!(found[0].id, ada);
+//! assert_eq!(read.out_rels(ada, Some("KNOWS"))?.count(), 1);
+//! assert_eq!(graph.epoch(), 2); // one commit for the index, one for the data
+//! # Ok(())
+//! # }
+//! ```
+//!
+//!
+//! # Model
+//! * **Transactions**: [`Graph::begin_read`] gives a snapshot that never blocks;
+//!   [`Graph::begin_write`] gives the single writer. Commit is atomic and durable; dropping
+//!   a [`WriteTx`] rolls back.
+//! * **Storage layout**: one `redb` file. Nodes and relationships are records keyed by id;
+//!   adjacency, label, type and property indexes are separate ordered tables whose keys put
+//!   the lookup prefix first, so `out_rels`, `nodes_by_label` and index lookups are range
+//!   scans, never full scans.
+//! * **Epoch**: every effective write commit increments [`Graph::epoch`]. Subscribers
+//!   registered with [`Graph::on_commit`] learn which labels and relationship types each
+//!   commit touched, which is what a result cache needs for invalidation.
+
+#![forbid(unsafe_code)]
+
+pub mod catalog;
+mod checksum;
+mod codec;
+pub mod error;
+pub mod graph;
+pub mod ids;
+mod keys;
+mod overlay;
+mod placement;
+mod read;
+mod tables;
+mod tier;
+pub mod value;
+mod write;
+
+#[cfg(test)]
+mod tests;
+
+pub use catalog::{ConstraintDef, ConstraintKind, EntitySchema, IndexDef, Schema};
+pub use error::{Error, Result};
+pub use graph::{
+    CommitInfo, Graph, Integrity, Mode, ModeCause, ModeEvent, Options, RecordId, ScrubReport,
+    SubscriptionId, Touched,
+};
+pub use ids::{Edge, Node, NodeId, Props, Rel, RelId};
+pub use placement::Placement;
+pub use read::{EdgeIter, IdIter, NodeIter, ReadTx, RelIter, DEFAULT_SCHEMA_SAMPLE};
+pub use tier::{TierCounters, TierStats};
+pub use value::Value;
+pub use write::{WriteTx, MAX_VALUE_DEPTH};

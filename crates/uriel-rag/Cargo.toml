@@ -1,0 +1,17 @@
+[package]
+name = "uriel-rag"
+description = "CLaRa-inspired retrieval for seal: extractive compression, hybrid BM25 + vector search over compressed memories, graph expansion, utility prior"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+uriel-core = { path = "../uriel-core" }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+sha2 = "0.10.9"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3.27.0"

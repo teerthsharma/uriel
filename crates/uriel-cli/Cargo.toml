@@ -1,0 +1,23 @@
+[package]
+name = "uriel-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "uriel"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+sysinfo = "0.33"
+enable-ansi-support = "0.2"
+uriel-mcp = { path = "../uriel-mcp" }
+uriel-rag = { path = "../uriel-rag" }
+uriel-core = { path = "../uriel-core" }
+uriel-place = { path = "../uriel-place" }
+
+[dev-dependencies]
+tempfile = "3"

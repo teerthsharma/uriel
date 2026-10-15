@@ -1,0 +1,20 @@
+[package]
+name = "seal-query"
+description = "Cypher query engine for seal: tree-walking executor over seal-core with result cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seal-core = { path = "../seal-core" }
+seal-cypher = { path = "../seal-cypher" }
+seal-algo = { path = "../seal-algo" }
+seal-cache = { path = "../seal-cache" }
+thiserror = "2"
+serde_json = "1"
+regex = "1"
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "time", "net"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "time", "net"] }

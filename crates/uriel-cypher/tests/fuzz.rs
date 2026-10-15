@@ -1,0 +1,260 @@
+//! Deterministic fuzz-lite tests: the parser must never panic and must always
+//! terminate, and any input it accepts must survive a print/re-parse cycle.
+
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use uriel_cypher::parse;
+
+/// Tiny deterministic linear congruential generator (Knuth MMIX constants).
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) as u32
+    }
+
+    fn below(&mut self, n: usize) -> usize {
+        self.next() as usize % n
+    }
+}
+
+/// Runs `f` on a thread with the default 2 MiB test stack and fails if it
+/// panics, overflows the stack (which aborts the process) or runs too long.
+fn run_bounded(f: impl FnOnce() + Send + 'static) {
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            f();
+            let _ = tx.send(());
+        })
+        .unwrap();
+    rx.recv_timeout(Duration::from_secs(120))
+        .expect("parser did not terminate in time (or panicked)");
+    handle.join().expect("parser panicked");
+}
+
+/// If `input` parses, the canonical print must re-parse to an equal tree.
+fn check(input: &str) {
+    if let Ok(q) = parse(input) {
+        let printed = q.to_string();
+        match parse(&printed) {
+            Ok(again) => assert_eq!(q, again, "input {input:?} printed as {printed:?}"),
+            Err(e) => panic!("input {input:?} printed as {printed:?} which fails: {e}"),
+        }
+    }
+}
+
+const SEEDS: &[&str] = &[
+    "MATCH (n:Person {name: 'Al', age: 3})-[r:KNOWS|LIKES*1..3]->(m) WHERE n.age > 30 AND NOT m:Bot RETURN DISTINCT n.name AS x ORDER BY x DESC SKIP 1 LIMIT 2",
+    "OPTIONAL MATCH p = shortestPath((a)-[*..5]-(b)) WITH p, count(*) AS c WHERE c > 1 RETURN p",
+    "UNWIND [1, 2.5, 0xFF, 'a\\n'] AS x RETURN CASE WHEN x > 1 THEN [y IN [1, 2] WHERE y > 1 | y * 2] ELSE {a: x} END",
+    "MERGE (n:P {id: $id}) ON CREATE SET n.c = 1 ON MATCH SET n += {m: 2}, n:L",
+    "MATCH (n) WHERE EXISTS { (n)-->(m) WHERE m.x = 1 } AND (n)-[:R]->() RETURN [(n)-->(b) | b.name]",
+    "CALL db.stats() YIELD a AS x WHERE x > 1 RETURN x UNION ALL RETURN 1 AS x",
+    "CALL { MATCH (n) RETURN n } RETURN n // comment",
+    "CREATE CONSTRAINT c IF NOT EXISTS FOR (n:P) REQUIRE (n.a, n.b) IS UNIQUE",
+    "CREATE INDEX FOR ()-[r:R]-() ON (r.w)",
+    "EXPLAIN MATCH (a) DETACH DELETE a /* done */",
+    "RETURN reduce(a = 0, x IN [1, 2] | a + x), all(x IN l WHERE x), a[1..2], a.b.c, 1 + 2 * 3 ^ 4",
+    "SHOW INDEXES",
+];
+
+const WORDS: &[&str] = &[
+    "MATCH",
+    "OPTIONAL",
+    "WHERE",
+    "RETURN",
+    "WITH",
+    "UNWIND",
+    "CREATE",
+    "MERGE",
+    "SET",
+    "REMOVE",
+    "DELETE",
+    "DETACH",
+    "ORDER",
+    "BY",
+    "SKIP",
+    "LIMIT",
+    "UNION",
+    "ALL",
+    "CALL",
+    "YIELD",
+    "AS",
+    "ON",
+    "AND",
+    "OR",
+    "XOR",
+    "NOT",
+    "IN",
+    "IS",
+    "NULL",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "STARTS",
+    "ENDS",
+    "CONTAINS",
+    "EXISTS",
+    "DISTINCT",
+    "INDEX",
+    "CONSTRAINT",
+    "FOR",
+    "REQUIRE",
+    "UNIQUE",
+    "SHOW",
+    "DROP",
+    "EXPLAIN",
+    "n",
+    "m",
+    "x",
+    "Person",
+    "name",
+    "count",
+    "(",
+    ")",
+    "[",
+    "]",
+    "{",
+    "}",
+    "-",
+    "->",
+    "<-",
+    "--",
+    "-->",
+    "<--",
+    ":",
+    ",",
+    ".",
+    "..",
+    "|",
+    "*",
+    "+",
+    "=",
+    "<>",
+    "<=",
+    ">=",
+    "=~",
+    "+=",
+    "$p",
+    "1",
+    "2.5",
+    "'s'",
+    "\"d\"",
+    "`b`",
+    "0x1F",
+    "^",
+    "%",
+    "/",
+    ";",
+    "//",
+    "/*",
+    "*/",
+];
+
+#[test]
+fn fuzz_random_bytes_5000() {
+    run_bounded(|| {
+        let mut rng = Lcg(0x5EED_CAFE);
+        for _ in 0..5000 {
+            let len = rng.below(97);
+            let bytes: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            check(&text);
+        }
+    });
+}
+
+#[test]
+fn fuzz_ascii_punctuation_5000() {
+    run_bounded(|| {
+        let alphabet: Vec<char> = "()[]{}<>-=+*/%^|:;,.$'\"`\\ \n\tabcnxMTRCE0123456789_~!@#&?"
+            .chars()
+            .collect();
+        let mut rng = Lcg(42);
+        for _ in 0..5000 {
+            let len = rng.below(60);
+            let text: String = (0..len)
+                .map(|_| alphabet[rng.below(alphabet.len())])
+                .collect();
+            check(&text);
+        }
+    });
+}
+
+#[test]
+fn fuzz_token_soup_5000() {
+    run_bounded(|| {
+        let mut rng = Lcg(7);
+        for _ in 0..5000 {
+            let n = 1 + rng.below(24);
+            let text = (0..n)
+                .map(|_| WORDS[rng.below(WORDS.len())])
+                .collect::<Vec<_>>()
+                .join(" ");
+            check(&text);
+        }
+    });
+}
+
+#[test]
+fn fuzz_mutated_valid_queries_5000() {
+    run_bounded(|| {
+        let mut rng = Lcg(2024);
+        for _ in 0..5000 {
+            let seed = SEEDS[rng.below(SEEDS.len())];
+            let mut chars: Vec<char> = seed.chars().collect();
+            for _ in 0..1 + rng.below(4) {
+                if chars.is_empty() {
+                    break;
+                }
+                let at = rng.below(chars.len());
+                match rng.below(4) {
+                    0 => {
+                        chars.remove(at);
+                    }
+                    1 => chars.insert(at, char::from(32 + (rng.next() % 95) as u8)),
+                    2 => chars.truncate(at),
+                    _ => {
+                        let w = WORDS[rng.below(WORDS.len())];
+                        for (i, c) in w.chars().enumerate() {
+                            chars.insert(at + i, c);
+                        }
+                    }
+                }
+            }
+            let text: String = chars.into_iter().collect();
+            check(&text);
+        }
+    });
+}
+
+#[test]
+fn fuzz_seeds_themselves_parse_and_round_trip() {
+    for seed in SEEDS {
+        let q = parse(seed).unwrap_or_else(|e| panic!("{seed}: {e}"));
+        assert_eq!(parse(&q.to_string()).unwrap(), q, "{seed}");
+    }
+}
+
+#[test]
+fn fuzz_every_prefix_of_every_seed_terminates() {
+    run_bounded(|| {
+        for seed in SEEDS {
+            let mut ends: Vec<usize> = seed.char_indices().map(|(i, _)| i).collect();
+            ends.push(seed.len());
+            for end in ends {
+                check(&seed[..end]);
+            }
+        }
+    });
+}

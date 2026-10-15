@@ -1,0 +1,238 @@
+//! Execution context: one read snapshot and, for writes, the single write transaction.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
+
+use seal_core::{Edge, Node, NodeId, ReadTx, Rel, RelId, Value, WriteTx};
+
+use crate::error::QResult;
+use crate::val::{Row, Val};
+use crate::QueryStats;
+
+/// Mutable state threaded through the interpreter.
+pub struct Ctx<'a> {
+    /// Snapshot taken when the query started. In write mode it shows the pre-transaction
+    /// state; reads go through `tx` there.
+    pub read: ReadTx,
+    pub tx: Option<WriteTx>,
+    /// Nodes created by this transaction (they are invisible to `read`).
+    pub created: Vec<NodeId>,
+    pub params: &'a BTreeMap<String, Value>,
+    pub stats: QueryStats,
+    /// Labels / relationship types this query depends on (for cache invalidation).
+    pub tags: BTreeSet<String>,
+    /// The query depends on everything (unlabeled nodes, untyped relationships, procedures).
+    pub star: bool,
+    /// The result depends on something other than the graph (`rand()`, `timestamp()`).
+    pub nondet: bool,
+    /// Rows of the group being aggregated, while evaluating aggregate expressions.
+    pub group: Option<Vec<Row>>,
+    pub regexes: HashMap<String, regex::Regex>,
+    node_cache: HashMap<NodeId, Option<Rc<Node>>>,
+    rel_cache: HashMap<RelId, Option<Rc<Rel>>>,
+    pub rand_state: u64,
+}
+
+impl<'a> Ctx<'a> {
+    pub fn new(read: ReadTx, tx: Option<WriteTx>, params: &'a BTreeMap<String, Value>) -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0x9e37_79b9_7f4a_7c15)
+            | 1;
+        Ctx {
+            read,
+            tx,
+            created: Vec::new(),
+            params,
+            stats: QueryStats::default(),
+            tags: BTreeSet::new(),
+            star: false,
+            nondet: false,
+            group: None,
+            regexes: HashMap::new(),
+            node_cache: HashMap::new(),
+            rel_cache: HashMap::new(),
+            rand_state: seed,
+        }
+    }
+
+    pub fn is_write(&self) -> bool {
+        self.tx.is_some()
+    }
+
+    pub fn tx_mut(&mut self) -> QResult<&mut WriteTx> {
+        match self.tx.as_mut() {
+            Some(t) => Ok(t),
+            None => Err(crate::QueryError::ReadOnlyViolation(
+                "write attempted without a write transaction".into(),
+            )),
+        }
+    }
+
+    pub fn invalidate(&mut self) {
+        self.node_cache.clear();
+        self.rel_cache.clear();
+    }
+
+    pub fn node(&mut self, id: NodeId) -> QResult<Option<Rc<Node>>> {
+        if let Some(n) = self.node_cache.get(&id) {
+            return Ok(n.clone());
+        }
+        let n = match &self.tx {
+            Some(tx) => tx.get_node(id)?,
+            None => self.read.get_node(id)?,
+        }
+        .map(Rc::new);
+        self.node_cache.insert(id, n.clone());
+        Ok(n)
+    }
+
+    pub fn rel(&mut self, id: RelId) -> QResult<Option<Rc<Rel>>> {
+        if let Some(n) = self.rel_cache.get(&id) {
+            return Ok(n.clone());
+        }
+        let n = match &self.tx {
+            Some(tx) => tx.get_rel(id)?,
+            None => self.read.get_rel(id)?,
+        }
+        .map(Rc::new);
+        self.rel_cache.insert(id, n.clone());
+        Ok(n)
+    }
+
+    pub fn out_edges(&mut self, n: NodeId, ty: Option<&str>) -> QResult<Vec<Edge>> {
+        Ok(match &self.tx {
+            Some(tx) => tx.out_edges(n, ty)?,
+            None => self.read.out_edges(n, ty)?.collect::<Result<_, _>>()?,
+        })
+    }
+
+    pub fn in_edges(&mut self, n: NodeId, ty: Option<&str>) -> QResult<Vec<Edge>> {
+        Ok(match &self.tx {
+            Some(tx) => tx.in_edges(n, ty)?,
+            None => self.read.in_edges(n, ty)?.collect::<Result<_, _>>()?,
+        })
+    }
+
+    pub fn label_ids(&mut self, label: &str) -> QResult<Vec<NodeId>> {
+        Ok(match &self.tx {
+            Some(tx) => tx.node_ids_by_label(label)?,
+            None => self
+                .read
+                .node_ids_by_label(label)?
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
+    pub fn all_node_ids(&mut self) -> QResult<Vec<NodeId>> {
+        let mut ids: Vec<NodeId> = Vec::new();
+        for n in self.read.all_nodes()? {
+            ids.push(n?.id);
+        }
+        if self.tx.is_some() {
+            ids.extend(self.created.iter().copied());
+            ids.sort();
+            ids.dedup();
+            let mut live = Vec::with_capacity(ids.len());
+            for id in ids {
+                if self.node(id)?.is_some() {
+                    live.push(id);
+                }
+            }
+            return Ok(live);
+        }
+        Ok(ids)
+    }
+
+    /// Index seek on the committed snapshot; `None` when no index applies (or in write mode).
+    pub fn seek(&mut self, label: &str, key: &str, value: &Value) -> QResult<Option<Vec<NodeId>>> {
+        if self.tx.is_some() || !self.read.has_index(label, key)? {
+            return Ok(None);
+        }
+        let mut ids = Vec::new();
+        for n in self.read.nodes_by_prop(label, key, value)? {
+            ids.push(n?.id);
+        }
+        Ok(Some(ids))
+    }
+
+    pub fn has_index(&self, label: &str, key: &str) -> bool {
+        self.read.has_index(label, key).unwrap_or(false)
+    }
+
+    pub fn next_rand(&mut self) -> f64 {
+        let mut x = self.rand_state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.rand_state = x;
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    }
+
+    /// Converts an interpreter value into its public representation (see crate docs).
+    pub fn materialize(&mut self, v: &Val) -> QResult<Value> {
+        Ok(match v {
+            Val::Null => Value::Null,
+            Val::Bool(b) => Value::Bool(*b),
+            Val::Int(i) => Value::Int(*i),
+            Val::Float(f) => Value::Float(*f),
+            Val::Str(s) => Value::String(s.clone()),
+            Val::Raw(v) => v.clone(),
+            Val::List(l) => Value::List(
+                l.iter()
+                    .map(|x| self.materialize(x))
+                    .collect::<QResult<_>>()?,
+            ),
+            Val::Map(m) => {
+                let mut out = BTreeMap::new();
+                for (k, x) in m {
+                    out.insert(k.clone(), self.materialize(x)?);
+                }
+                Value::Map(out)
+            }
+            Val::Node(id) => self.node_map(*id)?,
+            Val::Rel(id) => self.rel_map(*id)?,
+            Val::Path(p) => {
+                let mut items = Vec::with_capacity(p.nodes.len() + p.rels.len());
+                for (i, n) in p.nodes.iter().enumerate() {
+                    items.push(self.node_map(*n)?);
+                    if let Some(r) = p.rels.get(i) {
+                        items.push(self.rel_map(*r)?);
+                    }
+                }
+                Value::List(items)
+            }
+        })
+    }
+
+    pub fn node_map(&mut self, id: NodeId) -> QResult<Value> {
+        let mut m: BTreeMap<String, Value> = BTreeMap::new();
+        let labels = match self.node(id)? {
+            Some(n) => {
+                for (k, v) in &n.props {
+                    m.insert(k.clone(), v.clone());
+                }
+                n.labels.iter().map(|l| Value::String(l.clone())).collect()
+            }
+            None => Vec::new(),
+        };
+        m.insert("_id".into(), Value::Int(id.0 as i64));
+        m.insert("_labels".into(), Value::List(labels));
+        Ok(Value::Map(m))
+    }
+
+    pub fn rel_map(&mut self, id: RelId) -> QResult<Value> {
+        let mut m: BTreeMap<String, Value> = BTreeMap::new();
+        if let Some(r) = self.rel(id)? {
+            for (k, v) in &r.props {
+                m.insert(k.clone(), v.clone());
+            }
+            m.insert("_type".into(), Value::String(r.rel_type.clone()));
+            m.insert("_start".into(), Value::Int(r.src.0 as i64));
+            m.insert("_end".into(), Value::Int(r.dst.0 as i64));
+        }
+        m.insert("_id".into(), Value::Int(id.0 as i64));
+        Ok(Value::Map(m))
+    }
+}

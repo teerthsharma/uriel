@@ -1,0 +1,38 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="t d">
+  <title id="t">Uriel</title>
+  <desc id="d">A flame whose silhouette holds a small graph. Node colour is the memory tier: amber is hot, orange is warm, slate is cold.</desc>
+  <defs>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFB020"/>
+      <stop offset=".55" stop-color="#E8743B"/>
+      <stop offset="1" stop-color="#5B6B91"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="22%" r="60%">
+      <stop offset="0" stop-color="#FFB020" stop-opacity=".30"/>
+      <stop offset="1" stop-color="#FFB020" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#0B1020"/>
+  <rect width="256" height="256" rx="56" fill="url(#glow)"/>
+  <!-- flame -->
+  <path d="M128 24 C72 98 42 150 62 190 C77 217 103 234 128 234 C153 234 179 217 194 190 C214 150 184 98 128 24 Z"
+        fill="#11182E" stroke="url(#rim)" stroke-width="7" stroke-linejoin="round"/>
+  <!-- edges -->
+  <g stroke="#F5F1E8" stroke-opacity=".42" stroke-width="3" stroke-linecap="round">
+    <path d="M128 72 L104 112 M128 72 L152 112 M104 112 L152 112 M104 112 L84 160 M104 112 L128 152
+             M152 112 L128 152 M152 112 L172 160 M84 160 L128 152 M128 152 L172 160
+             M84 160 L106 202 M128 152 L106 202 M128 152 L150 202 M172 160 L150 202 M106 202 L150 202"/>
+  </g>
+  <!-- hot -->
+  <circle cx="128" cy="72" r="16" fill="none" stroke="#FFB020" stroke-opacity=".45" stroke-width="3"/>
+  <circle cx="128" cy="72" r="10" fill="#FFB020"/>
+  <!-- warm -->
+  <g fill="#E8743B">
+    <circle cx="104" cy="112" r="8"/><circle cx="152" cy="112" r="8"/><circle cx="128" cy="152" r="8"/>
+  </g>
+  <!-- cold -->
+  <g fill="#5B6B91">
+    <circle cx="84" cy="160" r="7"/><circle cx="172" cy="160" r="7"/>
+    <circle cx="106" cy="202" r="7"/><circle cx="150" cy="202" r="7"/>
+  </g>
+</svg>

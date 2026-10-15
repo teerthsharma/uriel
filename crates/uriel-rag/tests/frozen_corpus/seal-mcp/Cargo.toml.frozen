@@ -1,0 +1,27 @@
+[package]
+name = "seal-mcp"
+description = "stdio MCP server for seal: Neo4j-compatible Cypher and memory tools over the embedded graph database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "seal_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "seal-mcp"
+path = "src/main.rs"
+
+[dependencies]
+seal-core = { path = "../seal-core" }
+seal-query = { path = "../seal-query" }
+seal-rag = { path = "../seal-rag" }
+seal-house = { path = "../seal-house" }
+serde = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,19 @@
+use std::path::PathBuf;
+
+#[derive(Debug, thiserror::Error)]
+pub enum RagError {
+    #[error("graph database error: {0}")]
+    Graph(#[from] uriel_core::Error),
+    #[error("i/o error on {path}: {source}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("corrupt rag data: {0}")]
+    Corrupt(String),
+    #[error("no chunk with id {0}")]
+    NotFound(u64),
+    #[error("invalid options: {0}")]
+    InvalidOptions(String),
+}

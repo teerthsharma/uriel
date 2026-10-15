@@ -1,0 +1,41 @@
+use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SysError {
+    #[error("zero size")]
+    ZeroSize,
+    #[error("invalid alignment")]
+    InvalidAlign,
+    #[error("size too large")]
+    TooLarge,
+    #[error("out of memory")]
+    OutOfMemory,
+    #[error("access outside the capability range")]
+    OutOfRange,
+    #[error("misaligned access")]
+    Misaligned,
+    #[error("access width does not match the capability width")]
+    WrongWidth,
+    #[error("capability does not belong to this region or was revoked")]
+    WrongRegion,
+    #[error("cap too small for one slab")]
+    CapTooSmall,
+    #[error("hard cap exceeded: requested {requested}, remaining {remaining}")]
+    CapExceeded { requested: usize, remaining: usize },
+    #[error("overlapping jobs")]
+    Overlap,
+    #[error("too many jobs in one batch")]
+    TooManyJobs,
+    #[error("invalid path")]
+    InvalidPath,
+    #[error("os call {call} failed with code {code}")]
+    Os { call: &'static str, code: u32 },
+    #[error("io error: {0:?}")]
+    Io(std::io::ErrorKind),
+    #[error("unsupported on this platform")]
+    Unsupported,
+    #[error("reader is poisoned after a failed wait")]
+    Poisoned,
+    #[error("not implemented")]
+    Unimplemented,
+}

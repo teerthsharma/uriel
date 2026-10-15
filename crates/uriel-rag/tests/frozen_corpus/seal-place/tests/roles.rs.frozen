@@ -1,0 +1,271 @@
+use seal_place::fixed::{FRAC_BITS, ONE};
+use seal_place::{
+    AccessKind, Config, Event, Level, Lifetime, Placer, Region, RegionId, Tier, Weights,
+};
+
+const HUGE_HL: u64 = 1 << 40;
+
+fn reg(id: u32, size: u64, community: u32) -> Region {
+    Region {
+        id: RegionId(id),
+        size,
+        community,
+    }
+}
+
+fn read(p: &mut Placer, id: u32, n: u32) {
+    for _ in 0..n {
+        p.apply(Event::Access {
+            region: RegionId(id),
+            kind: AccessKind::Read,
+        });
+    }
+}
+
+fn plain(topo: i64) -> Weights {
+    Weights {
+        heat: ONE,
+        topo,
+        pin: 1_000_000 * ONE,
+        size: 0,
+        life: 0,
+    }
+}
+
+fn base(hot: u64, warm: u64, prefetch: u64, weights: Weights) -> Config {
+    Config {
+        hot_bytes: hot,
+        warm_bytes: warm,
+        prefetch_bytes: prefetch,
+        half_life: HUGE_HL,
+        weights,
+        gate_capacity: 64,
+        ..Config::default()
+    }
+}
+
+fn locality(topo: i64) -> (Vec<RegionId>, usize) {
+    let regions: Vec<Region> = (0..8).map(|i| reg(i, 1024, i / 4)).collect();
+    let mut p = Placer::new(base(4096, 4096, 0, plain(topo)), &regions, &[]);
+    read(&mut p, 0, 20);
+    for i in 1..4 {
+        read(&mut p, i, 3);
+    }
+    for i in 4..8 {
+        read(&mut p, i, 4);
+    }
+    let hot = p.plan().hot;
+    let in_hot = (0..4).filter(|i| hot.contains(&RegionId(*i))).count();
+    (hot, in_hot)
+}
+
+#[test]
+fn t1_locality_cells_community_prefers_one_tier() {
+    let (hot_off, a_off) = locality(0);
+    let (hot_on, a_on) = locality(ONE);
+    eprintln!("T1: community 0 regions in hot: topo weight 0 -> {a_off}/4, weight 1.0 -> {a_on}/4");
+    assert_eq!(hot_off.len(), 4);
+    assert!(
+        a_off < 4,
+        "baseline must split the community or the test proves nothing"
+    );
+    assert_eq!(hot_on, (0..4).map(RegionId).collect::<Vec<_>>());
+    assert_eq!(a_on, 4);
+}
+
+fn prefetch_run(budget: u64, hot_regions: u32) -> Vec<RegionId> {
+    let regions: Vec<Region> = (0..10).map(|i| reg(i, 1024, i)).collect();
+    let edges: Vec<(RegionId, RegionId)> = [(0, 1), (0, 2), (0, 3), (1, 9), (2, 5)]
+        .into_iter()
+        .map(|(a, b)| (RegionId(a), RegionId(b)))
+        .collect();
+    let mut p = Placer::new(
+        base(1024 * u64::from(hot_regions), 0, budget, plain(0)),
+        &regions,
+        &edges,
+    );
+    read(&mut p, 0, 10);
+    if hot_regions > 1 {
+        read(&mut p, 1, 5);
+    }
+    p.plan().prefetch
+}
+
+#[test]
+fn t2_prefetch_hints_are_one_hop_neighbours_within_budget() {
+    let ids = |v: &[u32]| v.iter().map(|&i| RegionId(i)).collect::<Vec<_>>();
+    assert_eq!(prefetch_run(2048, 1), ids(&[1, 2]));
+    assert_eq!(prefetch_run(0, 1), ids(&[]));
+    assert_eq!(
+        prefetch_run(1 << 20, 1),
+        ids(&[1, 2, 3]),
+        "2-hop region 5 or 9 leaked in"
+    );
+    assert_eq!(prefetch_run(1 << 20, 2), ids(&[2, 3, 9]));
+}
+
+fn frag(sizes: &[u64]) -> seal_place::Placement {
+    let regions: Vec<Region> = sizes
+        .iter()
+        .enumerate()
+        .map(|(i, &s)| reg(i as u32, s, 0))
+        .collect();
+    let mut p = Placer::new(base(1 << 30, 0, 0, plain(0)), &regions, &[]);
+    for i in 0..sizes.len() as u32 {
+        read(&mut p, i, 2);
+    }
+    p.plan()
+}
+
+#[test]
+fn t3_fragmentation_entropy_raises_a_compact_hint() {
+    let uniform = frag(&[4096; 8]);
+    assert_eq!(uniform.hot.len(), 8);
+    assert_eq!(uniform.entropy[0], 0);
+    assert!(
+        uniform.compact.is_empty(),
+        "uniform sizes must not ask for compaction"
+    );
+
+    let mixed = frag(&[
+        1 << 10,
+        1 << 11,
+        1 << 12,
+        1 << 13,
+        1 << 14,
+        1 << 15,
+        1 << 16,
+        1 << 17,
+    ]);
+    let bits3 = 3i64 << FRAC_BITS;
+    assert!(
+        (mixed.entropy[0] - bits3).abs() < 1024,
+        "entropy {} vs 3 bits",
+        mixed.entropy[0]
+    );
+    assert_eq!(mixed.compact, vec![Tier::Hot]);
+
+    let few = frag(&[1 << 10, 1 << 20]);
+    assert!(few.compact.is_empty());
+    eprintln!(
+        "T3: entropy (bits) uniform {:.3}, 8 size classes {:.3}",
+        uniform.entropy[0] as f64 / ONE as f64,
+        mixed.entropy[0] as f64 / ONE as f64
+    );
+}
+
+#[test]
+fn t4_pressure_shrinks_the_hot_budget_in_steps_and_sheds_lowest_score_first() {
+    let regions: Vec<Region> = (0..12).map(|i| reg(i, 1024, i)).collect();
+    let mut p = Placer::new(base(8192, 4096, 0, plain(0)), &regions, &[]);
+    for i in 0..8 {
+        read(&mut p, i, 9 - i);
+    }
+    p.apply(Event::Pin {
+        region: RegionId(6),
+    });
+    p.apply(Event::Pin {
+        region: RegionId(7),
+    });
+
+    let ids = |v: &[u32]| v.iter().map(|&i| RegionId(i)).collect::<Vec<_>>();
+    let cold_before = p.plan().cold;
+    assert_eq!(cold_before, ids(&[8, 9, 10, 11]));
+
+    let expect: [(Level, u64, Vec<RegionId>); 4] = [
+        (Level::Normal, 8192, ids(&[0, 1, 2, 3, 4, 5, 6, 7])),
+        (Level::Elevated, 6144, ids(&[0, 1, 2, 3, 6, 7])),
+        (Level::High, 4096, ids(&[0, 1, 6, 7])),
+        (Level::Critical, 1024, ids(&[6])),
+    ];
+    for (level, budget, hot) in expect {
+        p.apply(Event::Pressure { level });
+        let pl = p.plan();
+        assert_eq!(pl.hot_budget, budget, "{level:?}");
+        assert_eq!(pl.hot, hot, "{level:?}");
+        assert!(pl.hot_bytes <= budget);
+        for c in &cold_before {
+            assert!(
+                pl.cold.contains(c),
+                "{level:?}: cold region {c:?} was touched"
+            );
+        }
+        assert_eq!(
+            pl.hot.len() + pl.warm.len() + pl.cold.len(),
+            12,
+            "partition broken"
+        );
+        if level != Level::Critical {
+            assert!(pl.hot.contains(&RegionId(6)) && pl.hot.contains(&RegionId(7)));
+        }
+    }
+}
+
+#[test]
+fn t5_lifetime_classes_follow_access_spacing() {
+    let regions: Vec<Region> = (0..6).map(|i| reg(i, 1024, i)).collect();
+    let mut cfg = base(1 << 20, 0, 0, plain(0));
+    cfg.half_life = 50;
+    cfg.durable_span = 100;
+    let mut p = Placer::new(cfg, &regions, &[]);
+    read(&mut p, 1, 1);
+    read(&mut p, 2, 4);
+    for _ in 0..5 {
+        read(&mut p, 3, 1);
+        read(&mut p, 5, 40);
+    }
+    read(&mut p, 4, 3);
+    assert_eq!(p.lifetime(RegionId(0)), Some(Lifetime::Ephemeral));
+    assert_eq!(
+        p.lifetime(RegionId(1)),
+        Some(Lifetime::Ephemeral),
+        "single touch"
+    );
+    assert_eq!(
+        p.lifetime(RegionId(3)),
+        Some(Lifetime::Durable),
+        "steady, long span"
+    );
+    assert_eq!(p.lifetime(RegionId(5)), Some(Lifetime::Durable));
+    assert_eq!(
+        p.lifetime(RegionId(2)),
+        Some(Lifetime::Ephemeral),
+        "burst ended"
+    );
+    assert_eq!(
+        p.lifetime(RegionId(4)),
+        Some(Lifetime::Session),
+        "re-used, still active"
+    );
+    for _ in 0..6 {
+        p.apply(Event::Access {
+            region: RegionId(0),
+            kind: AccessKind::Scan,
+        });
+    }
+    assert_eq!(p.lifetime(RegionId(0)), Some(Lifetime::Ephemeral));
+}
+
+fn demote_run(w_life: i64) -> Vec<RegionId> {
+    let regions = [reg(0, 1024, 0), reg(1, 1024, 1)];
+    let w = Weights {
+        heat: ONE,
+        topo: 0,
+        pin: 0,
+        size: 0,
+        life: w_life,
+    };
+    let mut p = Placer::new(base(1024, 0, 0, w), &regions, &[]);
+    read(&mut p, 1, 2);
+    p.apply(Event::Access {
+        region: RegionId(0),
+        kind: AccessKind::Write,
+    });
+    p.plan().hot
+}
+
+#[test]
+fn t5_ephemeral_regions_are_demoted_first() {
+    assert_eq!(demote_run(0), vec![RegionId(0)]);
+    assert_eq!(demote_run(ONE), vec![RegionId(1)]);
+}

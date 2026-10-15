@@ -1,0 +1,249 @@
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use seal_place::replay::{
+    replay_digest, replay_placements, scenario, Player, Scenario, Sequencer, SplitMix,
+};
+use seal_place::{AccessKind, Config, Event, Level, Placer, Region, RegionId};
+
+const LOGS: u64 = 200;
+const THREADS: [usize; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+fn play_threaded(sc: &Scenario, threads: usize, seed: u64) -> [u8; 32] {
+    let mut rng = SplitMix(seed ^ 0xA5A5_5A5A);
+    let mut batches: Vec<(u64, Vec<Event>)> = Vec::new();
+    let mut i = 0usize;
+    while i < sc.events.len() {
+        let n = 1 + rng.below(13) as usize;
+        let end = (i + n).min(sc.events.len());
+        batches.push((batches.len() as u64, sc.events[i..end].to_vec()));
+        i = end;
+    }
+    let total = batches.len();
+    let (tx, rx) = mpsc::channel::<(u64, Vec<Event>)>();
+    let mut player = Player::new(sc);
+    let mut seq = Sequencer::new();
+    thread::scope(|s| {
+        for k in 0..threads {
+            let tx = tx.clone();
+            let mut mine: Vec<(u64, Vec<Event>)> = batches
+                .iter()
+                .filter(|(q, _)| (*q as usize) % threads == k)
+                .cloned()
+                .collect();
+            let mut r = SplitMix(seed.wrapping_mul(31).wrapping_add(k as u64));
+            for j in (1..mine.len()).rev() {
+                let t = r.below(j as u64 + 1) as usize;
+                mine.swap(j, t);
+            }
+            s.spawn(move || {
+                for b in mine {
+                    match r.below(8) {
+                        0 => thread::sleep(Duration::from_micros(r.below(300))),
+                        1 | 2 => thread::yield_now(),
+                        _ => {}
+                    }
+                    if tx.send(b).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        drop(tx);
+        for _ in 0..total {
+            let (q, b) = rx.recv().expect("producers sent every batch");
+            let ready = seq.push(q, b);
+            player.feed(&ready);
+        }
+    });
+    assert_eq!(seq.pending(), 0, "every batch must have been released");
+    assert_eq!(seq.next_seq(), total as u64);
+    player.finish().0
+}
+
+#[test]
+fn replay_hash_identical_over_8_thread_counts_and_shuffled_arrival() {
+    let mut compared = 0u32;
+    let mut distinct = std::collections::BTreeSet::new();
+    for seed in 0..LOGS {
+        let sc = scenario(seed);
+        assert!(sc.events.len() >= 100, "scenario {seed} is too short");
+        let base = replay_digest(&sc);
+        assert_eq!(
+            base,
+            replay_digest(&sc),
+            "single-thread replay not repeatable, seed {seed}"
+        );
+        distinct.insert(base);
+        for &t in &THREADS {
+            let got = play_threaded(&sc, t, seed * 100 + t as u64);
+            assert_eq!(got, base, "hash differs: seed {seed}, {t} threads");
+            compared += 1;
+        }
+    }
+    assert_eq!(compared, LOGS as u32 * THREADS.len() as u32);
+    assert!(
+        distinct.len() >= 190,
+        "only {} distinct digests over {LOGS} logs",
+        distinct.len()
+    );
+    eprintln!(
+        "REPLAY GATE: {LOGS} logs x {} thread counts = {compared} threaded runs, all equal to the \
+         single-thread digest; {} distinct digests across logs",
+        THREADS.len(),
+        distinct.len()
+    );
+}
+
+fn mutate(sc: &Scenario, seed: u64) -> Scenario {
+    let mut rng = SplitMix(seed ^ 0xDEAD_BEEF);
+    let mut out = sc.clone();
+    let idx = rng.below((sc.events.len() / 2) as u64) as usize;
+    let n = sc.regions.len() as u64;
+    out.events[idx] = match sc.events[idx] {
+        Event::Access { region, kind } => Event::Access {
+            region: RegionId((region.0 + 1 + rng.below(n - 1) as u32) % n as u32),
+            kind,
+        },
+        Event::Pressure { level } => Event::Pressure {
+            level: if level == Level::Normal {
+                Level::Critical
+            } else {
+                Level::Normal
+            },
+        },
+        Event::Pin { region } => Event::Unpin { region },
+        Event::Unpin { region } => Event::Pin { region },
+        Event::Resize { region, size } => Event::Resize {
+            region,
+            size: size * 4 + 4096,
+        },
+    };
+    assert_ne!(out.events[idx], sc.events[idx]);
+    out
+}
+
+#[test]
+fn changing_one_event_changes_the_hash() {
+    let mut changed = 0u32;
+    for seed in 0..LOGS {
+        let sc = scenario(seed);
+        if replay_digest(&mutate(&sc, seed)) != replay_digest(&sc) {
+            changed += 1;
+        }
+    }
+    eprintln!("MUTATION: one-event change altered the digest in {changed}/{LOGS} logs");
+    assert!(
+        changed >= 150,
+        "digest is insensitive to the log: {changed}/{LOGS}"
+    );
+}
+
+#[test]
+fn handcrafted_one_event_change_flips_the_decision() {
+    let regions = [
+        Region {
+            id: RegionId(1),
+            size: 1024,
+            community: 0,
+        },
+        Region {
+            id: RegionId(2),
+            size: 1024,
+            community: 1,
+        },
+    ];
+    let cfg = Config {
+        hot_bytes: 1024,
+        warm_bytes: 0,
+        prefetch_bytes: 0,
+        half_life: 1_000_000,
+        ..Config::default()
+    };
+    let run = |a: [u32; 3]| {
+        let mut p = Placer::new(cfg.clone(), &regions, &[]);
+        for r in a {
+            p.apply(Event::Access {
+                region: RegionId(r),
+                kind: AccessKind::Read,
+            });
+        }
+        p.plan().hot
+    };
+    assert_eq!(run([1, 1, 2]), vec![RegionId(1)]);
+    assert_eq!(run([1, 2, 2]), vec![RegionId(2)]);
+}
+
+#[test]
+fn replay_from_a_checkpoint_equals_replay_from_scratch() {
+    let mut checked = 0u32;
+    for seed in 0..LOGS {
+        let sc = scenario(seed);
+        let full = replay_placements(&sc);
+        let mut rng = SplitMix(seed ^ 0x1234_5678);
+        let k = 1 + rng.below(sc.events.len() as u64 - 1) as usize;
+
+        let mut head = Player::new(&sc);
+        head.feed(&sc.events[..k]);
+        let bytes = head.placer().snapshot();
+        let restored = Placer::restore(sc.config.clone(), &sc.edges, &bytes)
+            .unwrap_or_else(|e| panic!("seed {seed}: restore failed: {e}"));
+        assert_eq!(
+            restored.snapshot(),
+            bytes,
+            "restore is not the identity, seed {seed}"
+        );
+
+        let mut tail = Player::resume(restored, k, sc.plan_every);
+        tail.feed(&sc.events[k..]);
+        let final_state = tail.placer().snapshot();
+        let (_, tail_placements) = tail.finish();
+        let skip = k / sc.plan_every;
+        assert_eq!(
+            tail_placements,
+            full[skip..].to_vec(),
+            "tail after checkpoint at event {k} differs from scratch replay, seed {seed}"
+        );
+
+        let mut scratch = Player::new(&sc);
+        scratch.feed(&sc.events);
+        assert_eq!(
+            final_state,
+            scratch.placer().snapshot(),
+            "final state differs, seed {seed}"
+        );
+        checked += 1;
+    }
+    eprintln!("CHECKPOINT: {checked}/{LOGS} logs: restore-then-replay == replay from scratch");
+    assert_eq!(checked as u64, LOGS);
+}
+
+#[test]
+fn corrupt_checkpoints_never_panic() {
+    let sc = scenario(7);
+    let mut p = Player::new(&sc);
+    p.feed(&sc.events[..120]);
+    let good = p.placer().snapshot();
+    assert!(Placer::restore(sc.config.clone(), &sc.edges, &good).is_ok());
+    for n in 0..good.len() {
+        assert!(
+            Placer::restore(sc.config.clone(), &sc.edges, &good[..n]).is_err(),
+            "n={n}"
+        );
+    }
+    let mut rng = SplitMix(99);
+    for _ in 0..4000 {
+        let mut bad = good.clone();
+        let i = rng.below(bad.len() as u64) as usize;
+        bad[i] ^= 1 << rng.below(8);
+        let _ = Placer::restore(sc.config.clone(), &sc.edges, &bad);
+    }
+    let other = Config {
+        hot_bytes: sc.config.hot_bytes + 1,
+        ..sc.config.clone()
+    };
+    assert!(Placer::restore(other, &sc.edges, &good).is_err());
+    assert!(Placer::restore(sc.config.clone(), &sc.edges, &[]).is_err());
+    assert!(Placer::restore(sc.config.clone(), &sc.edges, &[0xff; 64]).is_err());
+}

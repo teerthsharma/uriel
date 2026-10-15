@@ -1,0 +1,131 @@
+use uriel_topo::layout::topology_order;
+use uriel_topo::measure::{community_graph, random_permutation, two_hop_traffic, Csr};
+use uriel_topo::Error;
+
+fn path(n: usize) -> Csr {
+    let e: Vec<(u32, u32)> = (0..n as u32 - 1).map(|i| (i, i + 1)).collect();
+    Csr::from_edges(n, &e).unwrap()
+}
+
+#[test]
+fn hand_counted_pages_and_lines() {
+    let g = path(200);
+    let ident: Vec<u32> = (0..200).collect();
+    let t = two_hop_traffic(&g, &ident, &[0]).unwrap();
+    assert_eq!(t.nodes, 3.0);
+    assert_eq!(t.node_pages, 1.0);
+    assert_eq!(t.adj_lines, 1.0);
+    assert_eq!(t.adj_pages, 1.0);
+    let mut pos: Vec<u32> = (0..200).collect();
+    pos.swap(1, 64);
+    pos.swap(2, 128);
+    let t = two_hop_traffic(&g, &pos, &[0]).unwrap();
+    assert_eq!(t.nodes, 3.0);
+    assert_eq!(t.node_pages, 3.0);
+    let t = two_hop_traffic(&g, &ident, &[100]).unwrap();
+    assert_eq!(t.nodes, 5.0);
+    assert_eq!(t.node_pages, 1.0);
+}
+
+#[test]
+fn averaging_over_sources() {
+    let g = path(200);
+    let ident: Vec<u32> = (0..200).collect();
+    let a = two_hop_traffic(&g, &ident, &[0]).unwrap();
+    let b = two_hop_traffic(&g, &ident, &[100]).unwrap();
+    let m = two_hop_traffic(&g, &ident, &[0, 100]).unwrap();
+    assert_eq!(m.nodes, (a.nodes + b.nodes) / 2.0);
+    assert_eq!(m.node_pages, (a.node_pages + b.node_pages) / 2.0);
+}
+
+#[test]
+fn rejects_bad_input() {
+    let g = path(10);
+    let ident: Vec<u32> = (0..10).collect();
+    assert!(matches!(
+        two_hop_traffic(&g, &ident[..9], &[0]),
+        Err(Error::Shape(_))
+    ));
+    assert!(matches!(
+        two_hop_traffic(&g, &ident, &[10]),
+        Err(Error::OutOfRange(_))
+    ));
+    let mut bad = ident.clone();
+    bad[3] = 4;
+    assert!(two_hop_traffic(&g, &bad, &[0]).is_err());
+    assert!(matches!(
+        Csr::from_edges(3, &[(0, 3)]),
+        Err(Error::OutOfRange(_))
+    ));
+    let t = two_hop_traffic(&g, &ident, &[]).unwrap();
+    assert_eq!(t.nodes, 0.0);
+    let g2 = Csr::from_edges(3, &[(0, 1), (1, 0), (0, 1), (1, 1), (1, 2)]).unwrap();
+    assert_eq!(g2.len(), 3);
+    assert_eq!(g2.targets.len(), 4);
+}
+
+#[test]
+fn generator_shape_and_determinism() {
+    let (n, e, comm) = community_graph(4000, 8, 1, true);
+    assert_eq!(n, 4000);
+    assert_eq!(comm.len(), 4000);
+    assert_eq!((0..8).filter(|c| comm.contains(c)).count(), 8);
+    assert!(e
+        .iter()
+        .all(|&(a, b)| (a as usize) < n && (b as usize) < n && a != b));
+    let mut deg = vec![0usize; n];
+    for &(a, b) in &e {
+        deg[a as usize] += 1;
+        deg[b as usize] += 1;
+    }
+    let mut s = deg.clone();
+    s.sort();
+    assert!(
+        s[n - 1] >= 8 * s[n / 2],
+        "max {} median {}",
+        s[n - 1],
+        s[n / 2]
+    );
+    let inside = e
+        .iter()
+        .filter(|&&(a, b)| comm[a as usize] == comm[b as usize])
+        .count();
+    assert!(inside as f64 > 0.8 * e.len() as f64);
+    let (_, e2, c2) = community_graph(4000, 8, 1, true);
+    assert_eq!(e, e2);
+    assert_eq!(comm, c2);
+    let (_, _, cc) = community_graph(4000, 8, 1, false);
+    assert!(cc.windows(2).all(|w| w[0] <= w[1]));
+}
+
+#[test]
+fn random_permutation_is_a_permutation_and_seeded() {
+    let p = random_permutation(500, 3);
+    let mut s = p.clone();
+    s.sort();
+    assert_eq!(s, (0..500).collect::<Vec<u32>>());
+    assert_eq!(p, random_permutation(500, 3));
+    assert_ne!(p, random_permutation(500, 4));
+    assert!(random_permutation(0, 1).is_empty());
+}
+
+#[test]
+fn sorted_layout_touches_no_more_pages_than_random_on_community_graph() {
+    let (n, e, _) = community_graph(6000, 8, 2, true);
+    let g = Csr::from_edges(n, &e).unwrap();
+    let sources: Vec<u32> = (0..200).map(|i| (i * 29 % n) as u32).collect();
+    let l = topology_order(n, &e, None).unwrap();
+    let sorted = two_hop_traffic(&g, &l.position, &sources).unwrap();
+    let rand = two_hop_traffic(&g, &random_permutation(n, 5), &sources).unwrap();
+    let ident: Vec<u32> = (0..n as u32).collect();
+    let insertion = two_hop_traffic(&g, &ident, &sources).unwrap();
+    assert!(
+        sorted.node_pages < rand.node_pages,
+        "{sorted:?} vs {rand:?}"
+    );
+    assert!(sorted.node_pages < insertion.node_pages);
+    assert_eq!(
+        sorted.nodes, rand.nodes,
+        "nodes touched are layout invariant"
+    );
+}

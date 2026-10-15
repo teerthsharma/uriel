@@ -1,0 +1,944 @@
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+const TIMEOUT: Duration = Duration::from_secs(60);
+
+const FORMAT_TOOLS: &[&str] = &["rag_search", "seal_recall", "read_neo4j_cypher"];
+
+fn json_format(name: &str, mut args: Value) -> Value {
+    if FORMAT_TOOLS.contains(&name) {
+        if let Some(obj) = args.as_object_mut() {
+            obj.entry("format").or_insert_with(|| json!("json"));
+        }
+    }
+    args
+}
+
+struct Session {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    rx: Receiver<String>,
+    seen: Vec<String>,
+    next_id: u64,
+}
+
+impl Session {
+    fn spawn(args: &[&str]) -> Session {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_seal-mcp"))
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn seal-mcp");
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(l) => {
+                        if tx.send(l).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Session {
+            child,
+            stdin,
+            rx,
+            seen: Vec::new(),
+            next_id: 1,
+        }
+    }
+
+    fn mem() -> Session {
+        Session::spawn(&["--in-memory"])
+    }
+
+    fn send_raw(&mut self, line: &str) {
+        let stdin = self.stdin.as_mut().expect("stdin open");
+        stdin.write_all(line.as_bytes()).unwrap();
+        stdin.write_all(b"\n").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    fn read_line(&mut self) -> String {
+        let line = self
+            .rx
+            .recv_timeout(TIMEOUT)
+            .expect("timed out waiting for a response line");
+        self.seen.push(line.clone());
+        line
+    }
+
+    fn read_json(&mut self) -> Value {
+        let line = self.read_line();
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("stdout line not JSON ({e}): {line}"))
+    }
+
+    fn rpc(&mut self, method: &str, params: Value) -> Value {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send_raw(
+            &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}).to_string(),
+        );
+        let resp = self.read_json();
+        assert_eq!(resp["id"], json!(id), "response id mismatch: {resp}");
+        assert_eq!(resp["jsonrpc"], "2.0");
+        resp
+    }
+
+    fn init(&mut self) -> Value {
+        let r = self.rpc(
+            "initialize",
+            json!({"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}),
+        );
+        self.send_raw(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string());
+        r
+    }
+
+    fn tool(&mut self, name: &str, args: Value) -> (String, bool) {
+        let r = self.rpc("tools/call", json!({"name": name, "arguments": args}));
+        let res = &r["result"];
+        assert!(res.is_object(), "expected result for {name}: {r}");
+        let text = res["content"][0]["text"].as_str().unwrap().to_string();
+        assert_eq!(res["content"][0]["type"], "text");
+        (text, res["isError"].as_bool().unwrap())
+    }
+
+    fn ok(&mut self, name: &str, args: Value) -> Value {
+        let (t, e) = self.tool(name, json_format(name, args));
+        assert!(!e, "{name} failed: {t}");
+        serde_json::from_str(&t).unwrap_or(Value::String(t))
+    }
+
+    fn err(&mut self, name: &str, args: Value) -> String {
+        let (t, e) = self.tool(name, args);
+        assert!(e, "{name} unexpectedly succeeded: {t}");
+        t
+    }
+
+    fn cypher_write(&mut self, q: &str) -> Value {
+        self.ok("write_neo4j_cypher", json!({"query": q}))
+    }
+
+    fn cypher_read(&mut self, q: &str) -> Value {
+        self.ok("read_neo4j_cypher", json!({"query": q}))
+    }
+
+    fn finish(mut self) -> (Vec<String>, bool) {
+        drop(self.stdin.take());
+        while let Ok(l) = self.rx.recv_timeout(TIMEOUT) {
+            self.seen.push(l);
+        }
+        let status = self.child.wait().unwrap();
+        (self.seen, status.success())
+    }
+}
+
+fn tool_names(s: &mut Session) -> Vec<String> {
+    let r = s.rpc("tools/list", json!({}));
+    r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn db_arg(dir: &Path) -> String {
+    dir.join("g.seal").to_string_lossy().into_owned()
+}
+
+fn seed_memory(s: &mut Session) {
+    s.ok(
+        "create_entities",
+        json!({"entities":[
+            {"name":"Ada","type":"Person","observations":["Mathematician","Wrote the first program"]},
+            {"name":"Babbage","type":"Person","observations":["Designed the Analytical Engine"]},
+            {"name":"Analytical Engine","type":"Machine","observations":[]}
+        ]}),
+    );
+    s.ok(
+        "create_relations",
+        json!({"relations":[
+            {"source":"Ada","target":"Babbage","relationType":"WORKED_WITH"},
+            {"source":"Babbage","target":"Analytical Engine","relationType":"DESIGNED"}
+        ]}),
+    );
+}
+
+fn names_of(graph: &Value) -> Vec<String> {
+    let mut v: Vec<String> = graph["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn initialize_handshake_content() {
+    let mut s = Session::mem();
+    let r = s.init();
+    let res = &r["result"];
+    assert_eq!(res["protocolVersion"], "2025-06-18");
+    assert_eq!(res["serverInfo"]["name"], "seal-mcp");
+    assert!(res["serverInfo"]["version"].is_string());
+    assert!(res["capabilities"]["tools"].is_object());
+    assert!(res["capabilities"].get("resources").is_none());
+}
+
+#[test]
+fn initialize_negotiates_older_version() {
+    let mut s = Session::mem();
+    let r = s.rpc("initialize", json!({"protocolVersion":"2024-11-05"}));
+    assert_eq!(r["result"]["protocolVersion"], "2024-11-05");
+}
+
+#[test]
+fn initialize_unknown_version_gets_latest() {
+    let mut s = Session::mem();
+    let r = s.rpc("initialize", json!({"protocolVersion":"1999-01-01"}));
+    assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+}
+
+#[test]
+fn initialized_notification_gets_no_reply() {
+    let mut s = Session::mem();
+    s.init();
+    let r = s.rpc("ping", json!({}));
+    assert_eq!(r["result"], json!({}));
+}
+
+#[test]
+fn unknown_notification_gets_no_reply() {
+    let mut s = Session::mem();
+    s.send_raw(r#"{"jsonrpc":"2.0","method":"nonsense/thing"}"#);
+    let r = s.rpc("ping", json!({}));
+    assert_eq!(r["result"], json!({}));
+}
+
+#[test]
+fn unknown_method_is_32601() {
+    let mut s = Session::mem();
+    let r = s.rpc("does/not/exist", json!({}));
+    assert_eq!(r["error"]["code"], -32601);
+    assert!(r.get("result").is_none());
+}
+
+#[test]
+fn malformed_json_is_32700_and_server_survives() {
+    let mut s = Session::mem();
+    s.send_raw("{not json");
+    let r = s.read_json();
+    assert_eq!(r["error"]["code"], -32700);
+    assert_eq!(r["id"], Value::Null);
+    assert_eq!(s.rpc("ping", json!({}))["result"], json!({}));
+}
+
+#[test]
+fn invalid_request_is_32600() {
+    let mut s = Session::mem();
+    s.send_raw(r#"{"id":5,"method":"ping"}"#);
+    let r = s.read_json();
+    assert_eq!(r["error"]["code"], -32600);
+    assert_eq!(r["id"], 5);
+    s.send_raw("42");
+    assert_eq!(s.read_json()["error"]["code"], -32600);
+}
+
+#[test]
+fn batch_requests_answered_as_array() {
+    let mut s = Session::mem();
+    s.send_raw(
+        r#"[{"jsonrpc":"2.0","id":1,"method":"ping"},{"jsonrpc":"2.0","method":"notifications/initialized"},{"jsonrpc":"2.0","id":2,"method":"nope"}]"#,
+    );
+    let r = s.read_json();
+    let a = r.as_array().unwrap();
+    assert_eq!(a.len(), 2);
+    assert_eq!(a[0]["result"], json!({}));
+    assert_eq!(a[1]["error"]["code"], -32601);
+}
+
+#[test]
+fn string_ids_are_echoed() {
+    let mut s = Session::mem();
+    s.send_raw(r#"{"jsonrpc":"2.0","id":"abc-1","method":"ping"}"#);
+    let r = s.read_json();
+    assert_eq!(r["id"], "abc-1");
+}
+
+#[test]
+fn stdout_is_only_json_rpc() {
+    let mut s = Session::mem();
+    s.init();
+    s.send_raw("garbage");
+    s.read_json();
+    s.rpc("tools/list", json!({}));
+    s.cypher_write("CREATE (:T {x: 1})");
+    s.err("write_neo4j_cypher", json!({"query": "THIS IS NOT CYPHER"}));
+    s.rpc("nope", json!({}));
+    let (lines, ok) = s.finish();
+    assert!(ok, "server should exit 0 on EOF");
+    assert!(lines.len() >= 6);
+    for l in lines {
+        let v: Value = serde_json::from_str(&l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}"));
+        assert_eq!(v["jsonrpc"], "2.0", "not JSON-RPC: {l}");
+        assert!(v.get("result").is_some() || v.get("error").is_some());
+    }
+}
+
+const ALL_TOOLS: &[&str] = &[
+    "get_neo4j_schema",
+    "read_neo4j_cypher",
+    "write_neo4j_cypher",
+    "create_entities",
+    "create_relations",
+    "add_observations",
+    "delete_entities",
+    "delete_observations",
+    "delete_relations",
+    "read_graph",
+    "search_memories",
+    "find_memories_by_name",
+];
+
+const MODE_TOOLS: &[&str] = &[
+    "rag_index",
+    "rag_search",
+    "rag_expand",
+    "rag_feedback",
+    "seal_remember",
+    "seal_recall",
+    "session_reset",
+    "house_need",
+    "house_chart",
+    "house_merge",
+    "house_fact",
+    "house_next",
+    "house_report",
+    "house_test_run",
+    "house_leap",
+    "house_status",
+    "house_select_tests",
+    "house_config",
+];
+
+#[test]
+fn tools_list_names() {
+    let mut s = Session::mem();
+    let mut got = tool_names(&mut s);
+    let mut want: Vec<String> = ALL_TOOLS
+        .iter()
+        .chain(MODE_TOOLS)
+        .map(|x| x.to_string())
+        .collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+}
+
+#[test]
+fn tools_list_schemas_match_neo4j_shapes() {
+    let mut s = Session::mem();
+    let r = s.rpc("tools/list", json!({}));
+    for t in r["result"]["tools"].as_array().unwrap() {
+        let name = t["name"].as_str().unwrap();
+        if MODE_TOOLS.contains(&name) {
+            continue;
+        }
+        let schema = &t["inputSchema"];
+        assert_eq!(schema["type"], "object", "{name}");
+        assert!(schema["properties"].is_object(), "{name}");
+        assert!(schema["required"].is_array(), "{name}");
+        assert!(t["description"].as_str().unwrap().len() > 10, "{name}");
+        let want: &[&str] = match name {
+            "read_neo4j_cypher" | "write_neo4j_cypher" => &["query"],
+            "create_entities" => &["entities"],
+            "create_relations" | "delete_relations" => &["relations"],
+            "add_observations" => &["observations"],
+            "delete_entities" => &["entityNames"],
+            "delete_observations" => &["deletions"],
+            "search_memories" => &["query"],
+            "find_memories_by_name" => &["names"],
+            _ => &[],
+        };
+        let got: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(got, want, "{name}");
+        for p in want {
+            assert!(schema["properties"][p].is_object(), "{name}.{p}");
+        }
+    }
+    let cypher = r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "read_neo4j_cypher")
+        .unwrap();
+    assert_eq!(
+        cypher["inputSchema"]["properties"]["query"]["type"],
+        "string"
+    );
+    assert_eq!(
+        cypher["inputSchema"]["properties"]["params"]["type"],
+        "object"
+    );
+    let ce = r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "create_entities")
+        .unwrap();
+    let item = &ce["inputSchema"]["properties"]["entities"]["items"];
+    assert_eq!(item["required"], json!(["name", "type"]));
+    assert_eq!(
+        item["properties"]["observations"]["items"]["type"],
+        "string"
+    );
+}
+
+#[test]
+fn read_only_hides_write_tools() {
+    let mut s = Session::spawn(&["--in-memory", "--read-only"]);
+    let names = tool_names(&mut s);
+    for hidden in [
+        "write_neo4j_cypher",
+        "create_entities",
+        "create_relations",
+        "add_observations",
+        "delete_entities",
+        "delete_observations",
+        "delete_relations",
+    ] {
+        assert!(!names.contains(&hidden.to_string()), "{hidden} visible");
+    }
+    for shown in [
+        "get_neo4j_schema",
+        "read_neo4j_cypher",
+        "read_graph",
+        "search_memories",
+        "find_memories_by_name",
+    ] {
+        assert!(names.contains(&shown.to_string()), "{shown} missing");
+    }
+}
+
+#[test]
+fn unknown_tool_and_missing_name_are_32602() {
+    let mut s = Session::mem();
+    let r = s.rpc(
+        "tools/call",
+        json!({"name":"drop_everything","arguments":{}}),
+    );
+    assert_eq!(r["error"]["code"], -32602);
+    let r = s.rpc("tools/call", json!({"arguments":{}}));
+    assert_eq!(r["error"]["code"], -32602);
+}
+
+#[test]
+fn write_then_read_round_trip() {
+    let mut s = Session::mem();
+    s.init();
+    s.cypher_write("CREATE (:Person {name: 'Ada', born: 1815})");
+    let rows = s.cypher_read("MATCH (p:Person) RETURN p.name AS name, p.born AS born");
+    assert_eq!(rows, json!([{"name": "Ada", "born": 1815}]));
+}
+
+#[test]
+fn write_returns_counters() {
+    let mut s = Session::mem();
+    let st = s.cypher_write("CREATE (:A {x: 1})-[:R]->(:B)");
+    assert_eq!(st["nodes_created"], 2);
+    assert_eq!(st["relationships_created"], 1);
+    assert_eq!(st["properties_set"], 1);
+}
+
+#[test]
+fn params_are_bound() {
+    let mut s = Session::mem();
+    s.ok(
+        "write_neo4j_cypher",
+        json!({"query":"CREATE (:Person {name: $n, age: $a})","params":{"n":"Grace","a":85}}),
+    );
+    let rows = s.ok(
+        "read_neo4j_cypher",
+        json!({"query":"MATCH (p:Person) WHERE p.name = $n RETURN p.age AS age","params":{"n":"Grace"}}),
+    );
+    assert_eq!(rows, json!([{"age": 85}]));
+}
+
+#[test]
+fn read_tool_rejects_writes() {
+    let mut s = Session::mem();
+    let msg = s.err("read_neo4j_cypher", json!({"query":"CREATE (:Nope)"}));
+    assert!(!msg.is_empty());
+    let rows = s.cypher_read("MATCH (n:Nope) RETURN n");
+    assert_eq!(rows, json!([]), "rejected write must not have persisted");
+}
+
+#[test]
+fn read_tool_rejects_merge_and_delete_too() {
+    let mut s = Session::mem();
+    s.cypher_write("CREATE (:Keep {k: 1})");
+    s.err("read_neo4j_cypher", json!({"query":"MERGE (:Keep {k: 2})"}));
+    s.err(
+        "read_neo4j_cypher",
+        json!({"query":"MATCH (n:Keep) DETACH DELETE n"}),
+    );
+    let rows = s.cypher_read("MATCH (n:Keep) RETURN n.k AS k");
+    assert_eq!(rows, json!([{"k": 1}]));
+}
+
+#[test]
+fn missing_or_bad_query_is_tool_error() {
+    let mut s = Session::mem();
+    s.err("read_neo4j_cypher", json!({}));
+    s.err("read_neo4j_cypher", json!({"query": 5}));
+    s.err("read_neo4j_cypher", json!({"query": "   "}));
+    s.err(
+        "read_neo4j_cypher",
+        json!({"query": "RETURN 1", "params": [1]}),
+    );
+}
+
+#[test]
+fn syntax_error_is_tool_error_not_rpc_error() {
+    let mut s = Session::mem();
+    let msg = s.err("read_neo4j_cypher", json!({"query":"MATCH (n RETURN"}));
+    assert!(!msg.is_empty());
+    assert_eq!(s.rpc("ping", json!({}))["result"], json!({}));
+}
+
+#[test]
+fn schema_reflects_data() {
+    let mut s = Session::mem();
+    s.cypher_write("CREATE (:Person {name: 'Ada'})-[:KNOWS]->(:Company {title: 'X'})");
+    let (text, is_err) = s.tool("get_neo4j_schema", json!({}));
+    assert!(!is_err);
+    serde_json::from_str::<Value>(&text).expect("schema text is JSON");
+    assert!(text.contains("Person"), "{text}");
+    assert!(text.contains("KNOWS"), "{text}");
+}
+
+#[test]
+fn read_only_denies_write_tool_call() {
+    let mut s = Session::spawn(&["--in-memory", "--read-only"]);
+    let msg = s.err("write_neo4j_cypher", json!({"query":"CREATE (:X)"}));
+    assert!(msg.contains("read-only"), "{msg}");
+    let msg = s.err("delete_entities", json!({"entityNames":["a"]}));
+    assert!(msg.contains("read-only"), "{msg}");
+    let rows = s.cypher_read("MATCH (n) RETURN n");
+    assert_eq!(rows, json!([]));
+}
+
+#[test]
+fn read_only_still_reads() {
+    let mut s = Session::spawn(&["--in-memory", "--read-only"]);
+    let rows = s.cypher_read("RETURN 1 AS one");
+    assert_eq!(rows, json!([{"one": 1}]));
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(g, json!({"entities": [], "relations": []}));
+}
+
+#[test]
+fn large_results_are_truncated_with_notice() {
+    let mut s = Session::spawn(&["--in-memory", "--token-limit", "200"]);
+    s.cypher_write("UNWIND range(1, 200) AS i CREATE (:Bulk {id: i, pad: 'xxxxxxxxxx'})");
+    let q = "MATCH (b:Bulk) RETURN b.id AS id, b.pad AS pad ORDER BY id";
+    let (text, is_err) = s.tool("read_neo4j_cypher", json!({"query": q, "format": "json"}));
+    assert!(!is_err);
+    assert!(text.contains("truncated"), "{text}");
+    assert!(text.chars().count() < 400);
+    assert!(text.starts_with("[{"));
+    let (text, is_err) = s.tool("read_neo4j_cypher", json!({"query": q}));
+    assert!(!is_err);
+    assert!(text.contains("truncated"), "{text}");
+    assert!(text.starts_with("#200\n"), "{text}");
+}
+
+#[test]
+fn small_results_are_not_truncated() {
+    let mut s = Session::spawn(&["--in-memory", "--token-limit", "200"]);
+    let (text, _) = s.tool("read_neo4j_cypher", json!({"query":"RETURN 1 AS one"}));
+    assert!(!text.contains("truncated"));
+}
+
+#[test]
+fn data_persists_across_process_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db_arg(dir.path());
+    {
+        let mut s = Session::spawn(&["--db", &db]);
+        s.init();
+        s.cypher_write("CREATE (:Person {name: 'Persisted'})");
+        let (_, ok) = s.finish();
+        assert!(ok);
+    }
+    let mut s = Session::spawn(&["--db", &db]);
+    s.init();
+    let rows = s.cypher_read("MATCH (p:Person) RETURN p.name AS name");
+    assert_eq!(rows, json!([{"name": "Persisted"}]));
+}
+
+#[test]
+fn read_only_run_sees_persisted_data_and_cannot_change_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db_arg(dir.path());
+    {
+        let mut s = Session::spawn(&["--db", &db]);
+        s.cypher_write("CREATE (:Person {name: 'Stored'})");
+        s.finish();
+    }
+    let mut s = Session::spawn(&["--db", &db, "--read-only"]);
+    let rows = s.cypher_read("MATCH (p:Person) RETURN p.name AS name");
+    assert_eq!(rows, json!([{"name": "Stored"}]));
+    s.err(
+        "write_neo4j_cypher",
+        json!({"query":"MATCH (p:Person) DETACH DELETE p"}),
+    );
+    s.err(
+        "read_neo4j_cypher",
+        json!({"query":"MATCH (p:Person) DETACH DELETE p"}),
+    );
+    assert_eq!(
+        s.cypher_read("MATCH (p:Person) RETURN count(p) AS c"),
+        json!([{"c": 1}])
+    );
+}
+
+#[test]
+fn db_parent_directory_is_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("nested").join("deeper").join("g.seal");
+    let mut s = Session::spawn(&["--db", &db.to_string_lossy()]);
+    s.cypher_write("CREATE (:X)");
+    s.finish();
+    assert!(db.exists());
+}
+
+#[test]
+fn memory_graph_persists_across_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = db_arg(dir.path());
+    {
+        let mut s = Session::spawn(&["--db", &db]);
+        seed_memory(&mut s);
+        s.finish();
+    }
+    let mut s = Session::spawn(&["--db", &db]);
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(names_of(&g), ["Ada", "Analytical Engine", "Babbage"]);
+    assert_eq!(g["relations"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn memory_create_and_read_graph_round_trip() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(names_of(&g), ["Ada", "Analytical Engine", "Babbage"]);
+    let ada = g["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "Ada")
+        .unwrap();
+    assert_eq!(ada["type"], "Person");
+    assert_eq!(
+        ada["observations"],
+        json!(["Mathematician", "Wrote the first program"])
+    );
+    let rels = g["relations"].as_array().unwrap();
+    assert!(rels.contains(&json!({"source":"Ada","target":"Babbage","relationType":"WORKED_WITH"})));
+    assert!(rels.contains(
+        &json!({"source":"Babbage","target":"Analytical Engine","relationType":"DESIGNED"})
+    ));
+}
+
+#[test]
+fn memory_entities_get_memory_and_type_labels() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    let rows = s.cypher_read("MATCH (e:Memory:Person) RETURN e.name AS n ORDER BY n");
+    assert_eq!(rows, json!([{"n":"Ada"},{"n":"Babbage"}]));
+    let rows = s.cypher_read("MATCH (e:Machine) RETURN e.name AS n");
+    assert_eq!(rows, json!([{"n":"Analytical Engine"}]));
+}
+
+#[test]
+fn memory_create_entities_is_idempotent_and_merges_observations() {
+    let mut s = Session::mem();
+    s.ok(
+        "create_entities",
+        json!({"entities":[{"name":"Ada","type":"Person","observations":["a","b"]}]}),
+    );
+    let out = s.ok(
+        "create_entities",
+        json!({"entities":[{"name":"Ada","type":"Person","observations":["b","c"]}]}),
+    );
+    assert_eq!(out[0]["observations"], json!(["a", "b", "c"]));
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(g["entities"].as_array().unwrap().len(), 1);
+    assert_eq!(g["entities"][0]["observations"], json!(["a", "b", "c"]));
+}
+
+#[test]
+fn memory_create_entities_retypes_existing() {
+    let mut s = Session::mem();
+    s.ok(
+        "create_entities",
+        json!({"entities":[{"name":"Rex","type":"Dog"}]}),
+    );
+    s.ok(
+        "create_entities",
+        json!({"entities":[{"name":"Rex","type":"Wolf"}]}),
+    );
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(g["entities"][0]["type"], "Wolf");
+    assert_eq!(s.cypher_read("MATCH (e:Dog) RETURN e"), json!([]));
+    assert_eq!(
+        s.cypher_read("MATCH (e:Wolf) RETURN e.name AS n"),
+        json!([{"n":"Rex"}])
+    );
+}
+
+#[test]
+fn memory_search_matches_name_type_and_observations() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    let g = s.ok("search_memories", json!({"query":"mathematician"}));
+    assert_eq!(names_of(&g), ["Ada"]);
+    let g = s.ok("search_memories", json!({"query":"MACHINE"}));
+    assert_eq!(names_of(&g), ["Analytical Engine"]);
+    let g = s.ok("search_memories", json!({"query":"babb"}));
+    assert_eq!(names_of(&g), ["Babbage"]);
+    let g = s.ok("search_memories", json!({"query":"zzz-no-match"}));
+    assert_eq!(g, json!({"entities":[],"relations":[]}));
+}
+
+#[test]
+fn memory_search_returns_relations_among_matches_only() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    let g = s.ok("search_memories", json!({"query":"Engine"}));
+    assert_eq!(names_of(&g), ["Analytical Engine", "Babbage"]);
+    assert_eq!(
+        g["relations"],
+        json!([{"source":"Babbage","target":"Analytical Engine","relationType":"DESIGNED"}])
+    );
+}
+
+#[test]
+fn memory_find_by_name() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    let g = s.ok(
+        "find_memories_by_name",
+        json!({"names":["Ada","Babbage","Nobody"]}),
+    );
+    assert_eq!(names_of(&g), ["Ada", "Babbage"]);
+    assert_eq!(
+        g["relations"],
+        json!([{"source":"Ada","target":"Babbage","relationType":"WORKED_WITH"}])
+    );
+}
+
+#[test]
+fn memory_add_and_delete_observations() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    let out = s.ok(
+        "add_observations",
+        json!({"observations":[{"entityName":"Ada","observations":["Countess","Mathematician"]}]}),
+    );
+    assert_eq!(out[0]["entityName"], "Ada");
+    assert_eq!(out[0]["addedObservations"], json!(["Countess"]));
+    let g = s.ok("find_memories_by_name", json!({"names":["Ada"]}));
+    assert_eq!(
+        g["entities"][0]["observations"],
+        json!(["Mathematician", "Wrote the first program", "Countess"])
+    );
+    s.ok(
+        "delete_observations",
+        json!({"deletions":[{"entityName":"Ada","observations":["Mathematician","not present"]}]}),
+    );
+    let g = s.ok("find_memories_by_name", json!({"names":["Ada"]}));
+    assert_eq!(
+        g["entities"][0]["observations"],
+        json!(["Wrote the first program", "Countess"])
+    );
+}
+
+#[test]
+fn memory_add_observations_to_missing_entity_is_error() {
+    let mut s = Session::mem();
+    let msg = s.err(
+        "add_observations",
+        json!({"observations":[{"entityName":"Ghost","observations":["boo"]}]}),
+    );
+    assert!(msg.contains("Ghost"), "{msg}");
+}
+
+#[test]
+fn memory_delete_relations() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    s.ok(
+        "delete_relations",
+        json!({"relations":[{"source":"Ada","target":"Babbage","relationType":"WORKED_WITH"}]}),
+    );
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(g["entities"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        g["relations"],
+        json!([{"source":"Babbage","target":"Analytical Engine","relationType":"DESIGNED"}])
+    );
+}
+
+#[test]
+fn memory_delete_entities_removes_their_relations() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    let out = s.ok(
+        "delete_entities",
+        json!({"entityNames":["Babbage","Nobody"]}),
+    );
+    assert_eq!(out["deleted_entities"], 1);
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(names_of(&g), ["Ada", "Analytical Engine"]);
+    assert_eq!(g["relations"], json!([]));
+}
+
+#[test]
+fn memory_relation_to_missing_entity_is_error_and_writes_nothing() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    let msg = s.err(
+        "create_relations",
+        json!({"relations":[
+            {"source":"Ada","target":"Analytical Engine","relationType":"USED"},
+            {"source":"Ada","target":"Ghost","relationType":"KNEW"}
+        ]}),
+    );
+    assert!(msg.contains("Ghost"), "{msg}");
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(g["relations"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn memory_create_relations_twice_does_not_duplicate() {
+    let mut s = Session::mem();
+    seed_memory(&mut s);
+    s.ok(
+        "create_relations",
+        json!({"relations":[{"source":"Ada","target":"Babbage","relationType":"WORKED_WITH"}]}),
+    );
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(g["relations"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn memory_name_constraint_rejects_duplicates() {
+    let mut s = Session::mem();
+    s.cypher_write("CREATE (:Memory {name: 'dup'})");
+    let msg = s.err(
+        "write_neo4j_cypher",
+        json!({"query":"CREATE (:Memory {name: 'dup'})"}),
+    );
+    assert!(!msg.is_empty());
+    let rows = s.cypher_read("MATCH (m:Memory {name: 'dup'}) RETURN count(m) AS c");
+    assert_eq!(rows, json!([{"c": 1}]));
+}
+
+#[test]
+fn memory_rejects_hostile_type_and_validates_arguments() {
+    let mut s = Session::mem();
+    s.err(
+        "create_entities",
+        json!({"entities":[{"name":"x","type":"A`) DETACH DELETE (n"}]}),
+    );
+    s.err("create_entities", json!({"entities":[{"name":"x"}]}));
+    s.err("create_entities", json!({}));
+    s.err(
+        "create_relations",
+        json!({"relations":[{"source":"a","target":"b","relationType":"X`Y"}]}),
+    );
+    s.err("find_memories_by_name", json!({"names":"Ada"}));
+    s.err("search_memories", json!({}));
+    s.err("delete_entities", json!({"entityNames":[1]}));
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(g["entities"], json!([]));
+}
+
+#[test]
+fn memory_names_with_quotes_are_parameterised() {
+    let mut s = Session::mem();
+    let nasty = "o'brien\" }) DETACH DELETE (m //";
+    s.ok(
+        "create_entities",
+        json!({"entities":[{"name":"keep","type":"Person"},{"name":nasty,"type":"Person"}]}),
+    );
+    let g = s.ok("find_memories_by_name", json!({"names":[nasty]}));
+    assert_eq!(names_of(&g), [nasty]);
+    let g = s.ok("read_graph", json!({}));
+    assert_eq!(g["entities"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn memory_read_graph_output_is_truncated_by_token_limit() {
+    let mut s = Session::spawn(&["--in-memory", "--token-limit", "150"]);
+    let entities: Vec<Value> = (0..30)
+        .map(|i| json!({"name": format!("entity-{i}"), "type": "Thing", "observations": ["lorem ipsum"]}))
+        .collect();
+    s.ok("create_entities", json!({"entities": entities}));
+    let (text, is_err) = s.tool("read_graph", json!({}));
+    assert!(!is_err);
+    assert!(text.contains("truncated"), "{text}");
+}
+
+#[test]
+fn help_flag_prints_usage_and_exits_zero() {
+    let out = Command::new(env!("CARGO_BIN_EXE_seal-mcp"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("--read-only") && text.contains("--db"));
+}
+
+#[test]
+fn unknown_argument_exits_2_with_empty_stdout() {
+    let out = Command::new(env!("CARGO_BIN_EXE_seal-mcp"))
+        .arg("--bogus")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--bogus"));
+}
+
+#[test]
+fn eof_on_stdin_exits_cleanly() {
+    let s = Session::mem();
+    let (lines, ok) = s.finish();
+    assert!(lines.is_empty());
+    assert!(ok);
+}

@@ -1,0 +1,1275 @@
+//! Behaviour of the House harness through its public API.
+
+mod common;
+
+use common::*;
+use seal_core::Graph;
+use seal_house::*;
+use serde_json::Value;
+use std::sync::Arc;
+
+// ---------------------------------------------------------------- need, chart, merge
+
+#[test]
+fn need_creates_g0_once() {
+    let e = env();
+    let id = e
+        .house
+        .need("proj", "build x", &["it works".into()])
+        .expect("need");
+    assert_eq!(id.as_str(), "G0");
+    assert!(matches!(
+        e.house.need("proj", "again", &[]),
+        Err(HouseError::NeedExists(_))
+    ));
+    let s = e.house.status().expect("status");
+    assert_eq!(s["need"]["id"], "G0");
+    assert_eq!(s["need"]["acceptance"][0], "it works");
+}
+
+#[test]
+fn chart_before_need_is_refused() {
+    let e = env();
+    let r = e
+        .house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()));
+    assert!(r.is_err());
+}
+
+#[test]
+fn submit_chart_validates_per_fellow_and_stores() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    let mut g = base_goals();
+    goal_mut(&mut g, "G1.1").test = None;
+    let v = e
+        .house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, g))
+        .expect_err("rejected");
+    assert!(v
+        .iter()
+        .any(|v| v.rule == 4 && v.goal.as_str() == "G1.1" && v.fellow == Fellow::Foreman));
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("accepted");
+    assert_eq!(e.sink.of_kind("chart").len(), 1);
+}
+
+#[test]
+fn chart_with_wrong_fellow_or_need_is_refused() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    let r = e
+        .house
+        .submit_chart(Fellow::Chase, chart(Fellow::Foreman, base_goals()));
+    assert!(r.is_err());
+    let mut c = chart(Fellow::Foreman, base_goals());
+    c.need = "G7".into();
+    assert!(e.house.submit_chart(Fellow::Foreman, c).is_err());
+}
+
+#[test]
+fn three_rejections_escalate_to_the_user() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    let mut g = base_goals();
+    goal_mut(&mut g, "G1.1").est = None;
+    for _ in 0..3 {
+        assert!(e
+            .house
+            .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, g.clone()))
+            .is_err());
+    }
+    let s = e.house.status().expect("status");
+    assert_eq!(s["escalated"][0], "Foreman");
+}
+
+#[test]
+fn merge_requires_a_foreman_backbone() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    let v = e.house.merge().expect_err("no backbone");
+    assert!(v.iter().any(|v| v.rule == 0 && v.fellow == Fellow::Foreman));
+}
+
+#[test]
+fn merge_reports_counts_and_stores_the_tree() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("chart");
+    let r = e.house.merge().expect("merge");
+    assert_eq!(r.goals, 7); // G0 + 2 branches + 4 leaves
+    assert_eq!(r.leaves, 4);
+    let s = e.house.status().expect("status");
+    assert_eq!(s["merged"], true);
+    assert_eq!(s["goals"]["pending"], 6);
+    assert_eq!(status_of(&e, "G1.1"), "pending");
+}
+
+#[test]
+fn merge_validates_the_merged_tree_across_fellows() {
+    // two fellows write the same file with no ordering -> rule 7 at merge
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    let mut g = base_goals();
+    goal_mut(&mut g, "G1.1").writes = vec!["src/a.rs".into()];
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, g))
+        .expect("foreman");
+    let mut guard = leaf("C1", "G0");
+    guard.parent = None;
+    guard.guards = Some(gid("G2"));
+    guard.writes = vec!["src/a.rs".into()];
+    e.house
+        .submit_chart(Fellow::Chase, chart(Fellow::Chase, vec![guard]))
+        .expect("chase chart alone is fine");
+    let v = e.house.merge().expect_err("conflict");
+    assert!(v.iter().any(|v| v.rule == 7), "{v:?}");
+}
+
+#[test]
+fn duplicate_ids_across_fellows_are_a_merge_conflict() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("foreman");
+    let mut dup = leaf("G1.1", "G0");
+    dup.parent = None;
+    dup.guards = Some(gid("G2"));
+    e.house
+        .submit_chart(Fellow::Chase, chart(Fellow::Chase, vec![dup]))
+        .expect("chase");
+    let v = e.house.merge().expect_err("dup");
+    assert!(
+        v.iter()
+            .any(|v| v.fellow == Fellow::Chase && v.message.contains("G1.1")),
+        "{v:?}"
+    );
+}
+
+#[test]
+fn chase_guard_of_unknown_goal_is_rejected_at_merge() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("foreman");
+    let mut guard = leaf("C1", "G0");
+    guard.parent = None;
+    guard.guards = Some(gid("G9"));
+    e.house
+        .submit_chart(Fellow::Chase, chart(Fellow::Chase, vec![guard]))
+        .expect("chase");
+    let v = e.house.merge().expect_err("unknown target");
+    assert!(v.iter().any(|v| v.rule == 10 && v.fellow == Fellow::Chase));
+}
+
+fn guard_of(id: &str, target: &str) -> Goal {
+    let mut g = leaf(id, "G0");
+    g.parent = None;
+    g.guards = Some(gid(target));
+    g
+}
+
+#[test]
+fn guard_of_a_leaf_runs_after_it_and_gates_the_parent() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("foreman");
+    e.house
+        .submit_chart(
+            Fellow::Chase,
+            chart(Fellow::Chase, vec![guard_of("C1", "G1.1")]),
+        )
+        .expect("chase");
+    e.house.merge().expect("merge");
+    let b = e.house.next().expect("next");
+    assert!(
+        !ids(&b).contains(&"C1".to_string()),
+        "guard waits for its leaf"
+    );
+    assert!(b
+        .governor
+        .deferrals
+        .iter()
+        .any(|d| d.goal.as_str() == "C1" && d.reason == DeferReason::Needs));
+    prove(&e, "G1.1");
+    // G1 must not resolve yet: C1 (child of G1) is not reached
+    prove(&e, "G1.2");
+    assert_eq!(status_of(&e, "G1"), "pending");
+    let b = e.house.next().expect("next");
+    assert!(ids(&b).contains(&"C1".to_string()));
+    let r = prove(&e, "C1");
+    assert_eq!(r.outcome, Outcome::Accepted);
+    assert_eq!(status_of(&e, "G1"), "reached");
+}
+
+#[test]
+fn guard_of_a_branch_becomes_its_child() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("foreman");
+    e.house
+        .submit_chart(
+            Fellow::Chase,
+            chart(Fellow::Chase, vec![guard_of("C2", "G2")]),
+        )
+        .expect("chase");
+    e.house.merge().expect("merge");
+    let b = e.house.next().expect("next");
+    assert!(ids(&b).contains(&"C2".to_string()));
+    let s = e.house.status().expect("status");
+    let c2 = s["goal_list"]
+        .as_array()
+        .expect("list")
+        .iter()
+        .find(|g| g["id"] == "C2")
+        .expect("C2")
+        .clone();
+    assert_eq!(c2["parent"], "G2");
+}
+
+fn cameron(id: &str, alt: &str, tokens: u64, secs: f64) -> Goal {
+    let mut g = leaf(id, "G0");
+    g.parent = None;
+    g.alt_of = Some(gid(alt));
+    g.est = Some(Est {
+        ram_mb: 800,
+        secs,
+        tokens,
+    });
+    g
+}
+
+#[test]
+fn alt_group_runs_the_cheapest_and_retires_the_rest_for_cost() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    let mut g = base_goals();
+    goal_mut(&mut g, "G2.1").needs = vec![gid("G1.1")];
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, g))
+        .expect("foreman");
+    // G1.1 costs 10_000 + 60*20 = 11_200; A1 costs 3_000 + 10*20 = 3_200
+    e.house
+        .submit_chart(
+            Fellow::Cameron,
+            chart(Fellow::Cameron, vec![cameron("A1", "G1.1", 3_000, 10.0)]),
+        )
+        .expect("cameron");
+    let r = e.house.merge().expect("merge");
+    assert!(
+        r.retired.contains(&(gid("G1.1"), "cost".to_string())),
+        "{:?}",
+        r.retired
+    );
+    assert_eq!(r.alt_groups, 1);
+    assert_eq!(status_of(&e, "G1.1"), "retired");
+    let b = e.house.next().expect("next");
+    let got = ids(&b);
+    assert!(got.contains(&"A1".to_string()) && !got.contains(&"G1.1".to_string()));
+    assert!(
+        !got.contains(&"G2.1".to_string()),
+        "needs on the loser resolve to the winner"
+    );
+    prove(&e, "A1");
+    let b = e.house.next().expect("next");
+    assert!(ids(&b).contains(&"G2.1".to_string()));
+    // the loser is a recorded replacement on the board
+    let routes = e.sink.of_kind("route");
+    assert!(routes
+        .iter()
+        .any(|r| r["theory"] == "G1.1" && r["shape"] == "reprice" && r["to"] == "A1"));
+    assert!(e
+        .sink
+        .of_kind("theory")
+        .iter()
+        .any(|t| t["id"] == "G1.1" && t["status"] == "dead"));
+}
+
+#[test]
+fn alt_group_costlier_alternative_loses_and_ties_keep_the_backbone() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("foreman");
+    e.house
+        .submit_chart(
+            Fellow::Cameron,
+            chart(
+                Fellow::Cameron,
+                vec![
+                    cameron("A1", "G1.1", 20_000, 10.0),
+                    cameron("A2", "G1.2", 10_000, 60.0),
+                ],
+            ),
+        )
+        .expect("cameron");
+    let r = e.house.merge().expect("merge");
+    assert!(r.retired.contains(&(gid("A1"), "cost".to_string())));
+    assert!(
+        r.retired.contains(&(gid("A2"), "cost".to_string())),
+        "tie goes to the backbone"
+    );
+    assert_eq!(status_of(&e, "G1.1"), "pending");
+    assert_eq!(status_of(&e, "G1.2"), "pending");
+}
+
+#[test]
+fn refutation_with_a_surviving_alternative_needs_no_rechart() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("foreman");
+    e.house
+        .submit_chart(
+            Fellow::Cameron,
+            chart(Fellow::Cameron, vec![cameron("A1", "G1.1", 30_000, 60.0)]),
+        )
+        .expect("cameron");
+    e.house.merge().expect("merge");
+    assert_eq!(status_of(&e, "A1"), "retired", "costlier alternative lost");
+    e.house
+        .add_fact(Fact {
+            id: "F1".into(),
+            by: "Wilson".into(),
+            refutes: Some(gid("G1.1")),
+            source: "src/a.rs:1".into(),
+            text: "G1.1's route is impossible".into(),
+        })
+        .expect("fact");
+    assert_eq!(status_of(&e, "G1.1"), "retired");
+    assert_eq!(status_of(&e, "A1"), "pending", "alternative now runs");
+    let s = e.house.status().expect("status");
+    assert_eq!(s["pending_rechart"].as_array().expect("arr").len(), 0);
+    assert_eq!(s["leap_candidate"], false);
+    assert!(e
+        .sink
+        .of_kind("fact")
+        .iter()
+        .any(|f| f["id"] == "F1" && f["refutes"] == "G1.1"));
+}
+
+fn refute(e: &Env, goal: &str) {
+    e.house
+        .add_fact(Fact {
+            id: "F1".into(),
+            by: "Wilson".into(),
+            refutes: Some(gid(goal)),
+            source: "src/a.rs:3".into(),
+            text: "does not hold".into(),
+        })
+        .expect("fact");
+}
+
+#[test]
+fn refutation_kills_the_subtree_and_demands_a_rechart() {
+    let e = env();
+    merged(&e, base_goals());
+    refute(&e, "G2");
+    assert_eq!(status_of(&e, "G2"), "blocked");
+    assert_eq!(status_of(&e, "G2.1"), "retired");
+    assert_eq!(status_of(&e, "G2.2"), "retired");
+    let s = e.house.status().expect("status");
+    let p = &s["pending_rechart"][0];
+    assert_eq!(p["goal"], "G2");
+    assert_eq!(p["fellow"], "Foreman");
+    assert_eq!(p["attempts"], 0);
+    // the rest of the tree keeps going and G0 cannot resolve
+    let b = e.house.next().expect("next");
+    assert!(ids(&b).contains(&"G1.1".to_string()) && !ids(&b).iter().any(|i| i.starts_with("G2")));
+}
+
+fn rechart_with_replacement() -> Vec<Goal> {
+    let mut g = base_goals();
+    g.push(branch("G3", "G0"));
+    g.push(leaf("G3.1", "G3"));
+    g.push(leaf("G3.2", "G3"));
+    g
+}
+
+#[test]
+fn rechart_with_a_new_route_replaces_the_refuted_goal() {
+    let e = env();
+    merged(&e, base_goals());
+    refute(&e, "G2");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart(Fellow::Foreman, rechart_with_replacement()),
+        )
+        .expect("rechart");
+    let r = e.house.merge().expect("merge");
+    assert!(r.pending_rechart.is_empty(), "{:?}", r.pending_rechart);
+    assert_eq!(status_of(&e, "G2"), "retired");
+    assert_eq!(status_of(&e, "G3.1"), "pending");
+    let s = e.house.status().expect("status");
+    assert_eq!(s["leap_candidate"], false);
+}
+
+#[test]
+fn two_failed_recharts_block_the_goal_and_flag_a_leap() {
+    let e = env();
+    merged(&e, base_goals());
+    refute(&e, "G2");
+    // same chart again: no replacement
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("rechart 1");
+    let r = e.house.merge().expect("merge 1");
+    assert_eq!(r.pending_rechart, vec![(gid("G2"), Fellow::Foreman, 1)]);
+    assert!(r.leap_candidates.is_empty());
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("rechart 2");
+    let r = e.house.merge().expect("merge 2");
+    assert_eq!(r.leap_candidates, vec![gid("G2")]);
+    assert_eq!(status_of(&e, "G2"), "blocked");
+    let s = e.house.status().expect("status");
+    assert_eq!(s["leap_candidate"], true);
+    assert_eq!(s["leap_candidates"][0], "G2");
+}
+
+#[test]
+fn refuting_an_unknown_goal_only_records_the_fact() {
+    let e = env();
+    merged(&e, base_goals());
+    refute(&e, "G9");
+    assert_eq!(status_of(&e, "G1.1"), "pending");
+    let s = e.house.status().expect("status");
+    assert_eq!(s["facts"].as_array().expect("facts").len(), 1);
+}
+
+// ---------------------------------------------------------------- scheduler and dispatch
+
+#[test]
+fn dispatch_maps_tier_to_model_and_wraps_the_command() {
+    let e = env();
+    let mut g = base_goals();
+    *goal_mut(&mut g, "G1.2") = nurse("G1.2", "G1");
+    merged(&e, g);
+    let b = e.house.next().expect("next");
+    let s = b
+        .dispatches
+        .iter()
+        .find(|d| d.goal.as_str() == "G1.1")
+        .expect("G1.1");
+    assert_eq!(s.model, "sonnet");
+    assert_eq!(s.role, "resident");
+    assert_eq!(s.test.name, "t_G1.1");
+    assert_eq!(
+        s.limits.env.get("CARGO_BUILD_JOBS").map(String::as_str),
+        Some("2")
+    );
+    assert_eq!(
+        s.limits.command,
+        "set CARGO_BUILD_JOBS=2 && start /belownormal /wait /b cargo test -p x t_G1.1"
+    );
+    assert_eq!(s.prompt_pack.text, "do G1.1");
+    assert_eq!(s.prompt_pack.context, vec!["part G1".to_string()]);
+    assert_eq!(s.class, JobClass::TestUnit);
+    assert_eq!(s.cost_mb, 800);
+    let n = b
+        .dispatches
+        .iter()
+        .find(|d| d.goal.as_str() == "G1.2")
+        .expect("G1.2");
+    assert_eq!(n.model, "haiku");
+    assert_eq!(n.role, "nurse");
+    assert_eq!(n.class, JobClass::Light);
+    assert_eq!(n.cost_mb, 50);
+    // dispatched goals are Active and are not dispatched twice
+    assert_eq!(status_of(&e, "G1.1"), "active");
+    let b2 = e.house.next().expect("next");
+    assert!(!ids(&b2).contains(&"G1.1".to_string()));
+    // board events use the house.py shapes
+    assert!(e
+        .sink
+        .of_kind("dispatch")
+        .iter()
+        .any(|d| d["model"] == "sonnet" && d["agent"] == "Foreman"));
+    assert!(e
+        .sink
+        .of_kind("nurse")
+        .iter()
+        .any(|d| d["model"] == "haiku" && d["n"] == 1));
+}
+
+#[test]
+fn ready_set_is_topological_and_ordering_is_natural() {
+    let e = env();
+    let mut g = vec![branch("G1", "G0")];
+    for i in [10, 2, 1] {
+        g.push(leaf(&format!("G1.{i}"), "G1"));
+    }
+    g.push(branch("G2", "G0"));
+    g.push(leaf("G2.1", "G2"));
+    g.push(leaf("G2.2", "G2"));
+    goal_mut(&mut g, "G2.2").needs = vec![gid("G2.1")];
+    merged(&e, g);
+    let b = e.house.next().expect("next");
+    assert_eq!(ids(&b), vec!["G1.1", "G1.2", "G1.10", "G2.1"]);
+    let d = b
+        .governor
+        .deferrals
+        .iter()
+        .find(|d| d.goal.as_str() == "G2.2")
+        .expect("deferral");
+    assert_eq!(d.reason, DeferReason::Needs);
+    assert!(d.detail.contains("G2.1"));
+    prove(&e, "G2.1");
+    let b = e.house.next().expect("next");
+    assert_eq!(ids(&b), vec!["G2.2"]);
+}
+
+fn eight_heavy() -> Vec<Goal> {
+    let mut g = vec![branch("G1", "G0"), branch("G2", "G0")];
+    for i in 1..=4 {
+        g.push(leaf(&format!("G1.{i}"), "G1"));
+        g.push(leaf(&format!("G2.{i}"), "G2"));
+    }
+    g
+}
+
+#[test]
+fn heavy_cap_of_six_defers_the_rest() {
+    let e = env_with(60_000, 64_000, |_| {});
+    merged(&e, eight_heavy());
+    let b = e.house.next().expect("next");
+    assert_eq!(b.dispatches.len(), 6);
+    let deferred: Vec<_> = b
+        .governor
+        .deferrals
+        .iter()
+        .filter(|d| d.reason == DeferReason::HeavyCap)
+        .collect();
+    assert_eq!(deferred.len(), 2);
+    assert_eq!(b.governor.heavy_active, 0);
+    // while six are Active, nothing heavy is dispatched
+    let b2 = e.house.next().expect("next");
+    assert!(b2.dispatches.is_empty());
+    assert_eq!(b2.governor.heavy_active, 6);
+    // finish one: exactly one slot opens
+    prove(&e, "G1.1");
+    let b3 = e.house.next().expect("next");
+    assert_eq!(b3.dispatches.len(), 1);
+}
+
+#[test]
+fn ram_below_the_reserve_blocks_heavy_but_not_light() {
+    let e = env_with(2_000, 16_000, |_| {});
+    let mut g = base_goals();
+    *goal_mut(&mut g, "G2.1") = nurse("G2.1", "G2");
+    *goal_mut(&mut g, "G2.2") = nurse("G2.2", "G2");
+    merged(&e, g);
+    let b = e.house.next().expect("next");
+    assert_eq!(ids(&b), vec!["G2.1", "G2.2"], "nurses only");
+    assert_eq!(b.governor.reserve_mb, 2_400);
+    assert_eq!(b.governor.heavy_slots, 0);
+    let ram: Vec<_> = b
+        .governor
+        .deferrals
+        .iter()
+        .filter(|d| d.reason == DeferReason::Ram)
+        .collect();
+    assert_eq!(ram.len(), 2);
+    // RAM recovers: heavy leaves flow
+    e.probe.set_free(8_000);
+    let b = e.house.next().expect("next");
+    assert_eq!(ids(&b), vec!["G1.1", "G1.2"]);
+}
+
+#[test]
+fn ram_headroom_is_shared_by_a_batch() {
+    // free 3500, reserve 2400 -> 1100 MB headroom -> one 800 MB leaf
+    let e = env_with(3_500, 16_000, |_| {});
+    merged(&e, base_goals());
+    let b = e.house.next().expect("next");
+    assert_eq!(b.dispatches.len(), 1);
+    assert_eq!(b.governor.heavy_slots, 1);
+    // the 800 MB in flight is charged on the next call: 300 MB left, nothing more
+    let b2 = e.house.next().expect("next");
+    assert!(b2.dispatches.is_empty());
+}
+
+#[test]
+fn learned_cost_replaces_the_prior() {
+    let e = env_with(7_000, 16_000, |_| {});
+    merged(&e, base_goals());
+    // observed peak 2000 MB for test_unit: prior 800 is replaced by the average
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Red, 1.0, 2_000, &[])
+        .expect("run");
+    let b = e.house.next().expect("next");
+    // headroom 4600 / 2000 = 2 leaves
+    assert_eq!(b.dispatches.len(), 2);
+    assert!(b.dispatches.iter().all(|d| d.cost_mb == 2_000));
+}
+
+#[test]
+fn bench_runs_alone() {
+    let e = env();
+    let mut g = base_goals();
+    goal_mut(&mut g, "G2.2").test.as_mut().expect("test").class = "bench".into();
+    goal_mut(&mut g, "G2.2").needs = vec![gid("G2.1")];
+    merged(&e, g);
+    let b = e.house.next().expect("next");
+    assert_eq!(b.dispatches.len(), 3);
+    prove(&e, "G2.1");
+    // G1.1 and G1.2 are still Active, so the bench waits (and the rest drains)
+    let b = e.house.next().expect("next");
+    assert!(b.dispatches.is_empty());
+    assert!(b
+        .governor
+        .deferrals
+        .iter()
+        .any(|d| d.goal.as_str() == "G2.2" && d.reason == DeferReason::BenchExclusive));
+    prove(&e, "G1.1");
+    prove(&e, "G1.2");
+    let b = e.house.next().expect("next");
+    assert_eq!(ids(&b), vec!["G2.2"]);
+}
+
+// ---------------------------------------------------------------- report, RED first, parents
+
+#[test]
+fn reached_requires_the_first_run_to_be_red() {
+    let e = env();
+    merged(&e, base_goals());
+    e.house.next().expect("next");
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Green, 1.0, 100, &[])
+        .expect("green first");
+    let r = e
+        .house
+        .report(
+            &gid("G1.1"),
+            GoalStatus::Reached,
+            evidence("t_G1.1", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Unproven);
+    assert_eq!(r.status, GoalStatus::Active);
+    assert_eq!(status_of(&e, "G1.1"), "active");
+    // a later red does not retroactively fix it
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Red, 1.0, 100, &[])
+        .expect("red");
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Green, 1.0, 100, &[])
+        .expect("green");
+    let r = e
+        .house
+        .report(
+            &gid("G1.1"),
+            GoalStatus::Reached,
+            evidence("t_G1.1", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Unproven);
+    // the board never sees a reached goal that is unproven
+    assert!(e
+        .sink
+        .of_kind("goal")
+        .iter()
+        .all(|g| !(g["id"] == "G1.1" && g["status"] == "reached")));
+}
+
+#[test]
+fn red_then_green_is_accepted_and_emits_the_events() {
+    let e = env();
+    merged(&e, base_goals());
+    e.house.next().expect("next");
+    let r = prove(&e, "G1.1");
+    assert_eq!(r.outcome, Outcome::Accepted);
+    assert_eq!(r.status, GoalStatus::Reached);
+    assert_eq!(status_of(&e, "G1.1"), "reached");
+    let tests = e.sink.of_kind("test");
+    assert_eq!(tests[0]["status"], "red");
+    assert_eq!(tests[0]["name"], "t_G1.1");
+    assert_eq!(tests[1]["status"], "green");
+    assert!(e.sink.of_kind("goal").iter().any(|g| {
+        g["id"] == "G1.1"
+            && g["status"] == "reached"
+            && g["agent"] == "Foreman"
+            && g["by"] == "sonnet"
+            && g["test"] == "t_G1.1"
+    }));
+}
+
+#[test]
+fn reached_without_runs_or_with_a_red_final_run_is_unproven() {
+    let e = env();
+    merged(&e, base_goals());
+    e.house.next().expect("next");
+    let r = e
+        .house
+        .report(
+            &gid("G1.1"),
+            GoalStatus::Reached,
+            evidence("t_G1.1", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Unproven);
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Red, 1.0, 100, &[])
+        .expect("red");
+    let r = e
+        .house
+        .report(
+            &gid("G1.1"),
+            GoalStatus::Reached,
+            evidence("t_G1.1", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Unproven, "latest recorded run is red");
+}
+
+#[test]
+fn reached_with_another_tests_evidence_is_unproven() {
+    let e = env();
+    merged(&e, base_goals());
+    e.house.next().expect("next");
+    e.house
+        .record_test_run("t_G1.2", TestStatus::Red, 1.0, 100, &[])
+        .expect("red");
+    e.house
+        .record_test_run("t_G1.2", TestStatus::Green, 1.0, 100, &[])
+        .expect("green");
+    let r = e
+        .house
+        .report(
+            &gid("G1.1"),
+            GoalStatus::Reached,
+            evidence("t_G1.2", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Unproven);
+}
+
+#[test]
+fn report_on_unknown_pending_or_retired_goals() {
+    let e = env();
+    merged(&e, base_goals());
+    assert!(matches!(
+        e.house.report(
+            &gid("G9"),
+            GoalStatus::Reached,
+            evidence("x", TestStatus::Green)
+        ),
+        Err(HouseError::UnknownGoal(_))
+    ));
+    // never dispatched
+    let r = e
+        .house
+        .report(
+            &gid("G1.1"),
+            GoalStatus::Reached,
+            evidence("t_G1.1", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Rejected);
+    assert_eq!(r.status, GoalStatus::Pending);
+    // retired by refutation
+    e.house.next().expect("next");
+    refute(&e, "G2");
+    let r = e
+        .house
+        .report(
+            &gid("G2.1"),
+            GoalStatus::Reached,
+            evidence("t_G2.1", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Rejected);
+    assert_eq!(r.status, GoalStatus::Retired);
+}
+
+#[test]
+fn blocked_report_is_recorded_and_frees_the_slot() {
+    let e = env();
+    merged(&e, base_goals());
+    e.house.next().expect("next");
+    let r = e
+        .house
+        .report(
+            &gid("G1.1"),
+            GoalStatus::Blocked,
+            evidence("t_G1.1", TestStatus::Red),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Recorded);
+    assert_eq!(status_of(&e, "G1.1"), "blocked");
+}
+
+#[test]
+fn parents_resolve_when_all_children_are_done_and_g0_completes() {
+    let e = env();
+    merged(&e, base_goals());
+    e.house.next().expect("next");
+    assert!(prove(&e, "G1.1").resolved.is_empty());
+    assert_eq!(prove(&e, "G1.2").resolved, vec![gid("G1")]);
+    assert_eq!(status_of(&e, "G1"), "reached");
+    assert!(!e.house.next().expect("next").complete);
+    prove(&e, "G2.1");
+    let r = prove(&e, "G2.2");
+    assert_eq!(r.resolved, vec![gid("G2"), gid("G0")]);
+    assert_eq!(status_of(&e, "G0"), "reached");
+    let b = e.house.next().expect("next");
+    assert!(b.complete);
+    assert!(!e.sink.of_kind("done").is_empty());
+}
+
+#[test]
+fn retired_children_do_not_hold_a_parent_open() {
+    let e = env();
+    e.house.need("proj", "x", &[]).expect("need");
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("foreman");
+    e.house
+        .submit_chart(
+            Fellow::Cameron,
+            chart(Fellow::Cameron, vec![cameron("A1", "G1.1", 3_000, 10.0)]),
+        )
+        .expect("cameron");
+    e.house.merge().expect("merge");
+    e.house.next().expect("next");
+    prove(&e, "A1");
+    let r = prove(&e, "G1.2");
+    assert_eq!(r.resolved, vec![gid("G1")]);
+}
+
+fn with_integration() -> Vec<Goal> {
+    let mut g = base_goals();
+    goal_mut(&mut g, "G1").test = Some(TestSpec {
+        name: "g1_integration".into(),
+        cmd: "cargo test -p x --test g1".into(),
+        class: "test_unit".into(),
+    });
+    g
+}
+
+#[test]
+fn parent_with_an_integration_test_resolves_only_when_it_passed() {
+    let e = env();
+    merged(&e, with_integration());
+    e.house.next().expect("next");
+    let early = e
+        .house
+        .report(
+            &gid("G1"),
+            GoalStatus::Reached,
+            evidence("g1_integration", TestStatus::Green),
+        )
+        .expect("early");
+    assert_eq!(early.outcome, Outcome::Rejected, "children not done");
+    prove(&e, "G1.1");
+    let r = prove(&e, "G1.2");
+    assert!(r.resolved.is_empty(), "integration test still owed");
+    assert_eq!(status_of(&e, "G1"), "pending");
+    let b = e.house.next().expect("next");
+    let d = b
+        .dispatches
+        .iter()
+        .find(|d| d.goal.as_str() == "G1")
+        .expect("integration dispatch");
+    assert!(d.integration);
+    assert_eq!(d.model, "haiku");
+    assert_eq!(d.test.name, "g1_integration");
+    // red evidence does not resolve it
+    e.house
+        .record_test_run("g1_integration", TestStatus::Red, 1.0, 100, &[])
+        .expect("run");
+    let r = e
+        .house
+        .report(
+            &gid("G1"),
+            GoalStatus::Reached,
+            evidence("g1_integration", TestStatus::Red),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Unproven);
+    e.house
+        .record_test_run("g1_integration", TestStatus::Green, 1.0, 100, &[])
+        .expect("run");
+    let r = e
+        .house
+        .report(
+            &gid("G1"),
+            GoalStatus::Reached,
+            evidence("g1_integration", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Accepted);
+    assert_eq!(status_of(&e, "G1"), "reached");
+}
+
+// ---------------------------------------------------------------- smart testing
+
+fn files(e: &Env, name: &str, body: &str) {
+    std::fs::write(e.dir.path().join(name), body).expect("write file");
+}
+
+#[test]
+fn selection_learns_covers_and_orders_failed_then_cheapest() {
+    let e = env();
+    merged(&e, base_goals());
+    let a = vec!["src/a.rs".to_string()];
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Red, 5.0, 100, &a)
+        .expect("run");
+    e.house
+        .record_test_run("t_G1.2", TestStatus::Green, 1.0, 100, &a)
+        .expect("run");
+    e.house
+        .record_test_run("t_G2.1", TestStatus::Green, 3.0, 100, &a)
+        .expect("run");
+    let picks = e.house.select_tests(&a).expect("select");
+    let names: Vec<_> = picks.iter().map(|p| p.test.as_str()).collect();
+    assert_eq!(names, vec!["t_G1.1", "t_G1.2", "t_G2.1"]);
+    assert!(picks[0].last_failed);
+    assert!(picks.iter().all(|p| p.level == Level::L0));
+    // an untouched file selects nothing
+    assert!(e
+        .house
+        .select_tests(&["src/c.rs".to_string()])
+        .expect("select")
+        .is_empty());
+}
+
+#[test]
+fn selection_includes_the_declared_test_of_goals_touching_the_file() {
+    let e = env();
+    let mut g = base_goals();
+    goal_mut(&mut g, "G2.1").writes = vec!["src/b.rs".into()];
+    merged(&e, g);
+    let picks = e
+        .house
+        .select_tests(&["src/b.rs".to_string()])
+        .expect("select");
+    assert_eq!(picks.len(), 1);
+    assert_eq!(picks[0].test, "t_G2.1");
+    assert_eq!(picks[0].action, PickAction::Run);
+}
+
+#[test]
+fn cached_green_is_reused_until_a_covered_file_changes() {
+    let e = env();
+    merged(&e, base_goals());
+    let a = vec!["src/a.rs".to_string()];
+    e.house
+        .record_test_run("t_G1.2", TestStatus::Green, 1.0, 100, &a)
+        .expect("run");
+    let action = |e: &Env| {
+        e.house
+            .select_tests(&["src/a.rs".to_string()])
+            .expect("select")[0]
+            .action
+    };
+    assert_eq!(action(&e), PickAction::ReuseGreen);
+    files(&e, "src/a.rs", "changed");
+    assert_eq!(action(&e), PickAction::Run, "content hash changed");
+    files(&e, "src/a.rs", "a");
+    assert_eq!(
+        action(&e),
+        PickAction::ReuseGreen,
+        "content restored: same key"
+    );
+    files(&e, "Cargo.lock", "# lock v1");
+    assert_eq!(action(&e), PickAction::Run, "lockfile joins the key");
+}
+
+#[test]
+fn cached_red_is_never_reused() {
+    let e = env();
+    merged(&e, base_goals());
+    let a = vec!["src/a.rs".to_string()];
+    e.house
+        .record_test_run("t_G1.2", TestStatus::Red, 1.0, 100, &a)
+        .expect("run");
+    let picks = e.house.select_tests(&a).expect("select");
+    assert_eq!(picks[0].action, PickAction::Run);
+}
+
+#[test]
+fn flaky_test_is_quarantined_and_never_proof() {
+    let e = env();
+    merged(&e, base_goals());
+    e.house.next().expect("next");
+    let a = vec!["src/a.rs".to_string()];
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Green, 1.0, 100, &a)
+        .expect("run");
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Red, 1.0, 100, &a)
+        .expect("flip with no change");
+    let s = e.house.status().expect("status");
+    assert_eq!(s["quarantined"][0], "t_G1.1");
+    let picks = e.house.select_tests(&a).expect("select");
+    assert_eq!(picks[0].action, PickAction::Quarantined);
+    // even a RED-first history cannot prove a quarantined test
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Red, 1.0, 100, &[])
+        .expect("run");
+    let r = e
+        .house
+        .report(
+            &gid("G1.1"),
+            GoalStatus::Reached,
+            evidence("t_G1.1", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Unproven);
+}
+
+#[test]
+fn a_real_red_to_green_transition_with_changed_files_is_not_a_flake() {
+    let e = env();
+    merged(&e, base_goals());
+    e.house.next().expect("next");
+    let a = vec!["src/a.rs".to_string()];
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Red, 1.0, 100, &a)
+        .expect("red");
+    files(&e, "src/a.rs", "the fix");
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Green, 1.0, 100, &a)
+        .expect("green");
+    let s = e.house.status().expect("status");
+    assert!(s["quarantined"].as_array().expect("arr").is_empty());
+    let r = e
+        .house
+        .report(
+            &gid("G1.1"),
+            GoalStatus::Reached,
+            evidence("t_G1.1", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Accepted);
+}
+
+#[test]
+fn l1_parent_test_and_l2_full_suite_levels() {
+    let e = env();
+    merged(&e, with_integration());
+    let a = vec!["src/a.rs".to_string()];
+    e.house
+        .record_test_run("t_G1.1", TestStatus::Red, 1.0, 100, &a)
+        .expect("run");
+    let picks = e.house.select_tests(&a).expect("select");
+    assert!(picks
+        .iter()
+        .any(|p| p.test == "g1_integration" && p.level == Level::L1));
+    assert!(
+        picks.iter().all(|p| p.level != Level::L2),
+        "L2 off by default"
+    );
+
+    let e2 = env_with(16_000, 16_000, |c| c.allow_full_suite = true);
+    merged(&e2, with_integration());
+    e2.house
+        .record_test_run("t_G1.1", TestStatus::Red, 1.0, 100, &a)
+        .expect("run");
+    let picks = e2.house.select_tests(&a).expect("select");
+    let last = picks.last().expect("picks");
+    assert_eq!(last.level, Level::L2);
+    assert_eq!(last.cmd, "cargo test --workspace");
+}
+
+#[test]
+fn recording_a_run_for_an_unknown_test_is_an_error() {
+    let e = env();
+    merged(&e, base_goals());
+    assert!(matches!(
+        e.house
+            .record_test_run("nope", TestStatus::Red, 1.0, 1, &[]),
+        Err(HouseError::UnknownTest(_))
+    ));
+}
+
+// ---------------------------------------------------------------- persistence
+
+fn open_at(path: &std::path::Path, root: &std::path::Path) -> (House, Arc<VecSink>) {
+    let sink = Arc::new(VecSink::new());
+    let graph = Graph::open(path).expect("graph");
+    let house = House::open(
+        graph,
+        HouseConfig::at(root),
+        Box::new(FakeProbe::new(16_000, 16_000)),
+        Box::new(sink.clone()),
+    )
+    .expect("open");
+    (house, sink)
+}
+
+#[test]
+fn state_survives_a_reopen() {
+    let dir = project();
+    let db = dir.path().join("house.redb");
+    let before;
+    {
+        let (house, _) = open_at(&db, dir.path());
+        house.need("proj", "x", &["ok".into()]).expect("need");
+        house
+            .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+            .expect("chart");
+        house
+            .submit_chart(
+                Fellow::Cameron,
+                chart(Fellow::Cameron, vec![cameron("A1", "G1.1", 3_000, 10.0)]),
+            )
+            .expect("cameron");
+        house.merge().expect("merge");
+        house.next().expect("next");
+        let a = vec!["src/a.rs".to_string()];
+        house
+            .record_test_run("t_G1.2", TestStatus::Green, 1.0, 100, &a)
+            .expect("green first");
+        house
+            .record_test_run("t_A1", TestStatus::Red, 1.0, 100, &a)
+            .expect("red");
+        std::fs::write(dir.path().join("src/a.rs"), "the fix").expect("edit a.rs");
+        house
+            .record_test_run("t_A1", TestStatus::Green, 1.0, 100, &a)
+            .expect("green");
+        house
+            .report(
+                &gid("A1"),
+                GoalStatus::Reached,
+                evidence("t_A1", TestStatus::Green),
+            )
+            .expect("report");
+        house
+            .add_fact(Fact {
+                id: "F1".into(),
+                by: "Wilson".into(),
+                refutes: None,
+                source: "x:1".into(),
+                text: "t".into(),
+            })
+            .expect("fact");
+        before = house.status().expect("status");
+    }
+    let (house, _) = open_at(&db, dir.path());
+    let after = house.status().expect("status");
+    assert_eq!(before["goal_list"], after["goal_list"]);
+    assert_eq!(before["need"], after["need"]);
+    assert_eq!(before["retired"], after["retired"]);
+    assert_eq!(after["goals"]["reached"], 1);
+    // Active goals stay Active: no double dispatch after a restart
+    let b = house.next().expect("next");
+    assert!(!ids(&b).contains(&"G1.2".to_string()));
+    // RED-first history survived: G1.2's first run was green
+    house
+        .record_test_run("t_G1.2", TestStatus::Red, 1.0, 100, &[])
+        .expect("red");
+    house
+        .record_test_run("t_G1.2", TestStatus::Green, 1.0, 100, &[])
+        .expect("green");
+    let r = house
+        .report(
+            &gid("G1.2"),
+            GoalStatus::Reached,
+            evidence("t_G1.2", TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Unproven);
+    // covers and the cache survived
+    let picks = house
+        .select_tests(&["src/a.rs".to_string()])
+        .expect("select");
+    assert!(picks.iter().any(|p| p.test == "t_A1"));
+    // charts survived: merging again keeps reached goals reached
+    house.merge().expect("re-merge");
+    assert_eq!(
+        after["goals"]["reached"],
+        house.status().expect("status")["goals"]["reached"]
+    );
+}
+
+#[test]
+fn graph_holds_the_spec_nodes_and_edges() {
+    let dir = project();
+    let db = dir.path().join("house.redb");
+    {
+        let (house, _) = open_at(&db, dir.path());
+        house.need("proj", "x", &[]).expect("need");
+        let mut g = base_goals();
+        goal_mut(&mut g, "G1.2").needs = vec![gid("G1.1")];
+        goal_mut(&mut g, "G2.1").writes = vec!["src/b.rs".into()];
+        house
+            .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, g))
+            .expect("chart");
+        house
+            .submit_chart(
+                Fellow::Chase,
+                chart(Fellow::Chase, vec![guard_of("C1", "G1.1")]),
+            )
+            .expect("chase");
+        house
+            .submit_chart(
+                Fellow::Cameron,
+                chart(Fellow::Cameron, vec![cameron("A1", "G2.2", 3_000, 10.0)]),
+            )
+            .expect("cameron");
+        house.merge().expect("merge");
+        house
+            .record_test_run(
+                "t_G1.1",
+                TestStatus::Red,
+                2.0,
+                300,
+                &["src/a.rs".to_string()],
+            )
+            .expect("run");
+    }
+    let graph = Graph::open(&db).expect("graph");
+    let tx = graph.begin_read().expect("read");
+    let labels = tx.labels().expect("labels");
+    for l in ["Goal", "Test", "File", "TestRun", "CostObs", "AltGroup"] {
+        assert!(
+            labels.iter().any(|x| x == l),
+            "missing label {l}: {labels:?}"
+        );
+    }
+    let types = tx.rel_types().expect("types");
+    for t in [
+        "DECOMPOSES_INTO",
+        "NEEDS",
+        "TOUCHES",
+        "COVERS",
+        "BOUND_BY",
+        "GUARDS",
+        "ALT_OF",
+        "RETIRED",
+    ] {
+        assert!(
+            types.iter().any(|x| x == t),
+            "missing rel type {t}: {types:?}"
+        );
+    }
+    assert!(tx.check_integrity().expect("integrity").is_empty());
+    let value: Value = Value::Null;
+    let _ = value;
+}
+
+#[test]
+fn status_reports_goal_counts() {
+    let e = env();
+    merged(&e, base_goals());
+    e.house.next().expect("next");
+    let s = e.house.status().expect("status");
+    assert_eq!(s["goals"]["active"], 4);
+    assert_eq!(s["goals"]["pending"], 2);
+    assert_eq!(s["complete"], false);
+}

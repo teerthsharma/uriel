@@ -1,0 +1,421 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use uriel_core::Value;
+use serde_json::{json, Value as Json};
+
+use crate::tools::{read_rows, write_query, Context, ToolResult};
+
+pub const MEMORY_LABEL: &str = "Memory";
+
+pub const CREATE_CONSTRAINT: &str =
+    "CREATE CONSTRAINT `seal.name` IF NOT EXISTS FOR (n:Memory) REQUIRE n.name IS UNIQUE";
+
+type Params = BTreeMap<String, Value>;
+
+fn params(pairs: Vec<(&str, Value)>) -> Params {
+    pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+}
+
+fn s(v: &str) -> Value {
+    Value::String(v.to_string())
+}
+
+fn list(items: &[String]) -> Value {
+    Value::List(items.iter().map(|x| Value::String(x.clone())).collect())
+}
+
+fn quote_ident(raw: &str, what: &str) -> Result<String, String> {
+    if raw.trim().is_empty() {
+        return Err(format!("{what} must not be empty"));
+    }
+    if raw.chars().any(|c| c == '`' || c.is_control()) {
+        return Err(format!(
+            "{what} '{}' contains a backtick or control character",
+            raw.escape_debug()
+        ));
+    }
+    Ok(format!("`{raw}`"))
+}
+
+fn req_array<'a>(args: &'a Json, key: &str) -> Result<&'a Vec<Json>, String> {
+    args.get(key)
+        .and_then(Json::as_array)
+        .ok_or_else(|| format!("'{key}' is required and must be an array"))
+}
+
+fn req_str(item: &Json, key: &str) -> Result<String, String> {
+    item.get(key)
+        .and_then(Json::as_str)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("'{key}' is required and must be a non-empty string"))
+}
+
+fn str_array(item: &Json, key: &str, required: bool) -> Result<Vec<String>, String> {
+    match item.get(key) {
+        None | Some(Json::Null) if !required => Ok(Vec::new()),
+        Some(Json::Array(a)) => a
+            .iter()
+            .map(|x| {
+                x.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("'{key}' must contain only strings"))
+            })
+            .collect(),
+        _ => Err(format!(
+            "'{key}' is required and must be an array of strings"
+        )),
+    }
+}
+
+fn dedup_push(into: &mut Vec<String>, extra: &[String]) -> Vec<String> {
+    let mut added = Vec::new();
+    for o in extra {
+        if !into.contains(o) {
+            into.push(o.clone());
+            added.push(o.clone());
+        }
+    }
+    added
+}
+
+struct Relation {
+    source: String,
+    target: String,
+    kind: String,
+}
+
+fn parse_relations(args: &Json) -> Result<Vec<Relation>, String> {
+    req_array(args, "relations")?
+        .iter()
+        .map(|r| {
+            Ok(Relation {
+                source: req_str(r, "source")?,
+                target: req_str(r, "target")?,
+                kind: req_str(r, "relationType")?,
+            })
+        })
+        .collect()
+}
+
+fn fetch_observations(ctx: &Context, name: &str) -> Result<Option<(String, Vec<String>)>, String> {
+    let rows = read_rows(
+        ctx,
+        "MATCH (e:Memory {name: $name}) RETURN e.type AS type, e.observations AS observations",
+        &params(vec![("name", s(name))]),
+    )?;
+    Ok(rows.first().map(|r| {
+        let ty = r
+            .get("type")
+            .and_then(Json::as_str)
+            .unwrap_or_default()
+            .to_string();
+        (ty, observations_of(r))
+    }))
+}
+
+fn observations_of(row: &Json) -> Vec<String> {
+    row.get("observations")
+        .and_then(Json::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn entity_json(row: &Json) -> Json {
+    json!({
+        "name": row.get("name").cloned().unwrap_or(Json::Null),
+        "type": row.get("type").cloned().unwrap_or(Json::Null),
+        "observations": observations_of(row)
+    })
+}
+
+const ENTITY_RETURN: &str =
+    "RETURN e.name AS name, e.type AS type, e.observations AS observations ORDER BY name";
+
+fn all_entities(ctx: &Context) -> Result<Vec<Json>, String> {
+    let rows = read_rows(
+        ctx,
+        &format!("MATCH (e:Memory) {ENTITY_RETURN}"),
+        &Params::new(),
+    )?;
+    Ok(rows.iter().map(entity_json).collect())
+}
+
+fn all_relations(ctx: &Context) -> Result<Vec<Json>, String> {
+    let rows = read_rows(
+        ctx,
+        "MATCH (a:Memory)-[r]->(b:Memory) RETURN a.name AS source, b.name AS target, type(r) AS relationType ORDER BY source, target, relationType",
+        &Params::new(),
+    )?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            json!({
+                "source": r.get("source").cloned().unwrap_or(Json::Null),
+                "target": r.get("target").cloned().unwrap_or(Json::Null),
+                "relationType": r.get("relationType").cloned().unwrap_or(Json::Null)
+            })
+        })
+        .collect())
+}
+
+fn graph_of(ctx: &Context, entities: Vec<Json>) -> ToolResult {
+    let names: BTreeSet<&str> = entities
+        .iter()
+        .filter_map(|e| e.get("name").and_then(Json::as_str))
+        .collect();
+    let relations: Vec<Json> = all_relations(ctx)?
+        .into_iter()
+        .filter(|r| {
+            let end = |k: &str| r.get(k).and_then(Json::as_str).unwrap_or_default();
+            names.contains(end("source")) && names.contains(end("target"))
+        })
+        .collect();
+    Ok(json!({"entities": entities, "relations": relations}).to_string())
+}
+
+pub fn call(ctx: &Context, name: &str, args: &Json) -> ToolResult {
+    match name {
+        "create_entities" => create_entities(ctx, args),
+        "create_relations" => create_relations(ctx, args),
+        "add_observations" => add_observations(ctx, args),
+        "delete_entities" => delete_entities(ctx, args),
+        "delete_observations" => delete_observations(ctx, args),
+        "delete_relations" => delete_relations(ctx, args),
+        "read_graph" => graph_of(ctx, all_entities(ctx)?),
+        "search_memories" => search_memories(ctx, args),
+        "find_memories_by_name" => find_by_name(ctx, args),
+        other => Err(format!("unhandled tool '{other}'")),
+    }
+}
+
+fn create_entities(ctx: &Context, args: &Json) -> ToolResult {
+    let mut parsed = Vec::new();
+    for e in req_array(args, "entities")? {
+        let name = req_str(e, "name")?;
+        let ty = req_str(e, "type")?;
+        let obs = str_array(e, "observations", false)?;
+        quote_ident(&ty, "entity type")?;
+        parsed.push((name, ty, obs));
+    }
+    let mut out = Vec::new();
+    for (name, ty, new_obs) in parsed {
+        let label = quote_ident(&ty, "entity type")?;
+        let existing = fetch_observations(ctx, &name)?;
+        let mut obs = existing.as_ref().map(|x| x.1.clone()).unwrap_or_default();
+        dedup_push(&mut obs, &new_obs);
+        let p = params(vec![
+            ("name", s(&name)),
+            ("type", s(&ty)),
+            ("obs", list(&obs)),
+        ]);
+        match existing {
+            None => {
+                write_query(
+                    ctx,
+                    &format!(
+                        "CREATE (e:{MEMORY_LABEL}:{label} {{name: $name, type: $type, observations: $obs}})"
+                    ),
+                    &p,
+                )?;
+            }
+            Some((old_ty, _)) => {
+                let mut q = String::from(
+                    "MATCH (e:Memory {name: $name}) SET e.type = $type, e.observations = $obs",
+                );
+                if old_ty != ty {
+                    if let Ok(old) = quote_ident(&old_ty, "entity type") {
+                        q.push_str(&format!(" REMOVE e:{old}"));
+                    }
+                    q.push_str(&format!(" SET e:{label}"));
+                }
+                write_query(ctx, &q, &p)?;
+            }
+        }
+        out.push(json!({"name": name, "type": ty, "observations": obs}));
+    }
+    Ok(Json::Array(out).to_string())
+}
+
+fn require_entities(ctx: &Context, names: impl IntoIterator<Item = String>) -> Result<(), String> {
+    let missing: Vec<String> = names
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|n| match fetch_observations(ctx, &n) {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(Ok(n)),
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<Result<_, _>>()?;
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("entities not found: {}", missing.join(", ")))
+    }
+}
+
+fn create_relations(ctx: &Context, args: &Json) -> ToolResult {
+    let rels = parse_relations(args)?;
+    for r in &rels {
+        quote_ident(&r.kind, "relationType")?;
+    }
+    require_entities(
+        ctx,
+        rels.iter()
+            .flat_map(|r| [r.source.clone(), r.target.clone()]),
+    )?;
+    let mut out = Vec::new();
+    for r in &rels {
+        let kind = quote_ident(&r.kind, "relationType")?;
+        write_query(
+            ctx,
+            &format!(
+                "MATCH (a:Memory {{name: $source}}) MATCH (b:Memory {{name: $target}}) MERGE (a)-[:{kind}]->(b)"
+            ),
+            &params(vec![("source", s(&r.source)), ("target", s(&r.target))]),
+        )?;
+        out.push(json!({"source": r.source, "target": r.target, "relationType": r.kind}));
+    }
+    Ok(Json::Array(out).to_string())
+}
+
+fn set_observations(ctx: &Context, name: &str, obs: &[String]) -> Result<(), String> {
+    write_query(
+        ctx,
+        "MATCH (e:Memory {name: $name}) SET e.observations = $obs",
+        &params(vec![("name", s(name)), ("obs", list(obs))]),
+    )
+    .map(|_| ())
+}
+
+fn add_observations(ctx: &Context, args: &Json) -> ToolResult {
+    let mut items = Vec::new();
+    for o in req_array(args, "observations")? {
+        items.push((
+            req_str(o, "entityName")?,
+            str_array(o, "observations", true)?,
+        ));
+    }
+    require_entities(ctx, items.iter().map(|i| i.0.clone()))?;
+    let mut out = Vec::new();
+    for (name, new_obs) in items {
+        let (_, mut obs) = fetch_observations(ctx, &name)?.unwrap_or_default();
+        let added = dedup_push(&mut obs, &new_obs);
+        set_observations(ctx, &name, &obs)?;
+        out.push(json!({"entityName": name, "addedObservations": added}));
+    }
+    Ok(Json::Array(out).to_string())
+}
+
+fn delete_entities(ctx: &Context, args: &Json) -> ToolResult {
+    let names = str_array(args, "entityNames", true)?;
+    let mut deleted = 0u64;
+    for n in &names {
+        let st = write_query(
+            ctx,
+            "MATCH (e:Memory {name: $name}) DETACH DELETE e",
+            &params(vec![("name", s(n))]),
+        )?;
+        deleted += crate::tools::stats_json(&st)["nodes_deleted"]
+            .as_u64()
+            .unwrap_or(0);
+    }
+    Ok(json!({"deleted_entities": deleted}).to_string())
+}
+
+fn delete_observations(ctx: &Context, args: &Json) -> ToolResult {
+    let mut removed = 0usize;
+    for d in req_array(args, "deletions")? {
+        let name = req_str(d, "entityName")?;
+        let drop = str_array(d, "observations", true)?;
+        if let Some((_, obs)) = fetch_observations(ctx, &name)? {
+            let kept: Vec<String> = obs.iter().filter(|o| !drop.contains(o)).cloned().collect();
+            removed += obs.len() - kept.len();
+            if kept.len() != obs.len() {
+                set_observations(ctx, &name, &kept)?;
+            }
+        }
+    }
+    Ok(json!({"deleted_observations": removed}).to_string())
+}
+
+fn delete_relations(ctx: &Context, args: &Json) -> ToolResult {
+    let rels = parse_relations(args)?;
+    let mut deleted = 0u64;
+    for r in &rels {
+        let kind = quote_ident(&r.kind, "relationType")?;
+        let st = write_query(
+            ctx,
+            &format!("MATCH (a:Memory {{name: $source}})-[r:{kind}]->(b:Memory {{name: $target}}) DELETE r"),
+            &params(vec![("source", s(&r.source)), ("target", s(&r.target))]),
+        )?;
+        deleted += crate::tools::stats_json(&st)["relationships_deleted"]
+            .as_u64()
+            .unwrap_or(0);
+    }
+    Ok(json!({"deleted_relations": deleted}).to_string())
+}
+
+fn search_memories(ctx: &Context, args: &Json) -> ToolResult {
+    let q = req_str(args, "query")?.to_lowercase();
+    let hit = |e: &Json| {
+        let f = |k: &str| {
+            e.get(k)
+                .and_then(Json::as_str)
+                .unwrap_or_default()
+                .to_lowercase()
+        };
+        f("name").contains(&q)
+            || f("type").contains(&q)
+            || observations_of(e)
+                .iter()
+                .any(|o| o.to_lowercase().contains(&q))
+    };
+    let entities = all_entities(ctx)?.into_iter().filter(hit).collect();
+    graph_of(ctx, entities)
+}
+
+fn find_by_name(ctx: &Context, args: &Json) -> ToolResult {
+    let names = str_array(args, "names", true)?;
+    let rows = read_rows(
+        ctx,
+        &format!("MATCH (e:Memory) WHERE e.name IN $names {ENTITY_RETURN}"),
+        &params(vec![("names", list(&names))]),
+    )?;
+    graph_of(ctx, rows.iter().map(entity_json).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quote_ident_rejects_injection() {
+        assert_eq!(quote_ident("Person", "t").unwrap(), "`Person`");
+        assert_eq!(quote_ident("my type", "t").unwrap(), "`my type`");
+        assert!(quote_ident("a`b", "t").is_err());
+        assert!(quote_ident("a\nb", "t").is_err());
+        assert!(quote_ident("  ", "t").is_err());
+    }
+
+    #[test]
+    fn dedup_push_keeps_order_and_reports_added() {
+        let mut v = vec!["a".to_string()];
+        let added = dedup_push(&mut v, &["a".into(), "b".into(), "b".into()]);
+        assert_eq!(v, ["a", "b"]);
+        assert_eq!(added, ["b"]);
+    }
+
+    #[test]
+    fn str_array_validation() {
+        let j = json!({"x": ["a", 1]});
+        assert!(str_array(&j, "x", true).is_err());
+        assert!(str_array(&j, "missing", true).is_err());
+        assert!(str_array(&j, "missing", false).unwrap().is_empty());
+    }
+}

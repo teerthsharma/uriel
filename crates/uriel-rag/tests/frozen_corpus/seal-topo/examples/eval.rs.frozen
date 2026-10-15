@@ -1,0 +1,95 @@
+use std::path::Path;
+
+use seal_topo::eval::{
+    context_recall, repo_context, run_synthetic, verdict, Arm, SynthConfig, Table, LOCAL_WINDOW,
+    SINK_BLOCKS,
+};
+
+const FRACS: [f64; 3] = [0.05, 0.10, 0.25];
+
+fn print_table(t: &Table) {
+    print!("{:<18}", "arm");
+    for f in &t.fracs {
+        print!("{:>16}", format!("{:.0}%", f * 100.0));
+    }
+    println!();
+    for (a, arm) in t.arms.iter().enumerate() {
+        print!("{:<18}", arm.name());
+        for f in 0..t.fracs.len() {
+            print!(
+                "{:>16}",
+                format!("{:.3} +- {:.3}", t.mean(a, f), t.se(a, f))
+            );
+        }
+        println!();
+    }
+    for v in verdict(t) {
+        println!(
+            "verdict {:>4.0}%: topological minus best of (recency, topk) = {:+.3} (paired se {:.3}) -> {}",
+            v.frac * 100.0,
+            v.margin,
+            v.se,
+            if v.win { "WIN" } else { "NOT A WIN" }
+        );
+    }
+}
+
+fn main() {
+    let cfg = SynthConfig::default();
+    println!(
+        "synthetic: {} blocks, dim {}, {} topics, {} noise, {} needles, query_alpha {}, near_dup {}, switch {}",
+        cfg.n_blocks, cfg.dim, cfg.topics, cfg.noise_blocks, cfg.needles, cfg.query_alpha,
+        cfg.near_dup_prob, cfg.topic_switch_prob
+    );
+    println!(
+        "topological arm: sink {SINK_BLOCKS}, local {LOCAL_WINDOW}, relevant = half the block slots of the budget, salient = rest; equal token budget for every arm"
+    );
+    println!(
+        "20 contexts, one sample per context (mean over its 20 queries); +- is the standard error"
+    );
+    let t = run_synthetic(&cfg, 20, &FRACS, &Arm::ALL).unwrap();
+    print_table(&t);
+
+    println!(
+        "\nsynthetic sweep over query_alpha (cosine of the query to its needle), 20 contexts each"
+    );
+    println!(
+        "{:>6} {:>5} {:>9} {:>9} {:>12} {:>9} {:>9}",
+        "alpha", "bud", "recency", "topk", "topological", "margin", "win"
+    );
+    let arms = [Arm::Recency, Arm::TopK, Arm::Topological];
+    for alpha in [0.1, 0.25, 0.5, 0.75] {
+        let c = SynthConfig {
+            query_alpha: alpha,
+            ..SynthConfig::default()
+        };
+        let t = run_synthetic(&c, 20, &FRACS, &arms).unwrap();
+        let v = verdict(&t);
+        for (f, frac) in FRACS.iter().enumerate() {
+            println!(
+                "{:>6.2} {:>4.0}% {:>9.3} {:>9.3} {:>12.3} {:>+9.3} {:>9}",
+                alpha,
+                frac * 100.0,
+                t.mean(0, f),
+                t.mean(1, f),
+                t.mean(2, f),
+                v[f].margin,
+                if v[f].win { "WIN" } else { "no" }
+            );
+        }
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let ctx = repo_context(&root, 24, 256).unwrap();
+    println!(
+        "\nreal data: {} blocks of 24 lines (doc comments removed from blocks), {} tokens (bytes/4), {} held-out doc queries, hash embeddings dim 256",
+        ctx.blocks.len(),
+        ctx.total_tokens(),
+        ctx.queries.len()
+    );
+    println!(
+        "one sample per query; +- is the standard error over queries; random averaged over 5 seeds"
+    );
+    let t = context_recall(&ctx, &FRACS, &Arm::ALL, 5).unwrap();
+    print_table(&t);
+}

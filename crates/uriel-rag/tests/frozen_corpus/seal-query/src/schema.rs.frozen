@@ -1,0 +1,304 @@
+//! Index and constraint administration.
+
+use std::collections::BTreeMap;
+use std::sync::{Mutex, PoisonError};
+
+use seal_core::{ConstraintKind as CoreKind, Graph, Value};
+use seal_cypher::{
+    ConstraintKind as AstKind, CreateConstraint, CreateIndex, SchemaCommand, SchemaTarget,
+};
+
+use crate::error::{sem, QResult, QueryError};
+use crate::{QueryResult, QueryStats};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Index,
+    Unique,
+    Exists,
+    NodeKey,
+}
+
+#[derive(Debug, Clone)]
+struct Named {
+    label: String,
+    key: String,
+    kind: Kind,
+}
+
+/// User-chosen schema object names, remembered for the lifetime of the engine.
+#[derive(Default)]
+pub struct Registry {
+    names: Mutex<BTreeMap<String, Named>>,
+}
+
+impl Registry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Named>> {
+        self.names.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn name_of(&self, label: &str, key: &str, kinds: &[Kind]) -> Option<String> {
+        self.lock()
+            .iter()
+            .find(|(_, n)| n.label == label && n.key == key && kinds.contains(&n.kind))
+            .map(|(k, _)| k.clone())
+    }
+}
+
+fn index_name(l: &str, k: &str) -> String {
+    format!("index_{l}_{k}")
+}
+
+fn constraint_name(l: &str, k: &str, kind: CoreKind) -> String {
+    format!("constraint_{l}_{k}_{kind}")
+}
+
+fn node_target(t: &SchemaTarget) -> QResult<&str> {
+    match t {
+        SchemaTarget::Node { label, .. } => Ok(label),
+        SchemaTarget::Relationship { .. } => Err(QueryError::Unsupported(
+            "relationship indexes and constraints".into(),
+        )),
+    }
+}
+
+fn single_prop(props: &[String]) -> QResult<&str> {
+    match props {
+        [one] => Ok(one),
+        _ => Err(QueryError::Unsupported(
+            "composite indexes and constraints (exactly one property is supported)".into(),
+        )),
+    }
+}
+
+fn done(stats: QueryStats) -> QueryResult {
+    QueryResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        stats,
+    }
+}
+
+pub fn run_write(graph: &Graph, reg: &Registry, cmd: &SchemaCommand) -> QResult<QueryResult> {
+    match cmd {
+        SchemaCommand::CreateIndex(c) => create_index(graph, reg, c),
+        SchemaCommand::CreateConstraint(c) => create_constraint(graph, reg, c),
+        SchemaCommand::DropIndex { name, if_exists } => {
+            let found = resolve_index(graph, reg, name)?;
+            match found {
+                Some((l, k)) => {
+                    graph.drop_index(&l, &k)?;
+                    reg.lock().remove(name);
+                }
+                None if *if_exists => {}
+                None => return sem(format!("no index named `{name}`")),
+            }
+            Ok(done(QueryStats::default()))
+        }
+        SchemaCommand::DropConstraint { name, if_exists } => {
+            let found = resolve_constraint(graph, reg, name)?;
+            match found {
+                Some((l, k, kinds)) => {
+                    let mut tx = graph.begin_write()?;
+                    for kind in kinds {
+                        tx.drop_constraint(kind, &l, &k)?;
+                    }
+                    tx.commit()?;
+                    reg.lock().remove(name);
+                }
+                None if *if_exists => {}
+                None => return sem(format!("no constraint named `{name}`")),
+            }
+            Ok(done(QueryStats::default()))
+        }
+        SchemaCommand::ShowIndexes | SchemaCommand::ShowConstraints => run_show(graph, reg, cmd),
+    }
+}
+
+fn create_index(graph: &Graph, reg: &Registry, c: &CreateIndex) -> QResult<QueryResult> {
+    let label = node_target(&c.target)?;
+    let key = single_prop(&c.properties)?;
+    let exists = graph
+        .list_indexes()?
+        .iter()
+        .any(|i| i.label == label && i.key == key);
+    let mut stats = QueryStats::default();
+    if exists {
+        if !c.if_not_exists {
+            graph.create_index(label, key)?; // surfaces IndexExists
+        }
+    } else {
+        graph.create_index(label, key)?;
+        stats.indexes_added = 1;
+    }
+    if let (Some(name), true) = (&c.name, stats.indexes_added == 1) {
+        reg.lock().insert(
+            name.clone(),
+            Named {
+                label: label.into(),
+                key: key.into(),
+                kind: Kind::Index,
+            },
+        );
+    }
+    Ok(done(stats))
+}
+
+fn create_constraint(graph: &Graph, reg: &Registry, c: &CreateConstraint) -> QResult<QueryResult> {
+    let label = node_target(&c.target)?;
+    let key = single_prop(&c.properties)?;
+    let existing = graph.list_constraints()?;
+    let has = |k: CoreKind| {
+        existing
+            .iter()
+            .any(|d| d.kind == k && d.label == label && d.key == key)
+    };
+    let (want_unique, want_exists) = match c.kind {
+        AstKind::Unique => (true, false),
+        AstKind::NotNull => (false, true),
+        AstKind::NodeKey => (true, true),
+    };
+    let already =
+        (!want_unique || has(CoreKind::Unique)) && (!want_exists || has(CoreKind::Exists));
+    let mut stats = QueryStats::default();
+    if already && c.if_not_exists {
+        return Ok(done(stats));
+    }
+    let mut tx = graph.begin_write()?;
+    if want_unique {
+        tx.create_unique_constraint(label, key)?;
+    }
+    if want_exists {
+        tx.create_exists_constraint(label, key)?;
+    }
+    tx.commit()?;
+    stats.constraints_added = 1;
+    if let Some(name) = &c.name {
+        reg.lock().insert(
+            name.clone(),
+            Named {
+                label: label.into(),
+                key: key.into(),
+                kind: match c.kind {
+                    AstKind::Unique => Kind::Unique,
+                    AstKind::NotNull => Kind::Exists,
+                    AstKind::NodeKey => Kind::NodeKey,
+                },
+            },
+        );
+    }
+    Ok(done(stats))
+}
+
+fn resolve_index(graph: &Graph, reg: &Registry, name: &str) -> QResult<Option<(String, String)>> {
+    if let Some(n) = reg.lock().get(name) {
+        if n.kind == Kind::Index {
+            return Ok(Some((n.label.clone(), n.key.clone())));
+        }
+    }
+    Ok(graph
+        .list_indexes()?
+        .into_iter()
+        .find(|i| !i.backs_constraint && index_name(&i.label, &i.key) == name)
+        .map(|i| (i.label, i.key)))
+}
+
+fn resolve_constraint(
+    graph: &Graph,
+    reg: &Registry,
+    name: &str,
+) -> QResult<Option<(String, String, Vec<CoreKind>)>> {
+    if let Some(n) = reg.lock().get(name) {
+        let kinds = match n.kind {
+            Kind::Unique => vec![CoreKind::Unique],
+            Kind::Exists => vec![CoreKind::Exists],
+            Kind::NodeKey => vec![CoreKind::Unique, CoreKind::Exists],
+            Kind::Index => Vec::new(),
+        };
+        if !kinds.is_empty() {
+            return Ok(Some((n.label.clone(), n.key.clone(), kinds)));
+        }
+    }
+    Ok(graph
+        .list_constraints()?
+        .into_iter()
+        .find(|d| constraint_name(&d.label, &d.key, d.kind) == name)
+        .map(|d| (d.label, d.key, vec![d.kind])))
+}
+
+pub fn run_show(graph: &Graph, reg: &Registry, cmd: &SchemaCommand) -> QResult<QueryResult> {
+    let s = |x: &str| Value::String(x.to_string());
+    let list = |x: &str| Value::List(vec![Value::String(x.to_string())]);
+    match cmd {
+        SchemaCommand::ShowIndexes => {
+            let mut rows = Vec::new();
+            for i in graph.list_indexes()? {
+                let name = reg
+                    .name_of(&i.label, &i.key, &[Kind::Index])
+                    .unwrap_or_else(|| index_name(&i.label, &i.key));
+                let owner = if i.backs_constraint {
+                    Value::String(
+                        reg.name_of(&i.label, &i.key, &[Kind::Unique, Kind::NodeKey])
+                            .unwrap_or_else(|| constraint_name(&i.label, &i.key, CoreKind::Unique)),
+                    )
+                } else {
+                    Value::Null
+                };
+                rows.push(vec![
+                    Value::String(name),
+                    s("RANGE"),
+                    s("NODE"),
+                    list(&i.label),
+                    list(&i.key),
+                    s("ONLINE"),
+                    owner,
+                ]);
+            }
+            Ok(QueryResult {
+                columns: [
+                    "name",
+                    "type",
+                    "entityType",
+                    "labelsOrTypes",
+                    "properties",
+                    "state",
+                    "owningConstraint",
+                ]
+                .map(String::from)
+                .to_vec(),
+                rows,
+                stats: QueryStats::default(),
+            })
+        }
+        SchemaCommand::ShowConstraints => {
+            let mut rows = Vec::new();
+            for d in graph.list_constraints()? {
+                let kinds: &[Kind] = match d.kind {
+                    CoreKind::Unique => &[Kind::Unique, Kind::NodeKey],
+                    CoreKind::Exists => &[Kind::Exists, Kind::NodeKey],
+                };
+                let name = reg
+                    .name_of(&d.label, &d.key, kinds)
+                    .unwrap_or_else(|| constraint_name(&d.label, &d.key, d.kind));
+                rows.push(vec![
+                    Value::String(name),
+                    s(match d.kind {
+                        CoreKind::Unique => "UNIQUENESS",
+                        CoreKind::Exists => "NODE_PROPERTY_EXISTENCE",
+                    }),
+                    s("NODE"),
+                    list(&d.label),
+                    list(&d.key),
+                ]);
+            }
+            Ok(QueryResult {
+                columns: ["name", "type", "entityType", "labelsOrTypes", "properties"]
+                    .map(String::from)
+                    .to_vec(),
+                rows,
+                stats: QueryStats::default(),
+            })
+        }
+        _ => sem("not a SHOW command"),
+    }
+}

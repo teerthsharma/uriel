@@ -1,0 +1,577 @@
+//! Plain data types of the House harness: charts, goals, violations, batches.
+
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+/// Identifier of a goal such as `G0` or `G1.2.3`.
+///
+/// Ordering is *natural*: `G1.2 < G1.10`, and a parent sorts before its children. This is
+/// the order the scheduler uses, so it is deterministic and human-readable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GoalId(pub String);
+
+impl GoalId {
+    /// Builds an id from any string-like value.
+    pub fn new(s: impl Into<String>) -> GoalId {
+        GoalId(s.into())
+    }
+
+    /// The id as `&str`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn segments(&self) -> impl Iterator<Item = &str> {
+        self.0
+            .trim_start_matches(|c: char| c.is_ascii_alphabetic())
+            .split('.')
+    }
+}
+
+impl fmt::Display for GoalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for GoalId {
+    fn from(s: &str) -> GoalId {
+        GoalId(s.to_string())
+    }
+}
+
+impl From<String> for GoalId {
+    fn from(s: String) -> GoalId {
+        GoalId(s)
+    }
+}
+
+impl PartialOrd for GoalId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for GoalId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let mut a = self.segments();
+        let mut b = other.segments();
+        loop {
+            match (a.next(), b.next()) {
+                (None, None) => return self.0.cmp(&other.0),
+                (None, Some(_)) => return Ordering::Less,
+                (Some(_), None) => return Ordering::Greater,
+                (Some(x), Some(y)) => {
+                    let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
+                        (Ok(p), Ok(q)) => p.cmp(&q),
+                        _ => x.cmp(y),
+                    };
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The three charting stances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum Fellow {
+    /// Structure: the tree, root cause first.
+    Foreman,
+    /// Failure modes: guard goals that become tests.
+    Chase,
+    /// Alternative routes to the same goal.
+    Cameron,
+}
+
+impl Fellow {
+    /// Name as it appears on the board.
+    pub fn name(self) -> &'static str {
+        match self {
+            Fellow::Foreman => "Foreman",
+            Fellow::Chase => "Chase",
+            Fellow::Cameron => "Cameron",
+        }
+    }
+}
+
+impl fmt::Display for Fellow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Which agent tier executes a leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Tier {
+    /// A resident: judgment or code.
+    Sonnet,
+    /// A nurse: mechanical, read-only work.
+    Haiku,
+}
+
+impl Tier {
+    /// Model name handed to the dispatcher.
+    pub fn model(self) -> &'static str {
+        match self {
+            Tier::Sonnet => "sonnet",
+            Tier::Haiku => "haiku",
+        }
+    }
+
+    /// Role name: residents are Sonnet, nurses are Haiku.
+    pub fn role(self) -> &'static str {
+        match self {
+            Tier::Sonnet => "resident",
+            Tier::Haiku => "nurse",
+        }
+    }
+
+    /// Token cap per leaf for this tier (over the cap means decompose further).
+    pub fn token_cap(self) -> u64 {
+        match self {
+            Tier::Sonnet => 40_000,
+            Tier::Haiku => 8_000,
+        }
+    }
+}
+
+/// The test bound to a goal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestSpec {
+    /// Distinct, nameable test name.
+    pub name: String,
+    /// Command that runs it (never a whole-workspace run).
+    pub cmd: String,
+    /// Job class: `test_unit`, `build`, `bench`, `read`, `grep`, `collect`, `run_test`, `format`, `llm`.
+    pub class: String,
+}
+
+/// Declared cost of a leaf.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub struct Est {
+    /// Peak RAM in MB.
+    pub ram_mb: u64,
+    /// Wall-clock seconds.
+    pub secs: f64,
+    /// LLM tokens.
+    pub tokens: u64,
+}
+
+/// One node of a chart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct Goal {
+    /// Unique id.
+    pub id: GoalId,
+    /// Parent goal (Foreman nodes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<GoalId>,
+    /// Human text.
+    #[serde(default)]
+    pub text: String,
+    /// `true` for a leaf.
+    #[serde(default)]
+    pub leaf: bool,
+    /// Executing tier (leaves).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+    /// Goal class: `code` for residents; `read|grep|run_test|collect|format` for nurses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    /// Goals that must be reached first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<GoalId>,
+    /// Files written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writes: Vec<String>,
+    /// Files read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reads: Vec<String>,
+    /// Files this goal will create (so they need not exist yet).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub creates: Vec<String>,
+    /// Bound test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test: Option<TestSpec>,
+    /// Declared cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub est: Option<Est>,
+    /// Chase: the goal this node protects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guards: Option<GoalId>,
+    /// Cameron: the goal this node competes with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_of: Option<GoalId>,
+}
+
+impl Goal {
+    /// Files this goal writes or creates (the set that is file-locked).
+    pub fn written_files(&self) -> impl Iterator<Item = &String> {
+        self.writes.iter().chain(self.creates.iter())
+    }
+}
+
+/// A fellow's chart.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Chart {
+    /// The need this chart answers (`G0`).
+    pub need: String,
+    /// Who charted it.
+    pub fellow: Fellow,
+    /// The nodes.
+    pub goals: Vec<Goal>,
+}
+
+/// One validator or merge complaint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Violation {
+    /// Validator rule number 1-10 from the spec; `0` marks a merge conflict
+    /// (duplicate ids, missing backbone, re-chart required).
+    pub rule: u8,
+    /// Fellow whose chart must change.
+    pub fellow: Fellow,
+    /// Offending goal.
+    pub goal: GoalId,
+    /// What is wrong.
+    pub message: String,
+}
+
+impl fmt::Display for Violation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "rule {} [{}:{}] {}",
+            self.rule, self.fellow, self.goal, self.message
+        )
+    }
+}
+
+/// Lifecycle of a goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GoalStatus {
+    /// Not started.
+    Pending,
+    /// Dispatched to an agent.
+    Active,
+    /// Proven by a RED-first test.
+    Reached,
+    /// Cannot proceed.
+    Blocked,
+    /// Replaced or refuted; will never run.
+    Retired,
+}
+
+/// Result of a test run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TestStatus {
+    /// Failing.
+    Red,
+    /// Passing.
+    Green,
+}
+
+impl TestStatus {
+    /// Lowercase name used on the board.
+    pub fn name(self) -> &'static str {
+        match self {
+            TestStatus::Red => "red",
+            TestStatus::Green => "green",
+        }
+    }
+}
+
+/// Evidence attached to a report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestEvidence {
+    /// Test the agent ran.
+    pub test: String,
+    /// Its final status.
+    pub status: TestStatus,
+    /// Free-form output excerpt.
+    #[serde(default)]
+    pub output: String,
+}
+
+/// A verified fact stated by Wilson.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Fact {
+    /// Fact id (`F1`).
+    pub id: String,
+    /// Who states it.
+    pub by: String,
+    /// Goal this fact kills, with its subtree.
+    #[serde(default)]
+    pub refutes: Option<GoalId>,
+    /// `file:line` or other provenance.
+    pub source: String,
+    /// The fact.
+    pub text: String,
+}
+
+/// Outcome class of a report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome {
+    /// `Reached` accepted.
+    Accepted,
+    /// `Reached` refused: no RED-first proof. The goal stays `Active`.
+    Unproven,
+    /// The report cannot apply (unknown state, retired goal).
+    Rejected,
+    /// A non-`Reached` status was recorded.
+    Recorded,
+}
+
+/// What `report` did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReportOutcome {
+    /// Outcome class.
+    pub outcome: Outcome,
+    /// Status of the goal afterwards.
+    pub status: GoalStatus,
+    /// Why, when not accepted.
+    pub reason: String,
+    /// Ancestors that resolved as a consequence.
+    pub resolved: Vec<GoalId>,
+}
+
+/// Cost classes understood by the governor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobClass {
+    /// Agent call, no local RAM.
+    Llm,
+    /// read / grep / collect / format.
+    Light,
+    /// Unit tests.
+    TestUnit,
+    /// Builds.
+    Build,
+    /// Benchmarks: exclusive.
+    Bench,
+}
+
+impl JobClass {
+    /// Parses a test class string. `None` for an unknown class.
+    pub fn parse(s: &str) -> Option<JobClass> {
+        match s {
+            "llm" => Some(JobClass::Llm),
+            "read" | "grep" | "collect" | "format" => Some(JobClass::Light),
+            "test_unit" | "run_test" => Some(JobClass::TestUnit),
+            "build" => Some(JobClass::Build),
+            "bench" => Some(JobClass::Bench),
+            _ => None,
+        }
+    }
+
+    /// `true` for classes under the global heavy cap.
+    pub fn is_heavy(self) -> bool {
+        matches!(self, JobClass::TestUnit | JobClass::Build)
+    }
+
+    /// Key used in `CostObs` nodes.
+    pub fn key(self) -> &'static str {
+        match self {
+            JobClass::Llm => "llm",
+            JobClass::Light => "light",
+            JobClass::TestUnit => "test_unit",
+            JobClass::Build => "build",
+            JobClass::Bench => "bench",
+        }
+    }
+}
+
+/// Resource limits that travel with a dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Limits {
+    /// Environment variables to set (`CARGO_BUILD_JOBS`).
+    pub env: BTreeMap<String, String>,
+    /// The test command wrapped for below-normal priority on Windows.
+    pub command: String,
+}
+
+/// The one Dr House dispatch for a dead subtree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeapDispatch {
+    /// The goal the leap is for.
+    pub goal: GoalId,
+    /// Model to dispatch (the `dr_house` slot).
+    pub model: String,
+    /// Model to dispatch instead if the dispatch to `model` fails (the `dr_house_fallback` slot).
+    pub fallback_model: String,
+    /// Reasoning effort: always `max`.
+    pub effort: String,
+    /// Wall-clock box for the leap, seconds.
+    pub timeout_secs: u64,
+    /// Nurses that accompany the leap: none.
+    pub nurses: u32,
+    /// Prompt input: the dead theory, its subtree, the cause of death and the facts about it.
+    pub input: String,
+}
+
+/// Everything an agent needs for one leaf.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptPack {
+    /// The Need (G0) text.
+    pub need: String,
+    /// Acceptance criteria of the Need.
+    pub acceptance: Vec<String>,
+    /// Goal text.
+    pub text: String,
+    /// Ancestor goal texts, root first.
+    pub context: Vec<String>,
+    /// Files to read.
+    pub reads: Vec<String>,
+    /// Files it may write (it holds the lock on them).
+    pub writes: Vec<String>,
+    /// Files it will create.
+    pub creates: Vec<String>,
+    /// Goal class.
+    pub class: Option<String>,
+    /// For Chase guard goals: the protected goal.
+    pub guards: Option<GoalId>,
+}
+
+/// One scheduled leaf.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dispatch {
+    /// The goal.
+    pub goal: GoalId,
+    /// `sonnet` or `haiku`.
+    pub model: String,
+    /// `resident` or `nurse`.
+    pub role: String,
+    /// What to tell the agent.
+    pub prompt_pack: PromptPack,
+    /// The test that proves it.
+    pub test: TestSpec,
+    /// Env and wrapped command.
+    pub limits: Limits,
+    /// Declared RAM cost charged against the governor.
+    pub cost_mb: u64,
+    /// Governor class.
+    pub class: JobClass,
+    /// `true` when this is a parent's integration run rather than a leaf.
+    pub integration: bool,
+}
+
+/// Why a ready leaf was not dispatched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DeferReason {
+    /// Not enough RAM above the reserve.
+    Ram,
+    /// The global heavy cap is full.
+    HeavyCap,
+    /// Another goal holds a file it writes.
+    FileLock,
+    /// Needs are not reached.
+    Needs,
+    /// A bench is running or draining.
+    BenchExclusive,
+    /// The agent cap (concurrent subagents) is full.
+    AgentCap,
+}
+
+/// One deferral line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deferral {
+    /// The deferred leaf.
+    pub goal: GoalId,
+    /// Why.
+    pub reason: DeferReason,
+    /// Detail (the file, the missing need, the numbers).
+    pub detail: String,
+}
+
+/// The governor's explanation of one `next()`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GovernorReport {
+    /// Free RAM read from the probe.
+    pub free_mb: u64,
+    /// Total RAM.
+    pub total_mb: u64,
+    /// `max(2048, 15% of total)`.
+    pub reserve_mb: u64,
+    /// Heavy jobs already Active.
+    pub heavy_active: u32,
+    /// Heavy slots left under the global cap and RAM.
+    pub heavy_slots: u32,
+    /// Per-leaf deferrals.
+    pub deferrals: Vec<Deferral>,
+}
+
+/// The next set of dispatches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Batch {
+    /// Leaves to run now.
+    pub dispatches: Vec<Dispatch>,
+    /// Governor explanation.
+    pub governor: GovernorReport,
+    /// `true` once G0 is Reached.
+    pub complete: bool,
+}
+
+/// What `merge` did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MergeReport {
+    /// Live (non-retired) goals including G0.
+    pub goals: usize,
+    /// Live leaves.
+    pub leaves: usize,
+    /// ALT groups.
+    pub alt_groups: usize,
+    /// `(goal, reason)` for every retirement.
+    pub retired: Vec<(GoalId, String)>,
+    /// Refuted goals awaiting a re-chart: `(goal, fellow, attempts used)`.
+    pub pending_rechart: Vec<(GoalId, Fellow, u8)>,
+    /// Goals now Blocked with a leap candidate flag.
+    pub leap_candidates: Vec<GoalId>,
+}
+
+/// Verification level of a selected test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Level {
+    /// Per leaf: affected tests only.
+    L0,
+    /// Per parent: its integration test.
+    L1,
+    /// Full suite; only when allowed.
+    L2,
+}
+
+/// What to do with a selected test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PickAction {
+    /// Run it.
+    Run,
+    /// A cached GREEN with the same key exists; reuse it.
+    ReuseGreen,
+    /// Quarantined by the flake guard: never counted as proof.
+    Quarantined,
+}
+
+/// One selected test.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TestPick {
+    /// Test name.
+    pub test: String,
+    /// Command.
+    pub cmd: String,
+    /// Level.
+    pub level: Level,
+    /// Run, reuse or skip.
+    pub action: PickAction,
+    /// `true` if its most recent run was RED.
+    pub last_failed: bool,
+    /// Estimated seconds (mean recorded, else declared).
+    pub est_secs: f64,
+}

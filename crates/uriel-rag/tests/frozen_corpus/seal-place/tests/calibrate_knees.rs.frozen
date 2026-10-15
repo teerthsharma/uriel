@@ -1,0 +1,225 @@
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use seal_place::calibrate::{
+    civil_date, find_knees, measure, Calibration, Point, DEFAULT_HOT_BYTES,
+};
+use seal_place::replay::SplitMix;
+
+const KIB: u64 = 1024;
+const MIB: u64 = 1024 * KIB;
+
+fn staircase(noise_pct: u64, seed: u64) -> Vec<Point> {
+    let mut rng = SplitMix(seed);
+    (0..17)
+        .map(|i| {
+            let bytes = (4 * KIB) << i;
+            let base: u64 = match bytes {
+                b if b <= 32 * KIB => 1_200,
+                b if b <= MIB => 4_000,
+                b if b <= 32 * MIB => 12_000,
+                _ => 90_000,
+            };
+            let j = if noise_pct == 0 {
+                0
+            } else {
+                rng.below(2 * noise_pct + 1) as i64 - noise_pct as i64
+            };
+            Point {
+                bytes,
+                ps_per_load: (base as i64 * (100 + j) / 100) as u64,
+                loads: 1_000_000,
+            }
+        })
+        .collect()
+}
+
+fn knee_pairs(points: &[Point]) -> Vec<(u64, u64)> {
+    find_knees(points)
+        .iter()
+        .map(|k| (k.from_bytes, k.to_bytes))
+        .collect()
+}
+
+#[test]
+fn clean_staircase_has_exactly_three_knees() {
+    let k = knee_pairs(&staircase(0, 1));
+    assert_eq!(
+        k,
+        vec![(32 * KIB, 64 * KIB), (MIB, 2 * MIB), (32 * MIB, 64 * MIB)]
+    );
+}
+
+#[test]
+fn noisy_staircase_has_the_same_three_knees() {
+    for seed in 0..200 {
+        let k = knee_pairs(&staircase(10, seed));
+        assert_eq!(
+            k,
+            vec![(32 * KIB, 64 * KIB), (MIB, 2 * MIB), (32 * MIB, 64 * MIB)],
+            "seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn flat_and_gently_sloped_curves_have_no_knee() {
+    let flat: Vec<Point> = (0..17)
+        .map(|i| Point {
+            bytes: (4 * KIB) << i,
+            ps_per_load: 5_000,
+            loads: 1,
+        })
+        .collect();
+    assert!(find_knees(&flat).is_empty());
+    let mut v = 1_000u64;
+    let slope: Vec<Point> = (0..10)
+        .map(|i| {
+            let p = Point {
+                bytes: (4 * KIB) << i,
+                ps_per_load: v,
+                loads: 1,
+            };
+            v = v * 12 / 10;
+            p
+        })
+        .collect();
+    assert!(find_knees(&slope).is_empty());
+}
+
+#[test]
+fn a_gradual_transition_over_two_steps_is_one_knee() {
+    let pts = [
+        (64 * KIB, 4_000),
+        (128 * KIB, 4_000),
+        (256 * KIB, 5_400),
+        (512 * KIB, 7_500),
+        (MIB, 7_500),
+    ]
+    .map(|(bytes, ps_per_load)| Point {
+        bytes,
+        ps_per_load,
+        loads: 1,
+    });
+    let k = find_knees(&pts);
+    assert_eq!(k.len(), 1);
+    assert_eq!((k[0].from_bytes, k[0].to_bytes), (128 * KIB, 512 * KIB));
+    assert_eq!(k[0].ratio_x100, 187);
+}
+
+#[test]
+fn the_threshold_is_strictly_more_than_1_3x() {
+    let at = [(KIB, 1_000), (2 * KIB, 1_300)].map(|(bytes, ps_per_load)| Point {
+        bytes,
+        ps_per_load,
+        loads: 1,
+    });
+    assert!(
+        find_knees(&at).is_empty(),
+        "exactly 1.3x is not more than 1.3x"
+    );
+    let over = [(KIB, 1_000), (2 * KIB, 1_301)].map(|(bytes, ps_per_load)| Point {
+        bytes,
+        ps_per_load,
+        loads: 1,
+    });
+    assert_eq!(find_knees(&over).len(), 1);
+}
+
+#[test]
+fn adversarial_inputs_do_not_panic() {
+    assert!(find_knees(&[]).is_empty());
+    let one = [Point {
+        bytes: 4096,
+        ps_per_load: 1,
+        loads: 1,
+    }];
+    assert!(find_knees(&one).is_empty());
+    let zeros = [(1, 0), (2, 0), (3, 5), (4, 0)].map(|(bytes, ps_per_load)| Point {
+        bytes,
+        ps_per_load,
+        loads: 0,
+    });
+    let _ = find_knees(&zeros);
+    let huge = [(1, u64::MAX), (2, u64::MAX)].map(|(bytes, ps_per_load)| Point {
+        bytes,
+        ps_per_load,
+        loads: 1,
+    });
+    assert!(find_knees(&huge).is_empty());
+    let mut shuffled = staircase(0, 1);
+    shuffled.reverse();
+    assert_eq!(knee_pairs(&shuffled), knee_pairs(&staircase(0, 1)));
+}
+
+fn cal(points: Vec<Point>) -> Calibration {
+    let mut m = BTreeMap::new();
+    m.insert("cpu".to_string(), "test \"quoted\" cpu\\x".to_string());
+    Calibration::from_points(points, m, "2026-10-15".to_string())
+}
+
+#[test]
+fn suggest_hot_bytes_is_at_or_below_the_last_knee_unless_overridden() {
+    let c = cal(staircase(0, 1));
+    let last_from = 32 * MIB;
+    let s = c.suggest_hot_bytes(None);
+    assert!(s > 0 && s <= last_from, "{s} not at or below {last_from}");
+    assert!(s.is_power_of_two());
+    assert_eq!(c.suggest_hot_bytes(Some(123_456)), 123_456, "override wins");
+    let flat: Vec<Point> = (0..5)
+        .map(|i| Point {
+            bytes: (4 * KIB) << i,
+            ps_per_load: 900,
+            loads: 1,
+        })
+        .collect();
+    assert_eq!(cal(flat).suggest_hot_bytes(None), DEFAULT_HOT_BYTES);
+    assert_eq!(cal(Vec::new()).suggest_hot_bytes(None), DEFAULT_HOT_BYTES);
+}
+
+#[test]
+fn json_has_the_documented_fields_and_escapes_strings() {
+    let j = cal(staircase(0, 1)).to_json();
+    for needle in [
+        "\"schema\"",
+        "\"date\": \"2026-10-15\"",
+        "\"points\"",
+        "\"bytes\": 4096",
+        "\"ps_per_load\"",
+        "\"knees\"",
+        "\"from_bytes\"",
+        "\"to_bytes\"",
+        "\"ratio_x100\"",
+        "\"machine\"",
+        "\"suggested_hot_bytes\"",
+        "test \\\"quoted\\\" cpu\\\\x",
+    ] {
+        assert!(j.contains(needle), "missing {needle} in\n{j}");
+    }
+    assert_eq!(j.matches('{').count(), j.matches('}').count());
+    assert_eq!(j.matches('[').count(), j.matches(']').count());
+}
+
+#[test]
+fn civil_date_matches_known_epochs() {
+    assert_eq!(civil_date(0), "1970-01-01");
+    assert_eq!(civil_date(951_782_400), "2000-02-29");
+    assert_eq!(civil_date(1_700_000_000), "2023-11-14");
+    assert_eq!(civil_date(1_792_000_000), "2026-10-14");
+}
+
+#[test]
+fn measure_respects_a_small_time_budget_and_returns_sorted_positive_points() {
+    let t = Instant::now();
+    let pts = measure(Duration::from_millis(400), 4 * KIB, 2 * MIB);
+    let took = t.elapsed();
+    assert!(
+        took < Duration::from_secs(3),
+        "took {took:?} for a 400 ms budget"
+    );
+    assert!(pts.len() >= 3, "only {} points", pts.len());
+    assert!(pts.windows(2).all(|w| w[0].bytes < w[1].bytes));
+    assert!(pts
+        .iter()
+        .all(|p| p.ps_per_load > 0 && p.loads > 0 && p.bytes.is_power_of_two()));
+}

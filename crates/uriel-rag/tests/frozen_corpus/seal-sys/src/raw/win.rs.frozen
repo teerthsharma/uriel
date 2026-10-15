@@ -1,0 +1,145 @@
+use std::ptr::{null, null_mut, NonNull};
+use std::sync::OnceLock;
+
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_NOT_ALL_ASSIGNED, HANDLE, LUID,
+};
+use windows_sys::Win32::Security::{
+    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+};
+use windows_sys::Win32::System::Memory::{
+    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE, MEM_RESERVE,
+    PAGE_READWRITE,
+};
+use windows_sys::Win32::System::ProcessStatus::{
+    GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+};
+use windows_sys::Win32::System::SystemInformation::GetLargePageMinimum;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+use crate::error::SysError;
+use crate::rss::{LargePageStatus, ProcessMemory};
+
+pub(crate) const ALLOCATION_GRANULARITY: usize = 65536;
+
+const LOCK_MEMORY_PRIVILEGE: &str = "SeLockMemoryPrivilege\0";
+
+pub(crate) fn last_os_error_code() -> u32 {
+    unsafe { GetLastError() }
+}
+
+fn large_page_minimum_from_os() -> usize {
+    unsafe { GetLargePageMinimum() }
+}
+
+fn open_current_process_token_for_privilege_adjust() -> Option<HANDLE> {
+    let mut token: HANDLE = null_mut();
+    let ok = unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+    };
+    (ok != 0 && !token.is_null()).then_some(token)
+}
+
+fn lookup_local_privilege_luid(name_with_nul: &[u16]) -> Option<LUID> {
+    let mut luid = LUID {
+        LowPart: 0,
+        HighPart: 0,
+    };
+    let ok = unsafe { LookupPrivilegeValueW(null(), name_with_nul.as_ptr(), &mut luid) };
+    (ok != 0).then_some(luid)
+}
+
+fn adjust_token_to_enable_single_privilege(token: HANDLE, luid: LUID) -> bool {
+    let state = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    let ok = unsafe { AdjustTokenPrivileges(token, 0, &state, 0, null_mut(), null_mut()) };
+    if ok == 0 {
+        return false;
+    }
+    last_os_error_code() != ERROR_NOT_ALL_ASSIGNED
+}
+
+fn close_handle_owned_by_caller(handle: HANDLE) {
+    unsafe {
+        CloseHandle(handle);
+    }
+}
+
+fn enable_lock_memory_privilege() -> bool {
+    let name: Vec<u16> = LOCK_MEMORY_PRIVILEGE.encode_utf16().collect();
+    let Some(luid) = lookup_local_privilege_luid(&name) else {
+        return false;
+    };
+    let Some(token) = open_current_process_token_for_privilege_adjust() else {
+        return false;
+    };
+    let enabled = adjust_token_to_enable_single_privilege(token, luid);
+    close_handle_owned_by_caller(token);
+    enabled
+}
+
+fn probe_large_pages() -> LargePageStatus {
+    let minimum = large_page_minimum_from_os();
+    if minimum == 0 {
+        return LargePageStatus::Unsupported;
+    }
+    if enable_lock_memory_privilege() {
+        LargePageStatus::Ready { minimum }
+    } else {
+        LargePageStatus::PrivilegeMissing
+    }
+}
+
+pub(crate) fn large_page_status() -> LargePageStatus {
+    static STATE: OnceLock<LargePageStatus> = OnceLock::new();
+    *STATE.get_or_init(probe_large_pages)
+}
+
+fn commit_pages_from_os(bytes: usize, large: bool) -> *mut u8 {
+    let flags = MEM_COMMIT | MEM_RESERVE | if large { MEM_LARGE_PAGES } else { 0 };
+    unsafe { VirtualAlloc(null(), bytes, flags, PAGE_READWRITE) }.cast::<u8>()
+}
+
+pub(crate) fn allocate_pages(bytes: usize, large: bool) -> Result<NonNull<u8>, u32> {
+    NonNull::new(commit_pages_from_os(bytes, large)).ok_or_else(last_os_error_code)
+}
+
+pub(crate) fn release_pages(ptr: NonNull<u8>) {
+    release_pages_returned_by_allocate_pages(ptr);
+}
+
+fn release_pages_returned_by_allocate_pages(ptr: NonNull<u8>) {
+    unsafe {
+        VirtualFree(ptr.as_ptr().cast(), 0, MEM_RELEASE);
+    }
+}
+
+fn query_process_memory_counters(counters: &mut PROCESS_MEMORY_COUNTERS_EX) -> bool {
+    counters.cb = size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+    let as_base: *mut PROCESS_MEMORY_COUNTERS = (counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast();
+    unsafe { GetProcessMemoryInfo(GetCurrentProcess(), as_base, counters.cb) != 0 }
+}
+
+pub(crate) fn process_memory() -> Result<ProcessMemory, SysError> {
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX::default();
+    if !query_process_memory_counters(&mut counters) {
+        return Err(SysError::Os {
+            call: "GetProcessMemoryInfo",
+            code: last_os_error_code(),
+        });
+    }
+    Ok(ProcessMemory {
+        working_set: counters.WorkingSetSize as u64,
+        private_bytes: counters.PrivateUsage as u64,
+    })
+}

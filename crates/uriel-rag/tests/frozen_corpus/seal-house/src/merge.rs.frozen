@@ -1,0 +1,492 @@
+//! The deterministic merge of the three charts.
+//!
+//! 1. **Backbone**: Foreman's tree; every goal is kept.
+//! 2. **Guards**: a Chase node becomes a leaf test goal. Under a non-leaf target it is that
+//!    goal's child; under a leaf target it is a sibling that `needs` the leaf (the leaf must
+//!    exist before its failure mode can be tested) and, like every child, holds the parent open.
+//! 3. **Alternatives**: a Cameron node joins an ALT group with the goal it names. The group
+//!    runs the member with the lowest cost among members not refuted by a fact:
+//!    `cost = tokens + secs * alt_secs_weight` for a leaf, summed over live leaves for a
+//!    subtree. Ties keep the backbone, then the lowest id. The others are retired with
+//!    reason `cost`; `needs` on a loser resolve to the winner.
+//! 4. **Refutation**: a fact with `refutes` kills that goal's subtree. If an ALT member
+//!    survives, it is the replacement route. Otherwise the goal is `Blocked` (a
+//!    placeholder) until its fellow re-charts with at least one goal id not seen when the
+//!    refutation was recorded; after `max_rechart` re-charts without one it stays `Blocked`
+//!    and is flagged as a leap candidate.
+//! 5. The effective tree is validated with the same rules as a single chart plus reference
+//!    checks.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::config::HouseConfig;
+use crate::state::*;
+use crate::types::*;
+use crate::validate::{validate_merged, Entry};
+
+pub(crate) struct MergeInput<'a> {
+    pub need: &'a NeedRec,
+    pub charts: &'a BTreeMap<Fellow, Chart>,
+    pub facts: &'a [Fact],
+    pub old: &'a BTreeMap<GoalId, GoalRec>,
+    pub old_pending: &'a BTreeMap<GoalId, Pending>,
+    pub cfg: &'a HouseConfig,
+}
+
+pub(crate) struct MergeOutput {
+    pub goals: BTreeMap<GoalId, GoalRec>,
+    pub alt_groups: BTreeMap<GoalId, AltGroup>,
+    pub pending: BTreeMap<GoalId, Pending>,
+    pub leap: BTreeSet<GoalId>,
+    pub report: MergeReport,
+    /// `(refuted root, first replacement goal)` for re-charts accepted by this merge.
+    pub replaced: Vec<(GoalId, GoalId)>,
+}
+
+fn viol(rule: u8, fellow: Fellow, goal: &GoalId, message: impl Into<String>) -> Violation {
+    Violation {
+        rule,
+        fellow,
+        goal: goal.clone(),
+        message: message.into(),
+    }
+}
+
+fn leaf_cost(g: &Goal, weight: f64) -> f64 {
+    g.est.map_or(0.0, |e| e.tokens as f64 + e.secs * weight)
+}
+
+pub(crate) fn merge(inp: &MergeInput<'_>) -> Result<MergeOutput, Vec<Violation>> {
+    let root = State::root_id();
+    let cfg = inp.cfg;
+    let Some(_) = inp.charts.get(&Fellow::Foreman) else {
+        return Err(vec![viol(
+            0,
+            Fellow::Foreman,
+            &root,
+            "no Foreman chart: the backbone is missing",
+        )]);
+    };
+
+    // ---- gather
+    let mut violations = Vec::new();
+    let mut all: BTreeMap<GoalId, (Fellow, Goal)> = BTreeMap::new();
+    for fellow in [Fellow::Foreman, Fellow::Chase, Fellow::Cameron] {
+        let Some(chart) = inp.charts.get(&fellow) else {
+            continue;
+        };
+        for g in &chart.goals {
+            let mut g = g.clone();
+            if fellow != Fellow::Foreman {
+                g.leaf = true;
+                g.parent = None;
+            }
+            if g.id == root {
+                violations.push(viol(
+                    0,
+                    fellow,
+                    &g.id,
+                    "G0 is the need and cannot be charted",
+                ));
+            } else if let Some((other, _)) = all.get(&g.id) {
+                violations.push(viol(
+                    0,
+                    fellow,
+                    &g.id,
+                    format!("goal id {} is already used by {other}'s chart", g.id),
+                ));
+            } else {
+                all.insert(g.id.clone(), (fellow, g));
+            }
+        }
+    }
+    let fellow_of = |id: &GoalId| all.get(id).map(|(f, _)| *f);
+
+    // ---- targets of guards and alternatives must be backbone goals
+    for (id, (fellow, g)) in &all {
+        match fellow {
+            Fellow::Chase => {
+                if let Some(t) = &g.guards {
+                    let ok = *t == root || fellow_of(t) == Some(Fellow::Foreman);
+                    if !ok {
+                        violations.push(viol(
+                            10,
+                            *fellow,
+                            id,
+                            format!("guards {t}, which is not a Foreman goal or G0"),
+                        ));
+                    }
+                }
+            }
+            Fellow::Cameron => {
+                if let Some(t) = &g.alt_of {
+                    if fellow_of(t) != Some(Fellow::Foreman) {
+                        violations.push(viol(
+                            10,
+                            *fellow,
+                            id,
+                            format!("alt_of {t}, which is not a Foreman goal"),
+                        ));
+                    }
+                }
+            }
+            Fellow::Foreman => {}
+        }
+    }
+    if !violations.is_empty() {
+        return Err(violations);
+    }
+
+    // ---- parents of Cameron nodes, subtree structure of the backbone + alternatives
+    let mut rg: BTreeMap<GoalId, Goal> = BTreeMap::new();
+    for (id, (fellow, g)) in &all {
+        let mut g = g.clone();
+        if *fellow == Fellow::Cameron {
+            if let Some(t) = &g.alt_of {
+                g.parent = all.get(t).and_then(|(_, tg)| tg.parent.clone());
+            }
+        }
+        rg.insert(id.clone(), g);
+    }
+    let mut kids: BTreeMap<GoalId, Vec<GoalId>> = BTreeMap::new();
+    for (id, g) in &rg {
+        if all[id].0 == Fellow::Chase {
+            continue;
+        }
+        if let Some(p) = &g.parent {
+            kids.entry(p.clone()).or_default().push(id.clone());
+        }
+    }
+    let subtree = |start: &GoalId| -> Vec<GoalId> {
+        let mut out = Vec::new();
+        let mut stack: Vec<&GoalId> = kids
+            .get(start)
+            .map(|v| v.iter().collect())
+            .unwrap_or_default();
+        let mut seen: BTreeSet<&GoalId> = BTreeSet::new();
+        while let Some(n) = stack.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
+            out.push(n.clone());
+            if let Some(c) = kids.get(n) {
+                stack.extend(c.iter());
+            }
+        }
+        out
+    };
+
+    // ---- refutations
+    let mut refuted: BTreeMap<GoalId, String> = BTreeMap::new();
+    for f in inp.facts {
+        if let Some(r) = &f.refutes {
+            if rg.contains_key(r) {
+                refuted.entry(r.clone()).or_insert_with(|| f.id.clone());
+            }
+        }
+    }
+    let mut retired: BTreeMap<GoalId, Retire> = BTreeMap::new();
+    for (r, fact) in &refuted {
+        for d in subtree(r) {
+            retired.entry(d).or_insert_with(|| Retire {
+                reason: "refuted".into(),
+                by: fact.clone(),
+            });
+        }
+    }
+    let dead = |id: &GoalId, retired: &BTreeMap<GoalId, Retire>| {
+        refuted.contains_key(id) || retired.contains_key(id)
+    };
+
+    // ---- ALT groups
+    let mut groups: BTreeMap<GoalId, Vec<GoalId>> = BTreeMap::new();
+    for (id, (fellow, g)) in &all {
+        if *fellow == Fellow::Cameron {
+            if let Some(t) = &g.alt_of {
+                groups
+                    .entry(t.clone())
+                    .or_insert_with(|| vec![t.clone()])
+                    .push(id.clone());
+            }
+        }
+    }
+    let goal_cost = |id: &GoalId| -> f64 {
+        let g = &rg[id];
+        if g.leaf {
+            leaf_cost(g, cfg.alt_secs_weight)
+        } else {
+            subtree(id)
+                .iter()
+                .filter(|d| rg[*d].leaf)
+                .map(|d| leaf_cost(&rg[d], cfg.alt_secs_weight))
+                .sum()
+        }
+    };
+    let mut alt_out: BTreeMap<GoalId, AltGroup> = BTreeMap::new();
+    let mut alias: BTreeMap<GoalId, GoalId> = BTreeMap::new();
+    for (target, members) in &groups {
+        let mut eligible: Vec<(f64, bool, &GoalId)> = members
+            .iter()
+            .filter(|m| !dead(m, &retired))
+            .map(|m| (goal_cost(m), m != target, m))
+            .collect();
+        eligible.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+                .then(a.2.cmp(b.2))
+        });
+        let winner = eligible.first().map(|e| e.2.clone());
+        if let Some(w) = &winner {
+            for m in members {
+                if m == w {
+                    continue;
+                }
+                if let Some(fact) = refuted.get(m) {
+                    retired.entry(m.clone()).or_insert_with(|| Retire {
+                        reason: "refuted".into(),
+                        by: fact.clone(),
+                    });
+                } else if !retired.contains_key(m) {
+                    let why = Retire {
+                        reason: "cost".into(),
+                        by: w.to_string(),
+                    };
+                    retired.insert(m.clone(), why.clone());
+                    for d in subtree(m) {
+                        retired.entry(d).or_insert_with(|| why.clone());
+                    }
+                }
+                alias.insert(m.clone(), w.clone());
+            }
+        }
+        alt_out.insert(
+            target.clone(),
+            AltGroup {
+                members: members.clone(),
+                winner,
+            },
+        );
+    }
+
+    // ---- guards (after ALT selection, so they follow the winning route)
+    let mut guard_parent: BTreeMap<GoalId, GoalId> = BTreeMap::new();
+    let mut guard_need: BTreeMap<GoalId, GoalId> = BTreeMap::new();
+    let chase_ids: Vec<GoalId> = all
+        .iter()
+        .filter(|(_, (f, _))| *f == Fellow::Chase)
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut placeholders_pre: BTreeSet<GoalId> = refuted
+        .keys()
+        .filter(|r| !retired.contains_key(*r))
+        .cloned()
+        .collect();
+    for cid in chase_ids {
+        let Some(target) = rg[&cid].guards.clone() else {
+            continue;
+        };
+        let eff = alias.get(&target).cloned().unwrap_or(target.clone());
+        if eff != root && (retired.contains_key(&eff) || placeholders_pre.contains(&eff)) {
+            retired.insert(
+                cid.clone(),
+                Retire {
+                    reason: "guard-target-retired".into(),
+                    by: eff.to_string(),
+                },
+            );
+            continue;
+        }
+        if eff == root {
+            guard_parent.insert(cid, root.clone());
+        } else if rg[&eff].leaf {
+            if let Some(p) = rg[&eff].parent.clone() {
+                guard_parent.insert(cid.clone(), p);
+            }
+            guard_need.insert(cid, eff);
+        } else {
+            guard_parent.insert(cid, eff);
+        }
+    }
+    for (cid, p) in &guard_parent {
+        if let Some(g) = rg.get_mut(cid) {
+            g.parent = Some(p.clone());
+        }
+    }
+    placeholders_pre.clear();
+
+    // ---- pending re-charts and leap candidates
+    let placeholders: Vec<GoalId> = refuted
+        .keys()
+        .filter(|r| !retired.contains_key(*r))
+        .cloned()
+        .collect();
+    let mut pending: BTreeMap<GoalId, Pending> = BTreeMap::new();
+    let mut leap: BTreeSet<GoalId> = BTreeSet::new();
+    let mut replaced: Vec<(GoalId, GoalId)> = Vec::new();
+    for r in &placeholders {
+        let owner = all[r].0;
+        let old = inp.old_pending.get(r);
+        let snapshot = old.map_or_else(
+            || {
+                inp.charts
+                    .get(&owner)
+                    .map(|c| c.goals.iter().map(|g| g.id.clone()).collect())
+                    .unwrap_or_default()
+            },
+            |p| p.snapshot.clone(),
+        );
+        let attempts = old.map_or(0, |p| p.attempts);
+        let fresh = old.and_then(|_| {
+            inp.charts.get(&owner).and_then(|c| {
+                c.goals
+                    .iter()
+                    .map(|g| &g.id)
+                    .filter(|id| !snapshot.contains(*id) && !dead(id, &retired))
+                    .min()
+                    .cloned()
+            })
+        });
+        match fresh {
+            Some(first) => {
+                retired.insert(
+                    r.clone(),
+                    Retire {
+                        reason: "refuted".into(),
+                        by: refuted[r].clone(),
+                    },
+                );
+                replaced.push((r.clone(), first));
+            }
+            None => {
+                if attempts >= cfg.max_rechart {
+                    leap.insert(r.clone());
+                }
+                pending.insert(
+                    r.clone(),
+                    Pending {
+                        fellow: owner,
+                        attempts,
+                        snapshot,
+                    },
+                );
+            }
+        }
+    }
+
+    // ---- build the goal records
+    let mut out: BTreeMap<GoalId, GoalRec> = BTreeMap::new();
+    let map_need = |n: &GoalId| alias.get(n).cloned().unwrap_or_else(|| n.clone());
+    for (id, g) in &rg {
+        let fellow = all[id].0;
+        let mut g = g.clone();
+        let mut needs: Vec<GoalId> = Vec::new();
+        for n in g
+            .needs
+            .iter()
+            .map(map_need)
+            .chain(guard_need.get(id).cloned())
+        {
+            if !needs.contains(&n) {
+                needs.push(n);
+            }
+        }
+        g.needs = needs;
+        let old = inp.old.get(id);
+        let (status, retire, blocked) = if let Some(r) = retired.get(id) {
+            (GoalStatus::Retired, Some(r.clone()), None)
+        } else if pending.contains_key(id) {
+            (GoalStatus::Blocked, None, Some("refuted".to_string()))
+        } else {
+            match old {
+                Some(o)
+                    if matches!(
+                        o.status,
+                        GoalStatus::Pending | GoalStatus::Active | GoalStatus::Reached
+                    ) =>
+                {
+                    (o.status, None, None)
+                }
+                Some(o)
+                    if o.status == GoalStatus::Blocked
+                        && o.blocked_reason.as_deref() == Some("reported") =>
+                {
+                    (GoalStatus::Blocked, None, Some("reported".to_string()))
+                }
+                _ => (GoalStatus::Pending, None, None),
+            }
+        };
+        out.insert(
+            id.clone(),
+            GoalRec {
+                goal: g,
+                owner: fellow,
+                status,
+                retired: retire,
+                blocked_reason: blocked,
+                cost_mb: old.map_or(0, |o| o.cost_mb),
+            },
+        );
+    }
+    let root_status = inp.old.get(&root).map_or(GoalStatus::Pending, |o| o.status);
+    out.insert(
+        root.clone(),
+        GoalRec {
+            goal: Goal {
+                id: root.clone(),
+                text: inp.need.goal.clone(),
+                leaf: false,
+                ..Goal::default()
+            },
+            owner: Fellow::Foreman,
+            status: root_status,
+            retired: None,
+            blocked_reason: None,
+            cost_mb: 0,
+        },
+    );
+
+    // ---- validate the effective tree
+    let entries: Vec<Entry> = out
+        .iter()
+        .filter(|(id, r)| **id != root && r.status != GoalStatus::Retired)
+        .map(|(id, r)| Entry {
+            fellow: r.owner,
+            goal: r.goal.clone(),
+            placeholder: pending.contains_key(id),
+        })
+        .collect();
+    let known: BTreeSet<GoalId> = out.keys().cloned().collect();
+    let vs = validate_merged(&root, &entries, &known, cfg);
+    if !vs.is_empty() {
+        return Err(vs);
+    }
+
+    // ---- report
+    let live: Vec<&GoalRec> = out
+        .values()
+        .filter(|r| r.status != GoalStatus::Retired)
+        .collect();
+    let report = MergeReport {
+        goals: live.len(),
+        leaves: live.iter().filter(|r| r.goal.leaf).count(),
+        alt_groups: alt_out.len(),
+        retired: out
+            .iter()
+            .filter_map(|(id, r)| r.retired.as_ref().map(|x| (id.clone(), x.reason.clone())))
+            .collect(),
+        pending_rechart: pending
+            .iter()
+            .map(|(id, p)| (id.clone(), p.fellow, p.attempts))
+            .collect(),
+        leap_candidates: leap.iter().cloned().collect(),
+    };
+    Ok(MergeOutput {
+        goals: out,
+        alt_groups: alt_out,
+        pending,
+        leap,
+        report,
+        replaced,
+    })
+}

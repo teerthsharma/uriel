@@ -1,0 +1,312 @@
+//! A 40-leaf chart run to completion through `next()` / `report()` while the machine's free
+//! RAM changes under it (6 GB, then 2 GB, then 5 GB of 16 GB), with a deterministic executor.
+
+mod common;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use common::*;
+use seal_house::*;
+
+const TOTAL_MB: u64 = 16_000;
+const RESERVE_MB: u64 = 2_400; // max(2048, 15% of 16000)
+
+fn free_at(step: usize) -> u64 {
+    match step {
+        0..=3 => 6_000,
+        4..=9 => 2_000,
+        _ => 5_000,
+    }
+}
+
+fn est(ram: u64, tokens: u64) -> Option<Est> {
+    Some(Est {
+        ram_mb: ram,
+        secs: 30.0,
+        tokens,
+    })
+}
+
+/// 6 groups: 4 x 7 leaves and 2 x 6 leaves = 40 leaves.
+fn forty() -> Vec<Goal> {
+    let sizes = [7usize, 7, 7, 7, 6, 6];
+    let mut ids: Vec<(String, String)> = Vec::new(); // (leaf id, group id)
+    for (g, size) in sizes.iter().enumerate() {
+        for j in 1..=*size {
+            ids.push((format!("G{}.{}", g + 1, j), format!("G{}", g + 1)));
+        }
+    }
+    assert_eq!(ids.len(), 40);
+    let mut goals: Vec<Goal> = (1..=6).map(|g| branch(&format!("G{g}"), "G0")).collect();
+    for (n, (id, parent)) in ids.iter().enumerate() {
+        let mut g = leaf(id, parent);
+        // 6 heavy leaves: 0,1 build; 2 unit test; 20,21,22 chained behind light work
+        let (heavy_build, heavy_unit) = (matches!(n, 0 | 1 | 21), matches!(n, 2 | 20 | 22));
+        let shared = (5..=14).contains(&n);
+        if heavy_build {
+            g.test.as_mut().expect("test").class = "build".into();
+            g.est = est(1_500, 20_000);
+        } else if heavy_unit {
+            g.test.as_mut().expect("test").class = "test_unit".into();
+            g.est = est(800, 20_000);
+        } else if !shared && n % 3 == 1 {
+            // a nurse: read-only
+            g = nurse(id, parent);
+        } else {
+            g.test.as_mut().expect("test").class = "llm".into();
+            g.est = est(0, 20_000);
+        }
+        if shared {
+            // 5 files, each written by two leaves; the second needs the first
+            let pair = (n - 5) / 2;
+            let file = format!("shared/s{pair}.rs");
+            g.writes = vec![file.clone()];
+            if (n - 5) % 2 == 0 {
+                g.creates = vec![file];
+            } else {
+                g.needs = vec![gid(&ids[n - 1].0)];
+            }
+        }
+        // a serial chain of light work that unlocks the late heavy leaves
+        match n {
+            17 => g.needs = vec![gid(&ids[16].0)],
+            18 => g.needs = vec![gid(&ids[17].0)],
+            19 => g.needs = vec![gid(&ids[18].0)],
+            20..=22 => g.needs = vec![gid(&ids[19].0)],
+            // a second serial chain keeps light work flowing through the 2 GB phase
+            25..=33 => g.needs = vec![gid(&ids[n - 1].0)],
+            _ => {}
+        }
+        // some cross-group dependencies on earlier leaves
+        if n >= 25 && n % 5 == 0 {
+            g.needs.push(gid(&ids[n - 2].0));
+        }
+        goals.push(g);
+    }
+    goals
+}
+
+struct Flight {
+    finish: usize,
+    cost: u64,
+    class: JobClass,
+    files: BTreeSet<String>,
+}
+
+#[test]
+fn forty_leaves_complete_under_a_moving_governor() {
+    let e = env_with(6_000, TOTAL_MB, |_| {});
+    let goals = forty();
+    let by_id: BTreeMap<String, Goal> = goals
+        .iter()
+        .map(|g| (g.id.to_string(), g.clone()))
+        .collect();
+    merged(&e, goals);
+
+    let leaves: Vec<String> = by_id
+        .values()
+        .filter(|g| g.leaf)
+        .map(|g| g.id.to_string())
+        .collect();
+    assert_eq!(leaves.len(), 40);
+    let heavy_total = by_id
+        .values()
+        .filter(|g| {
+            g.leaf
+                && g.test
+                    .as_ref()
+                    .is_some_and(|t| t.class == "build" || t.class == "test_unit")
+        })
+        .count();
+    assert_eq!(heavy_total, 6);
+    let shared_leaves = by_id
+        .values()
+        .filter(|g| g.leaf && !g.writes.is_empty())
+        .count();
+    assert_eq!(shared_leaves, 10);
+
+    let mut in_flight: BTreeMap<String, Flight> = BTreeMap::new();
+    let mut reached: BTreeSet<String> = BTreeSet::new();
+    let mut heavy_in_low_phase = 0;
+    let mut light_in_low_phase = 0;
+    let mut low_phase_heavy_deferrals = 0;
+    let mut max_heavy = 0;
+    let mut finished_at = None;
+
+    for step in 0..400 {
+        let free = free_at(step);
+        e.probe.set_free(free);
+
+        // the executor finishes what is due: GREEN, then report
+        let due: Vec<String> = in_flight
+            .iter()
+            .filter(|(_, f)| f.finish <= step)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for id in due {
+            let t = format!("t_{id}");
+            e.house
+                .record_test_run(&t, TestStatus::Green, 1.0, 100, &[])
+                .expect("green");
+            let r = e
+                .house
+                .report(
+                    &gid(&id),
+                    GoalStatus::Reached,
+                    evidence(&t, TestStatus::Green),
+                )
+                .expect("report");
+            assert_eq!(r.outcome, Outcome::Accepted, "{id}: {}", r.reason);
+            in_flight.remove(&id);
+            reached.insert(id);
+        }
+
+        let batch = e.house.next().expect("next");
+        assert_eq!(batch.governor.free_mb, free);
+        assert_eq!(batch.governor.reserve_mb, RESERVE_MB);
+
+        for d in &batch.dispatches {
+            let id = d.goal.to_string();
+            // no leaf starts before its needs are Reached
+            let g = &by_id[&id];
+            for n in &g.needs {
+                assert!(
+                    reached.contains(n.as_str()),
+                    "step {step}: {id} started before {n} was reached"
+                );
+            }
+            // the executor starts it: RED first
+            e.house
+                .record_test_run(&d.test.name, TestStatus::Red, 1.0, d.cost_mb.max(1), &[])
+                .expect("red");
+            let heavy = d.class.is_heavy();
+            let duration = if heavy { 3 } else { 1 };
+            in_flight.insert(
+                id,
+                Flight {
+                    finish: step + duration,
+                    cost: d.cost_mb,
+                    class: d.class,
+                    files: g.written_files().cloned().collect(),
+                },
+            );
+        }
+
+        // ---- invariants, every step
+        let heavy_active: Vec<&Flight> =
+            in_flight.values().filter(|f| f.class.is_heavy()).collect();
+        max_heavy = max_heavy.max(heavy_active.len());
+        assert!(
+            heavy_active.len() <= 6,
+            "step {step}: heavy concurrency {}",
+            heavy_active.len()
+        );
+        let heavy_cost: u64 = heavy_active.iter().map(|f| f.cost).sum();
+        let headroom = free.saturating_sub(RESERVE_MB);
+        let new_heavy = batch
+            .dispatches
+            .iter()
+            .filter(|d| d.class.is_heavy())
+            .count();
+        if new_heavy > 0 {
+            assert!(
+                heavy_cost <= headroom,
+                "step {step}: active heavy cost {heavy_cost} MB exceeds free {free} - reserve {RESERVE_MB}"
+            );
+        }
+        if free < RESERVE_MB {
+            assert_eq!(
+                new_heavy, 0,
+                "step {step}: heavy job dispatched below the reserve"
+            );
+            heavy_in_low_phase += new_heavy;
+            light_in_low_phase += batch.dispatches.len();
+            low_phase_heavy_deferrals += batch
+                .governor
+                .deferrals
+                .iter()
+                .filter(|d| d.reason == DeferReason::Ram)
+                .count();
+        }
+        let light_cost: u64 = in_flight
+            .values()
+            .filter(|f| f.class == JobClass::Light)
+            .map(|f| f.cost)
+            .sum();
+        assert!(
+            light_cost <= free,
+            "step {step}: light cost {light_cost} exceeds free RAM"
+        );
+        // at most one writer per file among concurrently Active goals
+        let mut seen: BTreeSet<&String> = BTreeSet::new();
+        for f in in_flight.values() {
+            for file in &f.files {
+                assert!(
+                    seen.insert(file),
+                    "step {step}: two Active goals write {file}"
+                );
+            }
+        }
+        // the db agrees with the executor about who is Active
+        let s = e.house.status().expect("status");
+        let active: BTreeSet<String> = s["active"]
+            .as_array()
+            .expect("active")
+            .iter()
+            .map(|v| v.as_str().expect("id").to_string())
+            .collect();
+        let mine: BTreeSet<String> = in_flight.keys().cloned().collect();
+        assert_eq!(active, mine, "step {step}");
+
+        if batch.complete && in_flight.is_empty() {
+            finished_at = Some(step);
+            break;
+        }
+    }
+
+    let finished_at = finished_at.expect("the 40 leaves finish");
+    assert!(
+        finished_at > 10,
+        "the run must outlive the 2 GB phase (finished at {finished_at})"
+    );
+    assert_eq!(heavy_in_low_phase, 0);
+    assert!(
+        light_in_low_phase > 0,
+        "light work continues below the reserve"
+    );
+    assert!(
+        low_phase_heavy_deferrals > 0,
+        "heavy work was deferred for RAM while free < reserve"
+    );
+    assert!(
+        max_heavy >= 2,
+        "heavy work did run concurrently (max {max_heavy})"
+    );
+    assert_eq!(reached.len(), 40);
+    for l in &leaves {
+        assert_eq!(status_of(&e, l), "reached", "{l}");
+    }
+    assert_eq!(status_of(&e, "G0"), "reached");
+    let s = e.house.status().expect("status");
+    assert_eq!(s["goals"]["reached"], 46); // 40 leaves + 6 groups
+    assert_eq!(s["complete"], true);
+}
+
+#[test]
+fn lazy_agents_cannot_claim_reached() {
+    let e = env_with(16_000, TOTAL_MB, |_| {});
+    merged(&e, forty());
+    let b = e.house.next().expect("next");
+    let d = b.dispatches.first().expect("a dispatch");
+    // no run at all
+    let r = e
+        .house
+        .report(
+            &d.goal,
+            GoalStatus::Reached,
+            evidence(&d.test.name, TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(r.outcome, Outcome::Unproven);
+    assert_eq!(status_of(&e, d.goal.as_str()), "active");
+}

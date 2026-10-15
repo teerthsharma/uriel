@@ -1,0 +1,112 @@
+use uriel_place::fixed::ONE;
+use uriel_place::replay::SplitMix;
+use uriel_place::{AccessKind, Config, Event, Placer, Region, RegionId, Tier, Weights};
+
+fn reg(id: u32, size: u64) -> Region {
+    Region {
+        id: RegionId(id),
+        size,
+        community: 0,
+    }
+}
+
+fn cfg() -> Config {
+    Config {
+        hot_bytes: 4096,
+        warm_bytes: 1 << 20,
+        prefetch_bytes: 4096,
+        half_life: 1 << 40,
+        gate_capacity: 64,
+        weights: Weights {
+            heat: ONE,
+            topo: 0,
+            pin: 0,
+            size: 0,
+            life: 0,
+        },
+        ..Config::default()
+    }
+}
+
+fn read(p: &mut Placer, id: u32, n: u32) {
+    for _ in 0..n {
+        p.apply(Event::Access {
+            region: RegionId(id),
+            kind: AccessKind::Read,
+        });
+    }
+}
+
+#[test]
+fn add_region_makes_an_unknown_region_trackable() {
+    let mut p = Placer::new(cfg(), &[], &[]);
+    read(&mut p, 7, 3);
+    assert_eq!(p.ignored(), 3);
+    assert!(p.add_region(reg(7, 1024)));
+    read(&mut p, 7, 3);
+    assert_eq!(p.ignored(), 3);
+    assert_eq!(p.plan().hot, vec![RegionId(7)]);
+}
+
+#[test]
+fn add_region_is_idempotent_and_keeps_existing_state() {
+    let mut p = Placer::new(cfg(), &[reg(1, 1024)], &[]);
+    read(&mut p, 1, 4);
+    assert!(!p.add_region(reg(1, 2048)));
+    assert_eq!(p.len(), 1);
+    assert_eq!(p.plan().hot, vec![RegionId(1)]);
+    assert_eq!(p.tier_of(RegionId(1)), Some(Tier::Hot));
+}
+
+#[test]
+fn add_edge_feeds_prefetch_for_a_hot_neighbour() {
+    let mut p = Placer::new(cfg(), &[reg(1, 1024), reg(2, 1024)], &[]);
+    read(&mut p, 1, 4);
+    assert!(p.plan().prefetch.is_empty());
+    p.add_edge(RegionId(1), RegionId(2));
+    assert_eq!(p.plan().prefetch, vec![RegionId(2)]);
+}
+
+#[test]
+fn add_edge_ignores_self_loops_and_unknown_regions() {
+    let mut p = Placer::new(cfg(), &[reg(1, 1024)], &[]);
+    read(&mut p, 1, 4);
+    p.add_edge(RegionId(1), RegionId(1));
+    p.add_edge(RegionId(1), RegionId(9));
+    assert!(p.plan().prefetch.is_empty());
+}
+
+#[test]
+fn dynamic_registration_equals_upfront_construction() {
+    for seed in 0..20u64 {
+        let mut rng = SplitMix(seed ^ 0x77);
+        let regions: Vec<Region> = (0..12).map(|i| reg(i, 512 << rng.below(3))).collect();
+        let edges: Vec<(RegionId, RegionId)> = (0..10)
+            .map(|_| {
+                (
+                    RegionId(rng.below(12) as u32),
+                    RegionId(rng.below(12) as u32),
+                )
+            })
+            .collect();
+        let events: Vec<Event> = (0..200)
+            .map(|_| Event::Access {
+                region: RegionId(rng.below(12) as u32),
+                kind: AccessKind::Read,
+            })
+            .collect();
+        let mut a = Placer::new(cfg(), &regions, &edges);
+        let mut b = Placer::new(cfg(), &[], &[]);
+        for r in &regions {
+            b.add_region(*r);
+        }
+        for &(x, y) in &edges {
+            b.add_edge(x, y);
+        }
+        for e in &events {
+            a.apply(*e);
+            b.apply(*e);
+        }
+        assert_eq!(a.plan(), b.plan(), "seed {seed}");
+    }
+}

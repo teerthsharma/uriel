@@ -1,0 +1,361 @@
+use std::path::Path;
+
+use seal_topo::eval::{
+    context_recall, extract_doc_queries, repo_context, run_synthetic, select, synthetic_context,
+    verdict, Arm, HashEmbedder, SynthConfig, Table,
+};
+use seal_topo::persistence::Metric;
+use seal_topo::schedule::prefix_salience;
+use seal_topo::Error;
+
+fn small() -> SynthConfig {
+    SynthConfig {
+        n_blocks: 200,
+        needles: 8,
+        noise_blocks: 12,
+        ..SynthConfig::default()
+    }
+}
+
+fn root() -> &'static Path {
+    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+}
+
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+#[test]
+fn generator_shape_and_determinism() {
+    let a = synthetic_context(&small(), 1).unwrap();
+    let b = synthetic_context(&small(), 1).unwrap();
+    assert_eq!(a.blocks.ids, b.blocks.ids);
+    assert_eq!(a.blocks.centroids, b.blocks.centroids);
+    assert_eq!(a.blocks.tokens, b.blocks.tokens);
+    assert_eq!(a.queries, b.queries);
+    assert_ne!(
+        a.blocks.centroids,
+        synthetic_context(&small(), 2).unwrap().blocks.centroids
+    );
+    assert_eq!(a.blocks.len(), 200);
+    assert_eq!(a.queries.len(), 8);
+    let mut needles: Vec<usize> = a.queries.iter().flat_map(|q| q.needles.clone()).collect();
+    assert_eq!(needles.len(), 8);
+    needles.sort();
+    needles.dedup();
+    assert_eq!(needles.len(), 8, "distinct needle blocks");
+    assert!(needles.iter().all(|&i| i < 200));
+    for q in &a.queries {
+        assert_eq!(q.vector.len(), 64);
+        let n = dot(&q.vector, &q.vector).sqrt();
+        assert!((n - 1.0).abs() < 1e-9, "unit query");
+    }
+    assert_eq!(a.total_tokens(), a.blocks.tokens.iter().sum::<usize>());
+}
+
+#[test]
+fn planted_needles_are_topologically_salient() {
+    let cfg = SynthConfig {
+        n_blocks: 400,
+        ..SynthConfig::default()
+    };
+    let c = synthetic_context(&cfg, 3).unwrap();
+    let sal = prefix_salience(&c.blocks, 399, Metric::Cosine).unwrap();
+    let mut sorted = sal.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let median = sorted[sorted.len() / 2];
+    let hits = c
+        .queries
+        .iter()
+        .filter(|q| sal[q.needles[0]] > median)
+        .count();
+    assert!(hits >= c.queries.len() - 1, "{hits}/{}", c.queries.len());
+}
+
+#[test]
+fn query_alpha_controls_needle_similarity() {
+    let mean_cos = |alpha: f64| {
+        let cfg = SynthConfig {
+            query_alpha: alpha,
+            ..SynthConfig::default()
+        };
+        let mut s = 0.0;
+        let mut k = 0.0;
+        for seed in 0..5 {
+            let c = synthetic_context(&cfg, seed).unwrap();
+            for q in &c.queries {
+                let b = q.needles[0];
+                let row = &c.blocks.centroids[b * 64..(b + 1) * 64];
+                let nb = dot(row, row).sqrt();
+                s += dot(&q.vector, row) / nb;
+                k += 1.0;
+            }
+        }
+        s / k
+    };
+    assert!((mean_cos(0.25) - 0.25).abs() < 0.05);
+    assert!((mean_cos(0.6) - 0.6).abs() < 0.05);
+    assert!(mean_cos(1.0) > 0.999);
+}
+
+#[test]
+fn every_arm_respects_the_token_budget_and_returns_sorted_unique_blocks() {
+    let c = synthetic_context(&small(), 4).unwrap();
+    let sal = prefix_salience(&c.blocks, 199, Metric::Cosine).unwrap();
+    let total = c.total_tokens();
+    for frac in [0.0, 0.05, 0.1, 0.25, 1.0] {
+        let budget = (frac * total as f64) as usize;
+        for arm in Arm::ALL {
+            for q in &c.queries {
+                let sel = select(arm, &c, q, budget, &sal, 9).unwrap();
+                assert!(sel.windows(2).all(|w| w[0] < w[1]), "{arm:?} sorted unique");
+                assert!(sel.iter().all(|&i| i < 200));
+                let used: usize = sel.iter().map(|&i| c.blocks.tokens[i]).sum();
+                assert!(used <= budget, "{arm:?} frac {frac}: {used} > {budget}");
+                if frac == 1.0 {
+                    assert_eq!(sel.len(), 200, "{arm:?} fills a 100% budget");
+                }
+                if frac == 0.0 {
+                    assert!(sel.is_empty());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn recency_is_the_newest_prefix_and_topk_matches_brute_force() {
+    let c = synthetic_context(&small(), 5).unwrap();
+    let sal = vec![0.0; 200];
+    let budget = c.total_tokens() / 10;
+    let q = &c.queries[0];
+    let sel = select(Arm::Recency, &c, q, budget, &sal, 0).unwrap();
+    let mut used = 0;
+    let mut want = Vec::new();
+    for i in (0..200).rev() {
+        if used + c.blocks.tokens[i] > budget {
+            break;
+        }
+        used += c.blocks.tokens[i];
+        want.push(i);
+    }
+    want.sort();
+    assert_eq!(sel, want);
+    let norm = |v: &[f64]| dot(v, v).sqrt().max(1e-300);
+    let mut sims: Vec<(f64, usize)> = (0..200)
+        .map(|i| {
+            let r = &c.blocks.centroids[i * 64..(i + 1) * 64];
+            (dot(&q.vector, r) / (norm(&q.vector) * norm(r)), i)
+        })
+        .collect();
+    sims.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+    let mut used = 0;
+    let mut want = Vec::new();
+    for (_, i) in sims {
+        if used + c.blocks.tokens[i] > budget {
+            break;
+        }
+        used += c.blocks.tokens[i];
+        want.push(i);
+    }
+    want.sort();
+    assert_eq!(select(Arm::TopK, &c, q, budget, &sal, 0).unwrap(), want);
+}
+
+#[test]
+fn random_arm_is_seeded() {
+    let c = synthetic_context(&small(), 6).unwrap();
+    let sal = vec![0.0; 200];
+    let b = c.total_tokens() / 10;
+    let q = &c.queries[0];
+    let a1 = select(Arm::Random, &c, q, b, &sal, 1).unwrap();
+    assert_eq!(a1, select(Arm::Random, &c, q, b, &sal, 1).unwrap());
+    assert_ne!(a1, select(Arm::Random, &c, q, b, &sal, 2).unwrap());
+}
+
+#[test]
+fn oracle_query_makes_topk_perfect_and_recency_weak() {
+    let cfg = SynthConfig {
+        query_alpha: 1.0,
+        ..small()
+    };
+    let c = synthetic_context(&cfg, 7).unwrap();
+    let t = context_recall(&c, &[0.05], &[Arm::Recency, Arm::TopK], 5).unwrap();
+    assert_eq!(t.mean(1, 0), 1.0, "top-k finds an exact-match needle");
+    assert!(t.mean(0, 0) < 0.5, "recency {}", t.mean(0, 0));
+    for a in 0..2 {
+        assert!((0.0..=1.0).contains(&t.mean(a, 0)));
+    }
+}
+
+#[test]
+fn full_budget_recall_is_one_for_every_arm() {
+    let c = synthetic_context(&small(), 8).unwrap();
+    let t = context_recall(&c, &[1.0], &Arm::ALL, 3).unwrap();
+    for a in 0..Arm::ALL.len() {
+        assert_eq!(t.mean(a, 0), 1.0, "{:?}", Arm::ALL[a]);
+    }
+}
+
+#[test]
+fn run_synthetic_is_deterministic_and_has_paired_samples() {
+    let fr = [0.05, 0.1, 0.25];
+    let a = run_synthetic(&small(), 3, &fr, &Arm::ALL).unwrap();
+    let b = run_synthetic(&small(), 3, &fr, &Arm::ALL).unwrap();
+    assert_eq!(a, b);
+    assert_eq!(a.samples.len(), 6);
+    assert!(a
+        .samples
+        .iter()
+        .all(|s| s.len() == 3 && s.iter().all(|x| x.len() == 3)));
+    assert!(a.se(0, 0) >= 0.0);
+    let mut names: Vec<&str> = Arm::ALL.iter().map(|a| a.name()).collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), 6);
+    assert!(names.iter().all(|n| !n.is_empty()));
+}
+
+#[test]
+fn verdict_requires_beating_both_baselines() {
+    let arms = vec![Arm::Recency, Arm::TopK, Arm::Topological];
+    let mk = |rec: f64, topk: f64, topo: f64| Table {
+        fracs: vec![0.05],
+        arms: arms.clone(),
+        samples: vec![
+            vec![vec![rec; 20]],
+            vec![vec![topk; 20]],
+            vec![vec![topo; 20]],
+        ],
+    };
+    assert!(verdict(&mk(0.1, 0.2, 0.5))[0].win);
+    let v = verdict(&mk(0.1, 0.6, 0.5));
+    assert!(!v[0].win);
+    assert!(v[0].margin < 0.0, "margin is against the best baseline");
+    assert!(!verdict(&mk(0.1, 0.5, 0.5))[0].win);
+    assert!(!verdict(&mk(0.7, 0.2, 0.5))[0].win);
+}
+
+#[test]
+fn hash_embedder_properties() {
+    let e = HashEmbedder { dim: 128 };
+    let a = e.embed("Computes the louvain community of each node");
+    assert_eq!(a, e.embed("Computes the louvain community of each node"));
+    assert_eq!(a.len(), 128);
+    assert!((dot(&a, &a).sqrt() - 1.0).abs() < 1e-9);
+    let related = e.embed("louvain communities of the nodes");
+    let unrelated = e.embed("reads a file from disk and prints bytes");
+    assert!(dot(&a, &related) > dot(&a, &unrelated) + 0.1);
+    let s = e.embed("page_rank_score");
+    let c = e.embed("PageRankScore");
+    assert!(dot(&s, &c) > 0.9);
+    assert!(e.embed("").iter().all(|&x| x == 0.0));
+    assert!(e.embed("!!! ... ;;").iter().all(|&x| x == 0.0));
+}
+
+#[test]
+fn doc_extraction_holds_docs_out_of_the_blocks() {
+    let src = [
+        "//! module docs are ignored for queries",
+        "use std::fmt;",
+        "",
+        "/// Computes the shortest path between two nodes in a graph.",
+        "/// Uses Dijkstra with a binary heap.",
+        "pub fn dijkstra(a: u32) -> u32 {",
+        "    a",
+        "}",
+        "",
+        "/// Too short.",
+        "fn tiny() {}",
+        "",
+        "/// Counts the number of triangles that each node participates in.",
+        "#[derive(Debug)]",
+        "pub struct Triangles {",
+        "    n: usize,",
+        "}",
+        "",
+    ]
+    .join("\n");
+    let (stripped, items) = extract_doc_queries(&src);
+    assert!(!stripped.contains("///"));
+    assert!(!stripped.contains("//!"));
+    assert!(stripped.contains("pub fn dijkstra"));
+    assert_eq!(items.len(), 2);
+    assert!(items[0].doc.contains("shortest path") && items[0].doc.contains("binary heap"));
+    let lines: Vec<&str> = stripped.lines().collect();
+    assert!(
+        lines[items[0].line].contains("pub fn dijkstra"),
+        "{}",
+        lines[items[0].line]
+    );
+    assert!(items[1].doc.contains("triangles"));
+    assert!(
+        lines[items[1].line].contains("pub struct Triangles"),
+        "{}",
+        lines[items[1].line]
+    );
+}
+
+#[test]
+fn repo_context_smoke_and_determinism() {
+    let a = repo_context(root(), 24, 256).unwrap();
+    assert!(a.blocks.len() > 50, "{} blocks", a.blocks.len());
+    assert!(a.queries.len() > 20, "{} queries", a.queries.len());
+    for q in &a.queries {
+        assert_eq!(q.vector.len(), 256);
+        assert!(q.needles.iter().all(|&i| i < a.blocks.len()));
+        assert!(!q.needles.is_empty());
+    }
+    let b = repo_context(root(), 24, 256).unwrap();
+    assert_eq!(a.blocks.centroids, b.blocks.centroids);
+    assert_eq!(a.queries, b.queries);
+    let src = std::fs::read_to_string(root().join("crates/seal-algo/src/paths.rs")).unwrap();
+    let (stripped, items) = extract_doc_queries(&src);
+    assert!(!stripped.lines().any(|l| l.trim_start().starts_with("///")));
+    assert!(!items.is_empty());
+}
+
+#[test]
+fn adversarial_configs() {
+    assert!(matches!(
+        synthetic_context(
+            &SynthConfig {
+                n_blocks: 10,
+                needles: 8,
+                noise_blocks: 8,
+                ..SynthConfig::default()
+            },
+            1
+        ),
+        Err(Error::InvalidParameter(_))
+    ));
+    assert!(synthetic_context(
+        &SynthConfig {
+            query_alpha: f64::NAN,
+            ..SynthConfig::default()
+        },
+        1
+    )
+    .is_err());
+    assert!(synthetic_context(
+        &SynthConfig {
+            query_alpha: 1.5,
+            ..SynthConfig::default()
+        },
+        1
+    )
+    .is_err());
+    assert!(synthetic_context(
+        &SynthConfig {
+            dim: 0,
+            ..SynthConfig::default()
+        },
+        1
+    )
+    .is_err());
+    let c = synthetic_context(&small(), 1).unwrap();
+    assert!(context_recall(&c, &[-0.1], &Arm::ALL, 1).is_err());
+    assert!(context_recall(&c, &[f64::NAN], &Arm::ALL, 1).is_err());
+    assert!(repo_context(Path::new("/definitely/not/here"), 24, 64).is_err());
+    assert!(repo_context(root(), 0, 64).is_err());
+}

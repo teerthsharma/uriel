@@ -1,0 +1,26 @@
+{
+  "rag": [
+    "how does the governor defer heavy leaves when free RAM is low",
+    "where is BM25 scoring implemented and how are document lengths normalised",
+    "how are chunk ids kept stable or invalidated when a file is re-indexed",
+    "what is returned for a chunk that was already delivered earlier in this session",
+    "how is the extractive compression ratio enforced for a chunk memory",
+    "how does the MCP server negotiate the protocol version in initialize",
+    "how are Cypher query parameters bound and validated",
+    "what happens to uncommitted changes after a crash and how is the log replayed",
+    "which error is raised when a unique constraint is violated on node creation",
+    "how are the BM25 and vector rankings fused by reciprocal rank"
+  ],
+  "cypher": [
+    "MATCH (f:File) RETURN f.path AS path, f.crate AS crate, f.lines AS lines ORDER BY path LIMIT 20",
+    "MATCH (f:File) RETURN f.path AS path, f.crate AS crate, f.lines AS lines ORDER BY lines DESC, path LIMIT 50",
+    "MATCH (f:File) RETURN f.path AS path, f.crate AS crate, f.lines AS lines ORDER BY path LIMIT 100",
+    "MATCH (n:Fn) RETURN n.name AS name, n.file AS file, n.line AS line ORDER BY file, line LIMIT 200",
+    "MATCH (n:Fn) WHERE n.vis = 'pub' RETURN n.name AS name, n.file AS file, n.line AS line ORDER BY name, file LIMIT 150",
+    "MATCH (n:Fn)-[:IN]->(f:File) WHERE f.crate = 'uriel-rag' RETURN n.name AS name, f.path AS path, n.line AS line ORDER BY path, line LIMIT 80",
+    "MATCH (n:Fn) RETURN n.file AS file, count(*) AS fns ORDER BY fns DESC, file LIMIT 60",
+    "MATCH (n:Fn)-[:IN]->(f:File) WHERE f.crate = 'uriel-mcp' RETURN n.name AS name, n.vis AS vis, f.path AS path, n.line AS line ORDER BY path, line LIMIT 120",
+    "MATCH (n:Fn) WHERE n.vis = 'priv' RETURN n.name AS name, n.file AS file ORDER BY name, file LIMIT 40",
+    "MATCH (f:File) WHERE f.lines > 200 RETURN f.path AS path, f.lines AS lines, f.crate AS crate ORDER BY lines DESC, path LIMIT 30"
+  ]
+}

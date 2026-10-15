@@ -1,0 +1,184 @@
+//! Shared builders for the integration tests.
+#![allow(dead_code)]
+
+use std::sync::Arc;
+
+use seal_core::Graph;
+use seal_house::*;
+use tempfile::TempDir;
+
+pub struct Env {
+    pub dir: TempDir,
+    pub house: House,
+    pub sink: Arc<VecSink>,
+    pub probe: Arc<FakeProbe>,
+}
+
+pub fn project() -> TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+    for f in ["a", "b", "c"] {
+        std::fs::write(dir.path().join(format!("src/{f}.rs")), f).expect("write");
+    }
+    dir
+}
+
+pub fn env_with(free_mb: u64, total_mb: u64, tweak: impl FnOnce(&mut HouseConfig)) -> Env {
+    let dir = project();
+    let mut cfg = HouseConfig::at(dir.path());
+    tweak(&mut cfg);
+    let sink = Arc::new(VecSink::new());
+    let probe = Arc::new(FakeProbe::new(free_mb, total_mb));
+    let graph = Graph::open_in_memory().expect("graph");
+    let house =
+        House::open(graph, cfg, Box::new(probe.clone()), Box::new(sink.clone())).expect("open");
+    Env {
+        dir,
+        house,
+        sink,
+        probe,
+    }
+}
+
+pub fn env() -> Env {
+    env_with(16_000, 16_000, |_| {})
+}
+
+pub fn gid(s: &str) -> GoalId {
+    GoalId::new(s)
+}
+
+pub fn leaf(id: &str, parent: &str) -> Goal {
+    Goal {
+        id: gid(id),
+        parent: Some(gid(parent)),
+        text: format!("do {id}"),
+        leaf: true,
+        tier: Some(Tier::Sonnet),
+        class: Some("code".into()),
+        test: Some(TestSpec {
+            name: format!("t_{id}"),
+            cmd: format!("cargo test -p x t_{id}"),
+            class: "test_unit".into(),
+        }),
+        est: Some(Est {
+            ram_mb: 800,
+            secs: 60.0,
+            tokens: 10_000,
+        }),
+        ..Goal::default()
+    }
+}
+
+pub fn nurse(id: &str, parent: &str) -> Goal {
+    Goal {
+        tier: Some(Tier::Haiku),
+        class: Some("grep".into()),
+        test: Some(TestSpec {
+            name: format!("t_{id}"),
+            cmd: format!("cargo test -p x t_{id}"),
+            class: "grep".into(),
+        }),
+        est: Some(Est {
+            ram_mb: 50,
+            secs: 5.0,
+            tokens: 2_000,
+        }),
+        ..leaf(id, parent)
+    }
+}
+
+pub fn branch(id: &str, parent: &str) -> Goal {
+    Goal {
+        id: gid(id),
+        parent: Some(gid(parent)),
+        text: format!("part {id}"),
+        leaf: false,
+        ..Goal::default()
+    }
+}
+
+pub fn chart(fellow: Fellow, goals: Vec<Goal>) -> Chart {
+    Chart {
+        need: "G0".into(),
+        fellow,
+        goals,
+    }
+}
+
+/// G0 -> G1{G1.1,G1.2}, G2{G2.1,G2.2}
+pub fn base_goals() -> Vec<Goal> {
+    vec![
+        branch("G1", "G0"),
+        leaf("G1.1", "G1"),
+        leaf("G1.2", "G1"),
+        branch("G2", "G0"),
+        leaf("G2.1", "G2"),
+        leaf("G2.2", "G2"),
+    ]
+}
+
+pub fn goal_mut<'a>(goals: &'a mut [Goal], id: &str) -> &'a mut Goal {
+    goals
+        .iter_mut()
+        .find(|g| g.id.as_str() == id)
+        .expect("goal present")
+}
+
+/// Needs stated and the foreman chart merged.
+pub fn merged(env: &Env, goals: Vec<Goal>) {
+    env.house
+        .need("proj", "build x", &["it works".to_string()])
+        .expect("need");
+    env.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, goals))
+        .expect("chart");
+    env.house.merge().expect("merge");
+}
+
+pub fn evidence(test: &str, status: TestStatus) -> TestEvidence {
+    TestEvidence {
+        test: test.into(),
+        status,
+        output: String::new(),
+    }
+}
+
+/// RED then GREEN, then report Reached.
+pub fn prove(env: &Env, goal: &str) -> ReportOutcome {
+    let test = format!("t_{goal}");
+    env.house
+        .record_test_run(&test, TestStatus::Red, 1.0, 100, &[])
+        .expect("red");
+    env.house
+        .record_test_run(&test, TestStatus::Green, 1.0, 100, &[])
+        .expect("green");
+    env.house
+        .report(
+            &gid(goal),
+            GoalStatus::Reached,
+            evidence(&test, TestStatus::Green),
+        )
+        .expect("report")
+}
+
+pub fn ids(batch: &Batch) -> Vec<String> {
+    batch
+        .dispatches
+        .iter()
+        .map(|d| d.goal.to_string())
+        .collect()
+}
+
+pub fn status_of(env: &Env, id: &str) -> String {
+    let s = env.house.status().expect("status");
+    s["goal_list"]
+        .as_array()
+        .expect("goal_list")
+        .iter()
+        .find(|g| g["id"] == id)
+        .unwrap_or_else(|| panic!("goal {id} not in status"))["status"]
+        .as_str()
+        .expect("status str")
+        .to_string()
+}

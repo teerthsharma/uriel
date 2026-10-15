@@ -1,0 +1,30 @@
+[package]
+name = "uriel-mcp"
+description = "stdio MCP server for seal: Neo4j-compatible Cypher and memory tools over the embedded graph database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "uriel_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "uriel-mcp"
+path = "src/main.rs"
+
+[dependencies]
+uriel-core = { path = "../uriel-core" }
+uriel-query = { path = "../uriel-query" }
+uriel-rag = { path = "../uriel-rag" }
+uriel-house = { path = "../uriel-house" }
+uriel-place = { path = "../uriel-place" }
+uriel-topo = { path = "../uriel-topo" }
+serde = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3"

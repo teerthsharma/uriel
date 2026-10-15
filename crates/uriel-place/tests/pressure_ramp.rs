@@ -1,0 +1,175 @@
+use uriel_place::fixed::ONE;
+use uriel_place::replay::SplitMix;
+use uriel_place::{AccessKind, Config, Event, Level, Placement, Placer, Region, RegionId, Weights};
+
+const KIB: u64 = 1024;
+
+fn setup(gate: bool) -> Placer {
+    let regions: Vec<Region> = (0..24)
+        .map(|i| Region {
+            id: RegionId(i),
+            size: KIB,
+            community: i / 4,
+        })
+        .collect();
+    let cfg = Config {
+        hot_bytes: 8 * KIB,
+        warm_bytes: 8 * KIB,
+        prefetch_bytes: 0,
+        half_life: 1 << 40,
+        gate_enabled: gate,
+        gate_capacity: 64,
+        weights: Weights {
+            heat: ONE,
+            topo: 0,
+            pin: 1_000_000 * ONE,
+            size: 0,
+            life: 0,
+        },
+        ..Config::default()
+    };
+    let mut p = Placer::new(cfg, &regions, &[]);
+    for r in 0..8u32 {
+        for _ in 0..(20 - 2 * r) {
+            p.apply(Event::Access {
+                region: RegionId(r),
+                kind: AccessKind::Read,
+            });
+        }
+    }
+    for r in 8..24u32 {
+        p.apply(Event::Access {
+            region: RegionId(r),
+            kind: AccessKind::Read,
+        });
+    }
+    p.apply(Event::Pin {
+        region: RegionId(5),
+    });
+    p.apply(Event::Pin {
+        region: RegionId(7),
+    });
+    p
+}
+
+fn ramp(p: &mut Placer) -> Vec<(Level, Placement)> {
+    let path = [
+        Level::Normal,
+        Level::Elevated,
+        Level::High,
+        Level::Critical,
+        Level::High,
+        Level::Elevated,
+        Level::Normal,
+    ];
+    path.iter()
+        .map(|&l| {
+            p.apply(Event::Pressure { level: l });
+            (l, p.plan())
+        })
+        .collect()
+}
+
+#[test]
+fn ramp_never_exceeds_the_budget_and_pins_survive_until_critical() {
+    let mut p = setup(true);
+    let before = p.plan();
+    assert_eq!(before.hot.len(), 8, "working set should fill the hot tier");
+    let steps = ramp(&mut p);
+    let mut checked = 0;
+    for (level, pl) in &steps {
+        let cap = 8 * KIB * level.eighths() / 8;
+        assert_eq!(pl.hot_budget, cap);
+        assert!(pl.hot_bytes <= cap, "{level:?}: {} > {cap}", pl.hot_bytes);
+        assert!(pl.warm_bytes <= 8 * KIB);
+        if *level != Level::Critical {
+            for pin in [RegionId(5), RegionId(7)] {
+                assert!(pl.hot.contains(&pin), "{level:?}: pinned {pin:?} was shed");
+            }
+            assert!(pl.pin_overflow.is_empty());
+        } else {
+            assert!(pl.hot.len() <= 1);
+        }
+        assert_eq!(pl.hot.len() + pl.warm.len() + pl.cold.len(), 24);
+        checked += 1;
+    }
+    eprintln!(
+        "RAMP: {checked} steps, hot bytes <= budget at every step, pinned kept below Critical"
+    );
+}
+
+#[test]
+fn recovery_restores_the_previous_hot_set() {
+    let mut p = setup(true);
+    let before = p.plan().hot;
+    assert_eq!(before.len(), 8, "working set should fill the hot tier");
+    let steps = ramp(&mut p);
+    let last = &steps.last().expect("ramp has steps").1;
+    assert_eq!(
+        last.hot, before,
+        "hot set after the ramp differs from before"
+    );
+    assert_eq!(
+        steps[1].1.hot, steps[5].1.hot,
+        "Elevated going down != Elevated coming up"
+    );
+    assert_eq!(
+        steps[2].1.hot, steps[4].1.hot,
+        "High going down != High coming up"
+    );
+}
+
+#[test]
+fn ramp_is_deterministic_across_runs_with_and_without_the_gate() {
+    for gate in [true, false] {
+        let a: Vec<Vec<u8>> = ramp(&mut setup(gate))
+            .iter()
+            .map(|(_, p)| p.encode())
+            .collect();
+        let b: Vec<Vec<u8>> = ramp(&mut setup(gate))
+            .iter()
+            .map(|(_, p)| p.encode())
+            .collect();
+        assert_eq!(a, b, "gate={gate}");
+        assert!(
+            a.iter().any(|e| e.len() > 120),
+            "decisions are empty, the comparison is vacuous"
+        );
+    }
+}
+
+#[test]
+fn noisy_ramp_keeps_the_hard_budget_at_every_step() {
+    let mut p = setup(true);
+    let mut rng = SplitMix(2026);
+    let levels = Level::ALL;
+    let mut steps = 0u32;
+    let mut nonempty = 0u32;
+    for i in 0..600u32 {
+        match rng.below(10) {
+            0 => p.apply(Event::Pressure {
+                level: levels[rng.below(4) as usize],
+            }),
+            1 => p.apply(Event::Access {
+                region: RegionId(rng.below(24) as u32),
+                kind: AccessKind::Scan,
+            }),
+            _ => p.apply(Event::Access {
+                region: RegionId((rng.below(24) * rng.below(24) / 24) as u32),
+                kind: AccessKind::Read,
+            }),
+        }
+        if i % 5 == 0 {
+            let pl = p.plan();
+            assert!(pl.hot_bytes <= pl.hot_budget, "step {i}");
+            assert!(pl.warm_bytes <= 8 * KIB, "step {i}");
+            steps += 1;
+            nonempty += u32::from(!pl.hot.is_empty());
+        }
+    }
+    assert_eq!(steps, 120);
+    assert!(
+        nonempty > 100,
+        "hot tier was empty too often ({nonempty}/120): vacuous"
+    );
+}

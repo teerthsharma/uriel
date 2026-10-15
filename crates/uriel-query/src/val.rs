@@ -1,0 +1,424 @@
+//! Runtime values of the interpreter and the Cypher comparison / arithmetic rules.
+
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+
+use uriel_core::{NodeId, RelId, Value};
+
+use crate::error::{rt, QResult, QueryError};
+
+/// A variable binding row.
+pub type Row = BTreeMap<String, Val>;
+
+/// A path: `nodes.len() == rels.len() + 1`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PathVal {
+    pub nodes: Vec<NodeId>,
+    pub rels: Vec<RelId>,
+}
+
+/// Interpreter value. Nodes and relationships are carried by identity so that later
+/// reads and writes in the same query see live state.
+#[derive(Debug, Clone)]
+pub enum Val {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    List(Vec<Val>),
+    Map(BTreeMap<String, Val>),
+    Node(NodeId),
+    Rel(RelId),
+    Path(PathVal),
+    /// Bytes or vector values, which have no Cypher literal form.
+    Raw(Value),
+}
+
+impl From<&Value> for Val {
+    fn from(v: &Value) -> Val {
+        match v {
+            Value::Null => Val::Null,
+            Value::Bool(b) => Val::Bool(*b),
+            Value::Int(i) => Val::Int(*i),
+            Value::Float(f) => Val::Float(*f),
+            Value::String(s) => Val::Str(s.clone()),
+            Value::List(l) => Val::List(l.iter().map(Val::from).collect()),
+            Value::Map(m) => Val::Map(m.iter().map(|(k, v)| (k.clone(), Val::from(v))).collect()),
+            Value::Bytes(_) | Value::Vector(_) => Val::Raw(v.clone()),
+        }
+    }
+}
+
+impl Val {
+    pub fn is_null(&self) -> bool {
+        matches!(self, Val::Null)
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Val::Null => "Null",
+            Val::Bool(_) => "Boolean",
+            Val::Int(_) => "Integer",
+            Val::Float(_) => "Float",
+            Val::Str(_) => "String",
+            Val::List(_) => "List",
+            Val::Map(_) => "Map",
+            Val::Node(_) => "Node",
+            Val::Rel(_) => "Relationship",
+            Val::Path(_) => "Path",
+            Val::Raw(_) => "Raw",
+        }
+    }
+
+    /// Converts to a storable property value (no nodes, relationships or paths).
+    pub fn to_value(&self) -> QResult<Value> {
+        Ok(match self {
+            Val::Null => Value::Null,
+            Val::Bool(b) => Value::Bool(*b),
+            Val::Int(i) => Value::Int(*i),
+            Val::Float(f) => Value::Float(*f),
+            Val::Str(s) => Value::String(s.clone()),
+            Val::List(l) => Value::List(l.iter().map(Val::to_value).collect::<QResult<_>>()?),
+            Val::Map(m) => Value::Map(
+                m.iter()
+                    .map(|(k, v)| Ok((k.clone(), v.to_value()?)))
+                    .collect::<QResult<_>>()?,
+            ),
+            Val::Raw(v) => v.clone(),
+            other => {
+                return rt(format!(
+                    "{} values cannot be stored as properties",
+                    other.type_name()
+                ))
+            }
+        })
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Val::Int(i) => Some(*i as f64),
+            Val::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    pub fn is_number(&self) -> bool {
+        matches!(self, Val::Int(_) | Val::Float(_))
+    }
+}
+
+fn num_value(v: &Val) -> Value {
+    match v {
+        Val::Int(i) => Value::Int(*i),
+        Val::Float(f) => Value::Float(*f),
+        _ => Value::Null,
+    }
+}
+
+fn cmp_numbers(a: &Val, b: &Val) -> Ordering {
+    num_value(a).cmp(&num_value(b))
+}
+
+fn is_nan(v: &Val) -> bool {
+    matches!(v, Val::Float(f) if f.is_nan())
+}
+
+fn order_rank(v: &Val) -> u8 {
+    match v {
+        Val::Map(_) => 0,
+        Val::Node(_) => 1,
+        Val::Rel(_) => 2,
+        Val::List(_) => 3,
+        Val::Path(_) => 4,
+        Val::Str(_) => 5,
+        Val::Bool(_) => 6,
+        Val::Int(_) | Val::Float(_) => 7,
+        Val::Raw(_) => 8,
+        Val::Null => 9,
+    }
+}
+
+/// Total order used by `ORDER BY`, grouping, `DISTINCT`, `min` and `max`.
+/// Ascending: maps, nodes, relationships, lists, paths, strings, booleans, numbers (NaN
+/// last among numbers), then null.
+pub fn order_cmp(a: &Val, b: &Val) -> Ordering {
+    let (ra, rb) = (order_rank(a), order_rank(b));
+    if ra != rb {
+        return ra.cmp(&rb);
+    }
+    match (a, b) {
+        (Val::Null, Val::Null) => Ordering::Equal,
+        (Val::Bool(x), Val::Bool(y)) => x.cmp(y),
+        (x, y) if x.is_number() && y.is_number() => cmp_numbers(x, y),
+        (Val::Str(x), Val::Str(y)) => x.cmp(y),
+        (Val::Node(x), Val::Node(y)) => x.cmp(y),
+        (Val::Rel(x), Val::Rel(y)) => x.cmp(y),
+        (Val::List(x), Val::List(y)) => {
+            for (p, q) in x.iter().zip(y) {
+                let c = order_cmp(p, q);
+                if c != Ordering::Equal {
+                    return c;
+                }
+            }
+            x.len().cmp(&y.len())
+        }
+        (Val::Map(x), Val::Map(y)) => {
+            let mut xi = x.iter();
+            let mut yi = y.iter();
+            loop {
+                match (xi.next(), yi.next()) {
+                    (None, None) => return Ordering::Equal,
+                    (None, Some(_)) => return Ordering::Less,
+                    (Some(_), None) => return Ordering::Greater,
+                    (Some((k1, v1)), Some((k2, v2))) => {
+                        let c = k1.cmp(k2).then_with(|| order_cmp(v1, v2));
+                        if c != Ordering::Equal {
+                            return c;
+                        }
+                    }
+                }
+            }
+        }
+        (Val::Path(x), Val::Path(y)) => x.nodes.cmp(&y.nodes).then_with(|| x.rels.cmp(&y.rels)),
+        (Val::Raw(x), Val::Raw(y)) => x.cmp(y),
+        _ => Ordering::Equal,
+    }
+}
+
+/// Wrapper giving `Vec<Val>` the equivalence used for grouping and `DISTINCT`.
+#[derive(Debug, Clone)]
+pub struct GroupKey(pub Vec<Val>);
+
+impl PartialEq for GroupKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+impl Eq for GroupKey {}
+impl PartialOrd for GroupKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for GroupKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        for (a, b) in self.0.iter().zip(&other.0) {
+            let c = order_cmp(a, b);
+            if c != Ordering::Equal {
+                return c;
+            }
+        }
+        self.0.len().cmp(&other.0.len())
+    }
+}
+
+/// Cypher `=` with three-valued logic: `None` is null.
+pub fn equals(a: &Val, b: &Val) -> Option<bool> {
+    match (a, b) {
+        (Val::Null, _) | (_, Val::Null) => None,
+        (x, y) if x.is_number() && y.is_number() => {
+            if is_nan(x) || is_nan(y) {
+                Some(false)
+            } else {
+                Some(cmp_numbers(x, y) == Ordering::Equal)
+            }
+        }
+        (Val::Bool(x), Val::Bool(y)) => Some(x == y),
+        (Val::Str(x), Val::Str(y)) => Some(x == y),
+        (Val::Node(x), Val::Node(y)) => Some(x == y),
+        (Val::Rel(x), Val::Rel(y)) => Some(x == y),
+        (Val::Path(x), Val::Path(y)) => Some(x == y),
+        (Val::Raw(x), Val::Raw(y)) => Some(x == y),
+        (Val::List(x), Val::List(y)) => {
+            if x.len() != y.len() {
+                return Some(false);
+            }
+            let mut saw_null = false;
+            for (p, q) in x.iter().zip(y) {
+                match equals(p, q) {
+                    Some(false) => return Some(false),
+                    None => saw_null = true,
+                    Some(true) => {}
+                }
+            }
+            if saw_null {
+                None
+            } else {
+                Some(true)
+            }
+        }
+        (Val::Map(x), Val::Map(y)) => {
+            if x.len() != y.len() || !x.keys().eq(y.keys()) {
+                return Some(false);
+            }
+            let mut saw_null = false;
+            for (k, p) in x {
+                match equals(p, &y[k]) {
+                    Some(false) => return Some(false),
+                    None => saw_null = true,
+                    Some(true) => {}
+                }
+            }
+            if saw_null {
+                None
+            } else {
+                Some(true)
+            }
+        }
+        _ => Some(false),
+    }
+}
+
+/// Cypher ordering comparison for `<`, `<=`, `>`, `>=`: `None` means null (incomparable).
+pub fn compare(a: &Val, b: &Val) -> Option<Ordering> {
+    match (a, b) {
+        (x, y) if x.is_number() && y.is_number() => {
+            if is_nan(x) || is_nan(y) {
+                None
+            } else {
+                Some(cmp_numbers(x, y))
+            }
+        }
+        (Val::Str(x), Val::Str(y)) => Some(x.cmp(y)),
+        (Val::Bool(x), Val::Bool(y)) => Some(x.cmp(y)),
+        (Val::List(x), Val::List(y)) => {
+            for (p, q) in x.iter().zip(y) {
+                match compare(p, q) {
+                    Some(Ordering::Equal) => {}
+                    other => return other,
+                }
+            }
+            Some(x.len().cmp(&y.len()))
+        }
+        _ => None,
+    }
+}
+
+/// Renders a float the way Cypher prints it (`1.0`, not `1`).
+pub fn fmt_float(f: f64) -> String {
+    if f.is_nan() {
+        "NaN".into()
+    } else if f.is_infinite() {
+        if f > 0.0 { "Infinity" } else { "-Infinity" }.into()
+    } else if f.fract() == 0.0 && f.abs() < 1e15 {
+        format!("{f:.1}")
+    } else {
+        format!("{f}")
+    }
+}
+
+/// String form used by `toString` and string concatenation.
+pub fn to_text(v: &Val) -> Option<String> {
+    Some(match v {
+        Val::Str(s) => s.clone(),
+        Val::Int(i) => i.to_string(),
+        Val::Float(f) => fmt_float(*f),
+        Val::Bool(b) => b.to_string(),
+        _ => return None,
+    })
+}
+
+pub fn add(a: &Val, b: &Val) -> QResult<Val> {
+    Ok(match (a, b) {
+        (Val::Null, _) | (_, Val::Null) => Val::Null,
+        (Val::Int(x), Val::Int(y)) => match x.checked_add(*y) {
+            Some(v) => Val::Int(v),
+            None => return rt("integer overflow"),
+        },
+        (x, y) if x.is_number() && y.is_number() => {
+            Val::Float(x.as_f64().unwrap_or(0.0) + y.as_f64().unwrap_or(0.0))
+        }
+        (Val::List(x), Val::List(y)) => Val::List(x.iter().chain(y).cloned().collect()),
+        (Val::List(x), y) => {
+            let mut v = x.clone();
+            v.push(y.clone());
+            Val::List(v)
+        }
+        (x, Val::List(y)) => {
+            let mut v = vec![x.clone()];
+            v.extend(y.iter().cloned());
+            Val::List(v)
+        }
+        (Val::Str(_), y) | (y, Val::Str(_)) if to_text(y).is_some() => Val::Str(format!(
+            "{}{}",
+            to_text(a).unwrap_or_default(),
+            to_text(b).unwrap_or_default()
+        )),
+        _ => {
+            return rt(format!(
+                "cannot add {} and {}",
+                a.type_name(),
+                b.type_name()
+            ))
+        }
+    })
+}
+
+pub fn arith(op: uriel_cypher::BinaryOp, a: &Val, b: &Val) -> QResult<Val> {
+    use uriel_cypher::BinaryOp as B;
+    if op == B::Add {
+        return add(a, b);
+    }
+    if a.is_null() || b.is_null() {
+        return Ok(Val::Null);
+    }
+    if !(a.is_number() && b.is_number()) {
+        return rt(format!(
+            "cannot apply arithmetic to {} and {}",
+            a.type_name(),
+            b.type_name()
+        ));
+    }
+    if op == B::Pow {
+        return Ok(Val::Float(
+            a.as_f64().unwrap_or(0.0).powf(b.as_f64().unwrap_or(0.0)),
+        ));
+    }
+    if let (Val::Int(x), Val::Int(y)) = (a, b) {
+        let r = match op {
+            B::Sub => x.checked_sub(*y),
+            B::Mul => x.checked_mul(*y),
+            B::Div => {
+                if *y == 0 {
+                    return rt("/ by zero");
+                }
+                x.checked_div(*y)
+            }
+            B::Mod => {
+                if *y == 0 {
+                    return rt("/ by zero");
+                }
+                x.checked_rem(*y)
+            }
+            _ => None,
+        };
+        return match r {
+            Some(v) => Ok(Val::Int(v)),
+            None => rt("integer overflow"),
+        };
+    }
+    let (x, y) = (a.as_f64().unwrap_or(0.0), b.as_f64().unwrap_or(0.0));
+    Ok(Val::Float(match op {
+        B::Sub => x - y,
+        B::Mul => x * y,
+        B::Div => x / y,
+        B::Mod => x % y,
+        _ => f64::NAN,
+    }))
+}
+
+pub fn neg(a: &Val) -> QResult<Val> {
+    match a {
+        Val::Null => Ok(Val::Null),
+        Val::Int(i) => match i.checked_neg() {
+            Some(v) => Ok(Val::Int(v)),
+            None => rt("integer overflow"),
+        },
+        Val::Float(f) => Ok(Val::Float(-f)),
+        other => Err(QueryError::Runtime(format!(
+            "cannot negate {}",
+            other.type_name()
+        ))),
+    }
+}

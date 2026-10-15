@@ -1,0 +1,488 @@
+//! Clause-by-clause interpreter: MATCH, WITH/RETURN projection, aggregation, UNION.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use uriel_core::Value;
+use uriel_cypher::{
+    CallClause, Clause, Expr, MatchClause, ProjectionBody, RegularQuery, SingleQuery,
+    SubqueryClause, UnwindClause,
+};
+
+use crate::analyze::{contains_agg, pattern_vars, push_unique};
+use crate::ctx::Ctx;
+use crate::error::{rt, sem, QResult, QueryError};
+use crate::val::{order_cmp, GroupKey, Row, Val};
+
+/// Output of a (sub)query: `cols` is `None` for a query without `RETURN`.
+pub struct Out {
+    pub cols: Option<Vec<String>>,
+    pub data: Vec<Vec<Val>>,
+    pub rows: Vec<Row>,
+}
+
+/// Runs a statement and converts the result to public values.
+pub fn run_top(ctx: &mut Ctx, q: &RegularQuery) -> QResult<(Vec<String>, Vec<Vec<Value>>)> {
+    let out = ctx.run_regular(q, vec![Row::new()])?;
+    let Some(cols) = out.cols else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let mut rows = Vec::with_capacity(out.data.len());
+    for r in &out.data {
+        let mut cells = Vec::with_capacity(r.len());
+        for v in r {
+            cells.push(ctx.materialize(v)?);
+        }
+        rows.push(cells);
+    }
+    Ok((cols, rows))
+}
+
+fn zip_rows(cols: &[String], data: &[Vec<Val>]) -> Vec<Row> {
+    data.iter()
+        .map(|d| cols.iter().cloned().zip(d.iter().cloned()).collect())
+        .collect()
+}
+
+fn item_name(e: &Expr, alias: &Option<String>) -> String {
+    match alias {
+        Some(a) => a.clone(),
+        None => match e {
+            Expr::Variable(v) => v.clone(),
+            other => other.to_string(),
+        },
+    }
+}
+
+impl Ctx<'_> {
+    pub fn run_regular(&mut self, q: &RegularQuery, init: Vec<Row>) -> QResult<Out> {
+        let mut first = self.run_single(&q.first, init.clone())?;
+        if q.unions.is_empty() {
+            return Ok(first);
+        }
+        let Some(cols) = first.cols.clone() else {
+            return sem("UNION requires every part to end with RETURN");
+        };
+        let mut distinct_all = true;
+        for u in &q.unions {
+            let part = self.run_single(&u.query, init.clone())?;
+            if part.cols.as_ref() != Some(&cols) {
+                return sem("All sub queries in an UNION must have the same column names");
+            }
+            first.data.extend(part.data);
+            distinct_all &= !u.all;
+        }
+        if distinct_all {
+            let mut seen = BTreeSet::new();
+            first.data.retain(|d| seen.insert(GroupKey(d.clone())));
+        } else if q.unions.iter().any(|u| !u.all) {
+            // mixed UNION / UNION ALL is rejected by Cypher; treat as distinct
+            let mut seen = BTreeSet::new();
+            first.data.retain(|d| seen.insert(GroupKey(d.clone())));
+        }
+        first.rows = zip_rows(&cols, &first.data);
+        Ok(first)
+    }
+
+    fn run_single(&mut self, sq: &SingleQuery, init: Vec<Row>) -> QResult<Out> {
+        let mut rows = init;
+        let mut scope: Vec<String> = rows
+            .first()
+            .map(|r| r.keys().cloned().collect())
+            .unwrap_or_default();
+        let mut last_call_cols: Option<Vec<String>> = None;
+        for (i, clause) in sq.clauses.iter().enumerate() {
+            match clause {
+                Clause::Match(m) => rows = self.exec_match(m, rows, &mut scope)?,
+                Clause::Unwind(u) => rows = self.exec_unwind(u, rows, &mut scope)?,
+                Clause::Create(c) => {
+                    let mut out = Vec::with_capacity(rows.len());
+                    for r in &rows {
+                        out.push(self.create_pattern(&c.pattern, r)?);
+                    }
+                    pattern_vars(&c.pattern, &mut scope);
+                    rows = out;
+                }
+                Clause::Merge(m) => {
+                    rows = self.exec_merge(m, rows)?;
+                    let mut vs = Vec::new();
+                    pattern_vars(
+                        &uriel_cypher::Pattern {
+                            parts: vec![m.pattern.clone()],
+                        },
+                        &mut vs,
+                    );
+                    for v in vs {
+                        push_unique(&mut scope, &v);
+                    }
+                }
+                Clause::Set(c) => self.exec_set(c, &rows)?,
+                Clause::Remove(c) => self.exec_remove(c, &rows)?,
+                Clause::Delete(c) => self.exec_delete(c, &rows)?,
+                Clause::With(w) => {
+                    let (cols, data) = self.project(&w.body, std::mem::take(&mut rows), &scope)?;
+                    rows = zip_rows(&cols, &data);
+                    scope = cols;
+                    if let Some(wh) = &w.where_clause {
+                        let mut kept = Vec::with_capacity(rows.len());
+                        for r in rows {
+                            if self.eval_truth(wh, &r)? == Some(true) {
+                                kept.push(r);
+                            }
+                        }
+                        rows = kept;
+                    }
+                }
+                Clause::Return(r) => {
+                    if i + 1 != sq.clauses.len() {
+                        return sem("RETURN can only be used at the end of the query");
+                    }
+                    let (cols, data) = self.project(&r.body, rows, &scope)?;
+                    let rows = zip_rows(&cols, &data);
+                    return Ok(Out {
+                        cols: Some(cols),
+                        data,
+                        rows,
+                    });
+                }
+                Clause::Call(c) => {
+                    let (new_rows, cols) = self.exec_call(c, rows)?;
+                    rows = new_rows;
+                    for c in &cols {
+                        push_unique(&mut scope, c);
+                    }
+                    last_call_cols = Some(cols);
+                }
+                Clause::Subquery(s) => rows = self.exec_subquery(s, rows, &mut scope)?,
+            }
+        }
+        if let (Some(Clause::Call(_)), Some(cols)) = (sq.clauses.last(), last_call_cols) {
+            let data: Vec<Vec<Val>> = rows
+                .iter()
+                .map(|r| {
+                    cols.iter()
+                        .map(|c| r.get(c).cloned().unwrap_or(Val::Null))
+                        .collect()
+                })
+                .collect();
+            return Ok(Out {
+                cols: Some(cols),
+                data,
+                rows,
+            });
+        }
+        Ok(Out {
+            cols: None,
+            data: Vec::new(),
+            rows,
+        })
+    }
+
+    fn exec_match(
+        &mut self,
+        m: &MatchClause,
+        rows: Vec<Row>,
+        scope: &mut Vec<String>,
+    ) -> QResult<Vec<Row>> {
+        let mut vars = Vec::new();
+        pattern_vars(&m.pattern, &mut vars);
+        let mut out = Vec::new();
+        for row in rows {
+            let matches = self.match_parts(&m.pattern.parts, &row, m.where_clause.as_ref())?;
+            let mut kept = Vec::new();
+            for (r, _) in matches {
+                if let Some(w) = &m.where_clause {
+                    if self.eval_truth(w, &r)? != Some(true) {
+                        continue;
+                    }
+                }
+                kept.push(r);
+            }
+            if kept.is_empty() && m.optional {
+                let mut r = row.clone();
+                for v in &vars {
+                    r.entry(v.clone()).or_insert(Val::Null);
+                }
+                kept.push(r);
+            }
+            out.extend(kept);
+        }
+        for v in vars {
+            push_unique(scope, &v);
+        }
+        Ok(out)
+    }
+
+    fn exec_unwind(
+        &mut self,
+        u: &UnwindClause,
+        rows: Vec<Row>,
+        scope: &mut Vec<String>,
+    ) -> QResult<Vec<Row>> {
+        let mut out = Vec::new();
+        for row in rows {
+            match self.eval(&u.expr, &row)? {
+                Val::Null => {}
+                Val::List(items) => {
+                    for it in items {
+                        let mut r = row.clone();
+                        r.insert(u.variable.clone(), it);
+                        out.push(r);
+                    }
+                }
+                other => {
+                    let mut r = row.clone();
+                    r.insert(u.variable.clone(), other);
+                    out.push(r);
+                }
+            }
+        }
+        push_unique(scope, &u.variable);
+        Ok(out)
+    }
+
+    fn exec_subquery(
+        &mut self,
+        s: &SubqueryClause,
+        rows: Vec<Row>,
+        scope: &mut Vec<String>,
+    ) -> QResult<Vec<Row>> {
+        let mut out = Vec::new();
+        let mut new_cols: Vec<String> = Vec::new();
+        for row in rows {
+            let init: Row = match &s.scope {
+                Some(vars) => vars
+                    .iter()
+                    .filter_map(|v| row.get(v).map(|x| (v.clone(), x.clone())))
+                    .collect(),
+                None => row.clone(),
+            };
+            let inner = self.run_regular(&s.query, vec![init])?;
+            match inner.cols {
+                None => out.push(row),
+                Some(cols) => {
+                    for c in &cols {
+                        push_unique(&mut new_cols, c);
+                    }
+                    for d in inner.data {
+                        let mut r = row.clone();
+                        for (c, v) in cols.iter().zip(d) {
+                            r.insert(c.clone(), v);
+                        }
+                        out.push(r);
+                    }
+                }
+            }
+        }
+        for c in new_cols {
+            push_unique(scope, &c);
+        }
+        Ok(out)
+    }
+
+    fn exec_call(&mut self, c: &CallClause, rows: Vec<Row>) -> QResult<(Vec<Row>, Vec<String>)> {
+        let mut out = Vec::new();
+        let mut out_cols: Vec<String> = Vec::new();
+        for row in rows {
+            let mut args = Vec::new();
+            for a in &c.args {
+                args.push(self.eval(a, &row)?);
+            }
+            let (pcols, prows) = self.run_procedure(&c.namespace, &c.name, &args)?;
+            // (procedure column, bound name)
+            let mapping: Vec<(usize, String)> = match &c.yield_clause {
+                Some(y) if !y.star => {
+                    let mut m = Vec::new();
+                    for it in &y.items {
+                        let Some(idx) = pcols.iter().position(|p| *p == it.name) else {
+                            return sem(format!(
+                                "procedure {}.{} has no output `{}`",
+                                c.namespace.join("."),
+                                c.name,
+                                it.name
+                            ));
+                        };
+                        m.push((idx, it.alias.clone().unwrap_or_else(|| it.name.clone())));
+                    }
+                    m
+                }
+                _ => pcols.iter().cloned().enumerate().collect(),
+            };
+            out_cols = mapping.iter().map(|(_, n)| n.clone()).collect();
+            for p in prows {
+                let mut r = row.clone();
+                for (idx, name) in &mapping {
+                    r.insert(name.clone(), p[*idx].clone());
+                }
+                if let Some(w) = c
+                    .yield_clause
+                    .as_ref()
+                    .and_then(|y| y.where_clause.as_ref())
+                {
+                    if self.eval_truth(w, &r)? != Some(true) {
+                        continue;
+                    }
+                }
+                out.push(r);
+            }
+        }
+        if out_cols.is_empty() {
+            // no input rows: still report the procedure's columns
+            if let Some(y) = &c.yield_clause {
+                if !y.star {
+                    out_cols = y
+                        .items
+                        .iter()
+                        .map(|i| i.alias.clone().unwrap_or_else(|| i.name.clone()))
+                        .collect();
+                }
+            }
+        }
+        Ok((out, out_cols))
+    }
+
+    fn int_arg(&mut self, e: &Expr, what: &str) -> QResult<usize> {
+        match self.eval(e, &Row::new())? {
+            Val::Int(i) if i >= 0 => Ok(i as usize),
+            o => rt(format!(
+                "{what} must be a non-negative Integer, got {}",
+                o.type_name()
+            )),
+        }
+    }
+
+    /// Projects rows through `WITH` / `RETURN` items, with grouping, DISTINCT, ORDER BY,
+    /// SKIP and LIMIT.
+    fn project(
+        &mut self,
+        body: &ProjectionBody,
+        rows: Vec<Row>,
+        scope: &[String],
+    ) -> QResult<(Vec<String>, Vec<Vec<Val>>)> {
+        let mut items: Vec<(String, Expr)> = Vec::new();
+        if body.include_existing {
+            for v in scope {
+                items.push((v.clone(), Expr::Variable(v.clone())));
+            }
+        }
+        for it in &body.items {
+            items.push((item_name(&it.expr, &it.alias), it.expr.clone()));
+        }
+        let cols: Vec<String> = items.iter().map(|(n, _)| n.clone()).collect();
+        let agg_flags: Vec<bool> = items.iter().map(|(_, e)| contains_agg(e)).collect();
+        let aggregating = agg_flags.iter().any(|f| *f);
+        let order = &body.order_by;
+
+        struct Unit {
+            vals: Vec<Val>,
+            keys: Vec<Val>,
+        }
+        let mut units: Vec<Unit> = Vec::new();
+
+        let make_env = |row: &Row, vals: &[Val]| -> Row {
+            let mut env = row.clone();
+            for (n, v) in cols.iter().zip(vals) {
+                env.insert(n.clone(), v.clone());
+            }
+            env
+        };
+
+        if !aggregating {
+            for row in &rows {
+                let mut vals = Vec::with_capacity(items.len());
+                for (_, e) in &items {
+                    vals.push(self.eval(e, row)?);
+                }
+                let mut keys = Vec::new();
+                if !order.is_empty() {
+                    let env = make_env(row, &vals);
+                    for s in order {
+                        keys.push(self.eval(&s.expr, &env)?);
+                    }
+                }
+                units.push(Unit { vals, keys });
+            }
+        } else {
+            let key_idx: Vec<usize> = (0..items.len()).filter(|i| !agg_flags[*i]).collect();
+            let mut index: BTreeMap<GroupKey, usize> = BTreeMap::new();
+            let mut groups: Vec<(Vec<Val>, Vec<Row>)> = Vec::new();
+            for row in rows {
+                let mut kv = Vec::with_capacity(key_idx.len());
+                for &i in &key_idx {
+                    kv.push(self.eval(&items[i].1, &row)?);
+                }
+                match index.get(&GroupKey(kv.clone())) {
+                    Some(&g) => groups[g].1.push(row),
+                    None => {
+                        index.insert(GroupKey(kv.clone()), groups.len());
+                        groups.push((kv, vec![row]));
+                    }
+                }
+            }
+            if groups.is_empty() && key_idx.is_empty() {
+                groups.push((Vec::new(), Vec::new()));
+            }
+            for (kv, grows) in groups {
+                let first = grows.first().cloned().unwrap_or_default();
+                self.group = Some(grows);
+                let res = (|| -> QResult<Unit> {
+                    let mut vals = Vec::with_capacity(items.len());
+                    let mut ki = 0;
+                    for (i, (_, e)) in items.iter().enumerate() {
+                        if agg_flags[i] {
+                            vals.push(self.eval(e, &first)?);
+                        } else {
+                            vals.push(kv[ki].clone());
+                            ki += 1;
+                        }
+                    }
+                    let mut keys = Vec::new();
+                    if !order.is_empty() {
+                        let env = make_env(&first, &vals);
+                        for s in order {
+                            keys.push(self.eval(&s.expr, &env)?);
+                        }
+                    }
+                    Ok(Unit { vals, keys })
+                })();
+                self.group = None;
+                units.push(res?);
+            }
+        }
+
+        if body.distinct {
+            let mut seen = BTreeSet::new();
+            units.retain(|u| seen.insert(GroupKey(u.vals.clone())));
+        }
+        if !order.is_empty() {
+            units.sort_by(|a, b| {
+                for (i, s) in order.iter().enumerate() {
+                    let c = order_cmp(&a.keys[i], &b.keys[i]);
+                    let c = if s.descending { c.reverse() } else { c };
+                    if c != std::cmp::Ordering::Equal {
+                        return c;
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+        }
+        let skip = match &body.skip {
+            Some(e) => self.int_arg(e, "SKIP")?,
+            None => 0,
+        };
+        let limit = match &body.limit {
+            Some(e) => Some(self.int_arg(e, "LIMIT")?),
+            None => None,
+        };
+        let iter = units.into_iter().skip(skip).map(|u| u.vals);
+        let data: Vec<Vec<Val>> = match limit {
+            Some(l) => iter.take(l).collect(),
+            None => iter.collect(),
+        };
+        Ok((cols, data))
+    }
+}
+
+#[allow(dead_code)]
+fn unsupported<T>(what: &str) -> QResult<T> {
+    Err(QueryError::Unsupported(what.into()))
+}

@@ -1,0 +1,204 @@
+//! `EXPLAIN` plan rendering.
+
+use seal_core::ReadTx;
+use seal_cypher::{
+    Clause, Expr, NodePattern, PatternPart, ProjectionBody, Query, QueryBody, RegularQuery,
+    SchemaCommand, SingleQuery,
+};
+
+use crate::analyze::{conjuncts, contains_agg, element_vars};
+use crate::matcher::equality_keys;
+
+/// Renders the operator tree, root first, one operator per line.
+pub fn explain(q: &Query, read: &ReadTx) -> String {
+    let mut ops: Vec<String> = Vec::new();
+    match &q.body {
+        QueryBody::Schema(s) => ops.push(
+            match s {
+                SchemaCommand::CreateIndex(_) => "CreateIndex",
+                SchemaCommand::DropIndex { .. } => "DropIndex",
+                SchemaCommand::CreateConstraint(_) => "CreateConstraint",
+                SchemaCommand::DropConstraint { .. } => "DropConstraint",
+                SchemaCommand::ShowIndexes => "ShowIndexes",
+                SchemaCommand::ShowConstraints => "ShowConstraints",
+            }
+            .to_string(),
+        ),
+        QueryBody::Regular(r) => regular(r, read, &mut ops),
+    }
+    let mut out = String::new();
+    for (depth, op) in ops.iter().rev().enumerate() {
+        out.push_str(&"  ".repeat(depth));
+        out.push('+');
+        out.push_str(op);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
+}
+
+fn regular(r: &RegularQuery, read: &ReadTx, ops: &mut Vec<String>) {
+    single(&r.first, read, ops);
+    for u in &r.unions {
+        ops.push(if u.all { "UnionAll" } else { "Union" }.to_string());
+        single(&u.query, read, ops);
+    }
+}
+
+fn simple_rhs(e: &Expr, bound: &[String]) -> bool {
+    match e {
+        Expr::Literal(_) | Expr::Parameter(_) => true,
+        Expr::Variable(v) => bound.contains(v),
+        Expr::Property { base, .. } => simple_rhs(base, bound),
+        Expr::List(items) => items.iter().all(|i| simple_rhs(i, bound)),
+        _ => false,
+    }
+}
+
+fn start_op(np: &NodePattern, conj: &[&Expr], read: &ReadTx, bound: &[String]) -> String {
+    let var = np.variable.clone().unwrap_or_default();
+    if np.variable.as_ref().is_some_and(|v| bound.contains(v)) {
+        return format!("Argument ({var})");
+    }
+    if !np.labels.is_empty() {
+        for (k, e) in equality_keys(np, conj) {
+            if !simple_rhs(e, bound) {
+                continue;
+            }
+            for l in &np.labels {
+                if read.has_index(l, &k).unwrap_or(false) {
+                    return format!("NodeIndexSeek ({var}:{l} {{{k}}})");
+                }
+            }
+        }
+        return format!("NodeByLabelScan ({var}:{})", np.labels.join(":"));
+    }
+    format!("AllNodesScan ({var})")
+}
+
+fn part_ops(
+    part: &PatternPart,
+    conj: &[&Expr],
+    read: &ReadTx,
+    bound: &mut Vec<String>,
+    ops: &mut Vec<String>,
+) {
+    let el = &part.element;
+    ops.push(start_op(&el.start, conj, read, bound));
+    for s in &el.steps {
+        let ty = if s.rel.types.is_empty() {
+            String::new()
+        } else {
+            format!(":{}", s.rel.types.join("|"))
+        };
+        let name = match (part.kind, s.rel.length.is_some()) {
+            (seal_cypher::PathKind::Plain, false) => "Expand(All)",
+            (seal_cypher::PathKind::Plain, true) => "VarLengthExpand(All)",
+            (seal_cypher::PathKind::Shortest, _) => "ShortestPath",
+            (seal_cypher::PathKind::AllShortest, _) => "AllShortestPaths",
+        };
+        ops.push(format!(
+            "{name} ({})-[{}{ty}]-({})",
+            el.start.variable.clone().unwrap_or_default(),
+            s.rel.variable.clone().unwrap_or_default(),
+            s.node.variable.clone().unwrap_or_default()
+        ));
+    }
+    element_vars(el, bound);
+    if let Some(v) = &part.variable {
+        bound.push(v.clone());
+    }
+}
+
+fn projection(body: &ProjectionBody, label: &str, ops: &mut Vec<String>) {
+    let agg = body.items.iter().any(|i| contains_agg(&i.expr));
+    ops.push(if agg {
+        "EagerAggregation".to_string()
+    } else {
+        label.to_string()
+    });
+    if body.distinct {
+        ops.push("Distinct".into());
+    }
+    if !body.order_by.is_empty() {
+        ops.push("Sort".into());
+    }
+    if body.skip.is_some() {
+        ops.push("Skip".into());
+    }
+    if body.limit.is_some() {
+        ops.push("Limit".into());
+    }
+}
+
+fn single(sq: &SingleQuery, read: &ReadTx, ops: &mut Vec<String>) {
+    let mut bound: Vec<String> = Vec::new();
+    for c in &sq.clauses {
+        match c {
+            Clause::Match(m) => {
+                let mut conj = Vec::new();
+                if let Some(w) = &m.where_clause {
+                    conjuncts(w, &mut conj);
+                }
+                if m.optional {
+                    ops.push("Optional".into());
+                }
+                for p in &m.pattern.parts {
+                    part_ops(p, &conj, read, &mut bound, ops);
+                }
+                if let Some(w) = &m.where_clause {
+                    ops.push(format!("Filter ({w})"));
+                }
+            }
+            Clause::Unwind(u) => {
+                ops.push(format!("Unwind ({})", u.variable));
+                bound.push(u.variable.clone());
+            }
+            Clause::Create(c) => {
+                for p in &c.pattern.parts {
+                    element_vars(&p.element, &mut bound);
+                }
+                ops.push("Create".into());
+            }
+            Clause::Merge(m) => {
+                part_ops(&m.pattern, &[], read, &mut bound, ops);
+                ops.push("Merge".into());
+            }
+            Clause::Set(_) => ops.push("SetProperty".into()),
+            Clause::Remove(_) => ops.push("RemoveLabels/Properties".into()),
+            Clause::Delete(d) => ops.push(if d.detach { "DetachDelete" } else { "Delete" }.into()),
+            Clause::With(w) => {
+                projection(&w.body, "Projection", ops);
+                if let Some(wh) = &w.where_clause {
+                    ops.push(format!("Filter ({wh})"));
+                }
+                bound = w
+                    .body
+                    .items
+                    .iter()
+                    .map(|i| {
+                        i.alias.clone().unwrap_or_else(|| match &i.expr {
+                            Expr::Variable(v) => v.clone(),
+                            e => e.to_string(),
+                        })
+                    })
+                    .collect();
+            }
+            Clause::Return(r) => {
+                projection(&r.body, "Projection", ops);
+                ops.push("ProduceResults".into());
+            }
+            Clause::Call(c) => {
+                let name = if c.namespace.is_empty() {
+                    c.name.clone()
+                } else {
+                    format!("{}.{}", c.namespace.join("."), c.name)
+                };
+                ops.push(format!("ProcedureCall ({name})"));
+            }
+            Clause::Subquery(s) => {
+                ops.push("Subquery".into());
+                regular(&s.query, read, ops);
+            }
+        }
+    }
+}

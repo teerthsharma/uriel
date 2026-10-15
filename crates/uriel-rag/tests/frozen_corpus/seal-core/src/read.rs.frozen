@@ -1,0 +1,893 @@
+//! Read transactions: consistent snapshots with lazy iterators.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
+use std::sync::Arc;
+
+use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata};
+
+use crate::catalog::{ConstraintDef, EntitySchema, IndexDef, Schema};
+use crate::codec::{decode_node, decode_rel};
+use crate::error::{Error, Result};
+use crate::graph::Inner;
+use crate::ids::{Edge, Node, NodeId, Props, Rel, RelId};
+use crate::keys::{
+    adj_key, adj_prefix, as_slices, index_key, label_count_key, name_id_key, name_prefix,
+    parse_adj_key, parse_constraint_key, parse_index_key, parse_name_id_key, parse_prop_key,
+    prefix_bounds, prefix_end, prop_key, prop_prefix, tail_u64, type_count_key,
+};
+use crate::tables::{
+    meta, CONSTRAINTS, COUNTS, INDEXES, IN_ADJ, LABEL_IDX, META, NODES, OUT_ADJ, PROP_IDX, RELS,
+    TYPE_IDX,
+};
+use crate::tier::{CacheKey, Entry, MAX_CACHED_EDGES};
+use crate::value::Value;
+
+/// Boxed iterator over nodes. Holds its own snapshot, so it may outlive the [`ReadTx`].
+pub type NodeIter = Box<dyn Iterator<Item = Result<Node>>>;
+/// Boxed iterator over relationships.
+pub type RelIter = Box<dyn Iterator<Item = Result<Rel>>>;
+/// Boxed iterator over adjacency entries.
+pub type EdgeIter = Box<dyn Iterator<Item = Result<Edge>>>;
+/// Boxed iterator over node ids.
+pub type IdIter = Box<dyn Iterator<Item = Result<NodeId>>>;
+
+/// How many nodes / relationships per label or type [`ReadTx::schema`] inspects.
+pub const DEFAULT_SCHEMA_SAMPLE: usize = 1000;
+
+type BoundsPair = (Bound<Vec<u8>>, Bound<Vec<u8>>);
+
+pub(crate) fn meta_value<T: ReadableTable<&'static str, u64>>(t: &T, key: &str) -> Result<u64> {
+    Ok(t.get(key)?.map(|g| g.value()).unwrap_or(0))
+}
+
+pub(crate) fn load_node<T: ReadableTable<u64, &'static [u8]>>(
+    t: &T,
+    id: NodeId,
+) -> Result<Option<Node>> {
+    match t.get(id.0)? {
+        Some(g) => Ok(Some(decode_node(id, g.value())?)),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn load_rel<T: ReadableTable<u64, &'static [u8]>>(
+    t: &T,
+    id: RelId,
+) -> Result<Option<Rel>> {
+    match t.get(id.0)? {
+        Some(g) => Ok(Some(decode_rel(id, g.value())?)),
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn collect_edges<T: ReadableTable<&'static [u8], u64>>(
+    t: &T,
+    node: NodeId,
+    rel_type: Option<&str>,
+) -> Result<Vec<Edge>> {
+    let bounds = prefix_bounds(&adj_prefix(node, rel_type));
+    let mut out = Vec::new();
+    for entry in t.range::<&[u8]>(as_slices(&bounds))? {
+        let (k, v) = entry?;
+        let (_, ty, rel) = parse_adj_key(k.value())?;
+        out.push(Edge {
+            rel,
+            rel_type: ty.to_string(),
+            other: NodeId(v.value()),
+        });
+    }
+    Ok(out)
+}
+
+pub(crate) fn collect_label_ids<T: ReadableTable<&'static [u8], ()>>(
+    t: &T,
+    label: &str,
+) -> Result<Vec<NodeId>> {
+    let bounds = prefix_bounds(&name_prefix(label));
+    let mut out = Vec::new();
+    for entry in t.range::<&[u8]>(as_slices(&bounds))? {
+        let (k, _) = entry?;
+        out.push(NodeId(tail_u64(k.value())?));
+    }
+    Ok(out)
+}
+
+fn missing(what: &str, id: u64) -> Error {
+    Error::Corrupt(format!("{what} {id} is referenced but missing"))
+}
+
+/// A numeric/typed range over property values, normalized from a pair of bounds.
+struct ValueRange {
+    kind: Option<u8>,
+    lower: Bound<Value>,
+    upper: Bound<Value>,
+}
+
+fn bound_value<'a>(b: &Bound<&'a Value>) -> Option<&'a Value> {
+    match b {
+        Bound::Included(v) | Bound::Excluded(v) => Some(v),
+        Bound::Unbounded => None,
+    }
+}
+
+impl ValueRange {
+    /// `None` means the range is provably empty.
+    fn new(lower: Bound<&Value>, upper: Bound<&Value>) -> Option<ValueRange> {
+        let (lo, hi) = (bound_value(&lower), bound_value(&upper));
+        let kind = match (lo, hi) {
+            (None, None) => None,
+            (Some(a), None) | (None, Some(a)) => Some(a.rank()),
+            (Some(a), Some(b)) => {
+                if a.rank() != b.rank() {
+                    return None;
+                }
+                match a.cmp(b) {
+                    std::cmp::Ordering::Greater => return None,
+                    std::cmp::Ordering::Equal
+                        if matches!(lower, Bound::Excluded(_))
+                            || matches!(upper, Bound::Excluded(_)) =>
+                    {
+                        return None
+                    }
+                    _ => {}
+                }
+                Some(a.rank())
+            }
+        };
+        let own = |b: Bound<&Value>| match b {
+            Bound::Included(v) => Bound::Included(v.clone()),
+            Bound::Excluded(v) => Bound::Excluded(v.clone()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        Some(ValueRange {
+            kind,
+            lower: own(lower),
+            upper: own(upper),
+        })
+    }
+
+    fn contains(&self, v: &Value) -> bool {
+        if self.kind.is_some_and(|k| v.rank() != k) {
+            return false;
+        }
+        let above = match &self.lower {
+            Bound::Included(b) => v >= b,
+            Bound::Excluded(b) => v > b,
+            Bound::Unbounded => true,
+        };
+        let below = match &self.upper {
+            Bound::Included(b) => v <= b,
+            Bound::Excluded(b) => v < b,
+            Bound::Unbounded => true,
+        };
+        above && below
+    }
+
+    /// Key range inside the property index table for `prefix` = `label 00 key 00`.
+    /// `None` if the range is empty.
+    fn index_bounds(&self, prefix: &[u8]) -> Option<BoundsPair> {
+        let with = |v: &Value| {
+            let mut k = prefix.to_vec();
+            v.write_key(&mut k);
+            k
+        };
+        let lo = match &self.lower {
+            Bound::Included(v) => with(v),
+            Bound::Excluded(v) => prefix_end(&with(v))?,
+            Bound::Unbounded => {
+                let mut k = prefix.to_vec();
+                if let Some(kind) = self.kind {
+                    k.push(kind);
+                }
+                k
+            }
+        };
+        let hi = match &self.upper {
+            Bound::Included(v) => prefix_end(&with(v)),
+            Bound::Excluded(v) => Some(with(v)),
+            Bound::Unbounded => match self.kind {
+                Some(kind) => {
+                    let mut k = prefix.to_vec();
+                    k.push(kind + 1);
+                    Some(k)
+                }
+                None => prefix_end(prefix),
+            },
+        };
+        if let Some(hi) = &hi {
+            if lo >= *hi {
+                return None;
+            }
+        }
+        Some((
+            Bound::Included(lo),
+            hi.map_or(Bound::Unbounded, Bound::Excluded),
+        ))
+    }
+}
+
+/// A read-only snapshot of the graph.
+///
+/// Created by [`Graph::begin_read`](crate::Graph::begin_read). Sees exactly the commits
+/// that finished before it began; never blocks and is never blocked by writers. Iterators
+/// returned from it keep the snapshot alive and may be used after the `ReadTx` is dropped.
+pub struct ReadTx {
+    txn: redb::ReadTransaction,
+    epoch: u64,
+    inner: Arc<Inner>,
+}
+
+struct CachedEdges {
+    list: Arc<Vec<Edge>>,
+    next: usize,
+    rel_type: Option<String>,
+}
+
+impl Iterator for CachedEdges {
+    type Item = Result<Edge>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(e) = self.list.get(self.next) {
+            self.next += 1;
+            if self.rel_type.as_deref().is_none_or(|t| t == e.rel_type) {
+                return Some(Ok(e.clone()));
+            }
+        }
+        None
+    }
+}
+
+impl ReadTx {
+    pub(crate) fn begin(inner: &Arc<Inner>) -> Result<ReadTx> {
+        let txn = inner.db.begin_read()?;
+        let epoch = {
+            let m = txn.open_table(META)?;
+            meta_value(&m, meta::EPOCH)?
+        };
+        Ok(ReadTx {
+            txn,
+            epoch,
+            inner: Arc::clone(inner),
+        })
+    }
+
+    /// Graph epoch of this snapshot (number of write commits it includes).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    fn meta(&self, key: &str) -> Result<u64> {
+        let m = self.txn.open_table(META)?;
+        meta_value(&m, key)
+    }
+
+    /// Total number of nodes.
+    pub fn node_count(&self) -> Result<u64> {
+        self.meta(meta::NODE_COUNT)
+    }
+
+    /// Total number of relationships.
+    pub fn rel_count(&self) -> Result<u64> {
+        self.meta(meta::REL_COUNT)
+    }
+
+    fn count_of(&self, key: Vec<u8>) -> Result<u64> {
+        let t = self.txn.open_table(COUNTS)?;
+        Ok(t.get(key.as_slice())?.map(|g| g.value()).unwrap_or(0))
+    }
+
+    /// Number of nodes carrying `label`, in O(1).
+    pub fn count_nodes_with_label(&self, label: &str) -> Result<u64> {
+        self.count_of(label_count_key(label))
+    }
+
+    /// Number of relationships of type `rel_type`, in O(1).
+    pub fn count_rels_with_type(&self, rel_type: &str) -> Result<u64> {
+        self.count_of(type_count_key(rel_type))
+    }
+
+    fn counted_names(&self, tag: u8) -> Result<Vec<(String, u64)>> {
+        let t = self.txn.open_table(COUNTS)?;
+        let bounds = prefix_bounds(&[tag]);
+        let mut out = Vec::new();
+        for entry in t.range::<&[u8]>(as_slices(&bounds))? {
+            let (k, v) = entry?;
+            let name = std::str::from_utf8(&k.value()[1..])
+                .map_err(|_| Error::Corrupt("non-UTF-8 name in counts".into()))?;
+            out.push((name.to_string(), v.value()));
+        }
+        Ok(out)
+    }
+
+    /// All labels currently in use, sorted.
+    pub fn labels(&self) -> Result<Vec<String>> {
+        Ok(self
+            .counted_names(b'L')?
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect())
+    }
+
+    /// All relationship types currently in use, sorted.
+    pub fn rel_types(&self) -> Result<Vec<String>> {
+        Ok(self
+            .counted_names(b'R')?
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect())
+    }
+
+    /// Fetches a node, or `None` if it does not exist.
+    pub fn get_node(&self, id: NodeId) -> Result<Option<Node>> {
+        let key = CacheKey::Node(id.0);
+        if let Some(Entry::Node(n)) = self.inner.tier.lookup(self.epoch, key) {
+            return Ok(Some(n));
+        }
+        self.inner.tier.note_disk_read();
+        let node = load_node(&self.txn.open_table(NODES)?, id)?;
+        if let Some(n) = &node {
+            self.inner
+                .tier
+                .fill(self.epoch, key, Entry::Node(n.clone()));
+        }
+        Ok(node)
+    }
+
+    /// Fetches a relationship, or `None` if it does not exist.
+    pub fn get_rel(&self, id: RelId) -> Result<Option<Rel>> {
+        load_rel(&self.txn.open_table(RELS)?, id)
+    }
+
+    /// Iterates every node in id order.
+    pub fn all_nodes(&self) -> Result<NodeIter> {
+        let t = self.txn.open_table(NODES)?;
+        let range = t.range::<u64>(..)?;
+        Ok(Box::new(range.map(|e| -> Result<Node> {
+            let (k, v) = e?;
+            decode_node(NodeId(k.value()), v.value())
+        })))
+    }
+
+    /// Iterates every relationship in id order.
+    pub fn all_rels(&self) -> Result<RelIter> {
+        let t = self.txn.open_table(RELS)?;
+        let range = t.range::<u64>(..)?;
+        Ok(Box::new(range.map(|e| -> Result<Rel> {
+            let (k, v) = e?;
+            decode_rel(RelId(k.value()), v.value())
+        })))
+    }
+
+    fn ids_from_range(
+        &self,
+        table: redb::TableDefinition<&'static [u8], ()>,
+        bounds: &BoundsPair,
+    ) -> Result<IdIter> {
+        let t = self.txn.open_table(table)?;
+        let range = t.range::<&[u8]>(as_slices(bounds))?;
+        Ok(Box::new(range.map(|e| -> Result<NodeId> {
+            let (k, _) = e?;
+            Ok(NodeId(tail_u64(k.value())?))
+        })))
+    }
+
+    fn nodes_from_ids(&self, ids: IdIter) -> Result<NodeIter> {
+        let nodes = self.txn.open_table(NODES)?;
+        Ok(Box::new(ids.map(move |id| {
+            let id = id?;
+            load_node(&nodes, id)?.ok_or_else(|| missing("node", id.0))
+        })))
+    }
+
+    /// Ids of nodes carrying `label`, in id order, without loading the nodes.
+    pub fn node_ids_by_label(&self, label: &str) -> Result<IdIter> {
+        self.ids_from_range(LABEL_IDX, &prefix_bounds(&name_prefix(label)))
+    }
+
+    /// Nodes carrying `label`, in id order.
+    pub fn nodes_by_label(&self, label: &str) -> Result<NodeIter> {
+        let ids = self.node_ids_by_label(label)?;
+        self.nodes_from_ids(ids)
+    }
+
+    /// `true` if a property index exists on `(label, key)`.
+    pub fn has_index(&self, label: &str, key: &str) -> Result<bool> {
+        let t = self.txn.open_table(INDEXES)?;
+        let found = t.get(index_key(label, key).as_slice())?.is_some();
+        Ok(found)
+    }
+
+    /// Nodes with `label` whose property `key` equals `value` (numbers compare by value,
+    /// so `Int(1)` matches `Float(1.0)`), in id order. Uses the `(label, key)` index when
+    /// one exists and scans the label otherwise; the result is identical either way.
+    pub fn nodes_by_prop(&self, label: &str, key: &str, value: &Value) -> Result<NodeIter> {
+        if value.is_null() {
+            return Ok(Box::new(std::iter::empty()));
+        }
+        if self.has_index(label, key)? {
+            let mut prefix = prop_prefix(label, key);
+            value.write_key(&mut prefix);
+            let ids = self.ids_from_range(PROP_IDX, &prefix_bounds(&prefix))?;
+            return self.nodes_from_ids(ids);
+        }
+        let (key, value) = (key.to_string(), value.clone());
+        let nodes = self.nodes_by_label(label)?;
+        Ok(Box::new(nodes.filter(move |n| match n {
+            Ok(n) => n.props.get(&key) == Some(&value),
+            Err(_) => true,
+        })))
+    }
+
+    /// Nodes with `label` whose property `key` lies between `lower` and `upper`, ordered by
+    /// `(value, node id)`.
+    ///
+    /// Comparison follows [`Value`]'s total order but is **restricted to the kind of the
+    /// bounds**: `age >= 18` never matches a string, `name >= "a"` never matches a number.
+    /// Bounds of different kinds, or crossed bounds, give an empty result. With both bounds
+    /// `Unbounded`, every value of any kind is returned in total order. Uses the index when
+    /// one exists, otherwise scans and sorts; results are identical.
+    pub fn nodes_by_prop_range(
+        &self,
+        label: &str,
+        key: &str,
+        lower: Bound<&Value>,
+        upper: Bound<&Value>,
+    ) -> Result<NodeIter> {
+        let Some(range) = ValueRange::new(lower, upper) else {
+            return Ok(Box::new(std::iter::empty()));
+        };
+        if self.has_index(label, key)? {
+            let Some(bounds) = range.index_bounds(&prop_prefix(label, key)) else {
+                return Ok(Box::new(std::iter::empty()));
+            };
+            let ids = self.ids_from_range(PROP_IDX, &bounds)?;
+            return self.nodes_from_ids(ids);
+        }
+        let mut hits: Vec<(Value, Node)> = Vec::new();
+        for node in self.nodes_by_label(label)? {
+            let node = node?;
+            if let Some(v) = node.props.get(key) {
+                if range.contains(v) {
+                    hits.push((v.clone(), node));
+                }
+            }
+        }
+        hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
+        Ok(Box::new(hits.into_iter().map(|(_, n)| Ok(n))))
+    }
+
+    fn adj_range(
+        &self,
+        table: redb::TableDefinition<&'static [u8], u64>,
+        node: NodeId,
+        rel_type: Option<&str>,
+    ) -> Result<redb::Range<'static, &'static [u8], u64>> {
+        let t = self.txn.open_table(table)?;
+        let bounds = prefix_bounds(&adj_prefix(node, rel_type));
+        Ok(t.range::<&[u8]>(as_slices(&bounds))?)
+    }
+
+    fn rels_iter(
+        &self,
+        table: redb::TableDefinition<&'static [u8], u64>,
+        node: NodeId,
+        rel_type: Option<&str>,
+    ) -> Result<RelIter> {
+        let range = self.adj_range(table, node, rel_type)?;
+        let rels = self.txn.open_table(RELS)?;
+        Ok(Box::new(range.map(move |e| {
+            let (k, _) = e?;
+            let (_, _, rel) = parse_adj_key(k.value())?;
+            load_rel(&rels, rel)?.ok_or_else(|| missing("relationship", rel.0))
+        })))
+    }
+
+    fn edges_iter(
+        &self,
+        table: redb::TableDefinition<&'static [u8], u64>,
+        node: NodeId,
+        rel_type: Option<&str>,
+    ) -> Result<EdgeIter> {
+        let range = self.adj_range(table, node, rel_type)?;
+        Ok(Box::new(range.map(|e| {
+            let (k, v) = e?;
+            let (_, ty, rel) = parse_adj_key(k.value())?;
+            Ok(Edge {
+                rel,
+                rel_type: ty.to_string(),
+                other: NodeId(v.value()),
+            })
+        })))
+    }
+
+    fn cached_edges(
+        &self,
+        table: redb::TableDefinition<&'static [u8], u64>,
+        key: CacheKey,
+        node: NodeId,
+        rel_type: Option<&str>,
+    ) -> Result<EdgeIter> {
+        if let Some(Entry::Adj(list)) = self.inner.tier.lookup(self.epoch, key) {
+            return Ok(Box::new(CachedEdges {
+                list,
+                next: 0,
+                rel_type: rel_type.map(str::to_string),
+            }));
+        }
+        self.inner.tier.note_disk_read();
+        if rel_type.is_some() {
+            return self.edges_iter(table, node, rel_type);
+        }
+        let mut list = Vec::new();
+        for e in self
+            .edges_iter(table, node, None)?
+            .take(MAX_CACHED_EDGES + 1)
+        {
+            list.push(e?);
+        }
+        if list.len() > MAX_CACHED_EDGES {
+            return self.edges_iter(table, node, None);
+        }
+        let list = Arc::new(list);
+        self.inner
+            .tier
+            .fill(self.epoch, key, Entry::Adj(Arc::clone(&list)));
+        Ok(Box::new(CachedEdges {
+            list,
+            next: 0,
+            rel_type: None,
+        }))
+    }
+
+    /// Outgoing relationships of `node`, optionally only of `rel_type`, as one B-tree range
+    /// scan over the adjacency table, in `(type, rel id)` order.
+    pub fn out_rels(&self, node: NodeId, rel_type: Option<&str>) -> Result<RelIter> {
+        self.rels_iter(OUT_ADJ, node, rel_type)
+    }
+
+    /// Incoming relationships of `node`, optionally only of `rel_type`.
+    pub fn in_rels(&self, node: NodeId, rel_type: Option<&str>) -> Result<RelIter> {
+        self.rels_iter(IN_ADJ, node, rel_type)
+    }
+
+    /// Like [`ReadTx::out_rels`] but yields only `(rel, type, destination)` without
+    /// reading relationship records. Use for traversals.
+    pub fn out_edges(&self, node: NodeId, rel_type: Option<&str>) -> Result<EdgeIter> {
+        self.cached_edges(OUT_ADJ, CacheKey::Out(node.0), node, rel_type)
+    }
+
+    /// Like [`ReadTx::in_rels`] but yields only `(rel, type, source)`.
+    pub fn in_edges(&self, node: NodeId, rel_type: Option<&str>) -> Result<EdgeIter> {
+        self.cached_edges(IN_ADJ, CacheKey::In(node.0), node, rel_type)
+    }
+
+    /// All property indexes, sorted by label then key.
+    pub fn list_indexes(&self) -> Result<Vec<IndexDef>> {
+        let t = self.txn.open_table(INDEXES)?;
+        let mut out = Vec::new();
+        for e in t.iter()? {
+            let (k, v) = e?;
+            let (label, key) = parse_index_key(k.value())?;
+            out.push(IndexDef {
+                label: label.to_string(),
+                key: key.to_string(),
+                backs_constraint: v.value() == 1,
+            });
+        }
+        Ok(out)
+    }
+
+    /// All constraints, sorted by label, key, then kind (unique before exists).
+    pub fn list_constraints(&self) -> Result<Vec<ConstraintDef>> {
+        let t = self.txn.open_table(CONSTRAINTS)?;
+        let mut out = Vec::new();
+        for e in t.iter()? {
+            let (k, _) = e?;
+            let (kind, label, key) = parse_constraint_key(k.value())?;
+            out.push(ConstraintDef {
+                kind,
+                label: label.to_string(),
+                key: key.to_string(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Schema of this snapshot, sampling up to [`DEFAULT_SCHEMA_SAMPLE`] entities per label
+    /// and relationship type.
+    pub fn schema(&self) -> Result<Schema> {
+        self.schema_sampled(DEFAULT_SCHEMA_SAMPLE)
+    }
+
+    /// Schema of this snapshot, inspecting at most `sample` nodes per label and `sample`
+    /// relationships per type for property keys and value types. Counts are always exact.
+    pub fn schema_sampled(&self, sample: usize) -> Result<Schema> {
+        fn note(acc: &mut BTreeMap<String, BTreeSet<&'static str>>, props: &Props) {
+            for (k, v) in props {
+                acc.entry(k.clone()).or_default().insert(v.type_name());
+            }
+        }
+        fn finish(
+            name: String,
+            count: u64,
+            sampled: u64,
+            acc: BTreeMap<String, BTreeSet<&'static str>>,
+        ) -> EntitySchema {
+            EntitySchema {
+                name,
+                count,
+                sampled,
+                properties: acc
+                    .into_iter()
+                    .map(|(k, types)| (k, types.into_iter().map(String::from).collect()))
+                    .collect(),
+            }
+        }
+
+        let nodes = self.txn.open_table(NODES)?;
+        let rels = self.txn.open_table(RELS)?;
+        let mut labels = Vec::new();
+        for (label, count) in self.counted_names(b'L')? {
+            let mut acc = BTreeMap::new();
+            let mut sampled = 0;
+            for id in self.node_ids_by_label(&label)?.take(sample) {
+                let id = id?;
+                let node = load_node(&nodes, id)?.ok_or_else(|| missing("node", id.0))?;
+                note(&mut acc, &node.props);
+                sampled += 1;
+            }
+            labels.push(finish(label, count, sampled, acc));
+        }
+        let type_idx = self.txn.open_table(TYPE_IDX)?;
+        let mut rel_types = Vec::new();
+        for (ty, count) in self.counted_names(b'R')? {
+            let mut acc = BTreeMap::new();
+            let mut sampled = 0;
+            let bounds = prefix_bounds(&name_prefix(&ty));
+            for e in type_idx.range::<&[u8]>(as_slices(&bounds))?.take(sample) {
+                let (k, _) = e?;
+                let id = RelId(tail_u64(k.value())?);
+                let rel = load_rel(&rels, id)?.ok_or_else(|| missing("relationship", id.0))?;
+                note(&mut acc, &rel.props);
+                sampled += 1;
+            }
+            rel_types.push(finish(ty, count, sampled, acc));
+        }
+        Ok(Schema {
+            epoch: self.epoch,
+            node_count: self.node_count()?,
+            rel_count: self.rel_count()?,
+            labels,
+            rel_types,
+            indexes: self.list_indexes()?,
+            constraints: self.list_constraints()?,
+        })
+    }
+
+    /// Cross-checks every table against every other and returns one message per
+    /// inconsistency found (empty when the database is consistent).
+    ///
+    /// Verifies that: every node's labels and indexed properties have index entries and
+    /// vice versa; every relationship has matching out/in adjacency and type-index entries
+    /// and vice versa; adjacency endpoints, types and counters agree with the records.
+    /// Reads the whole database; intended for tests, diagnostics and `CHECK`-style tooling.
+    pub fn check_integrity(&self) -> Result<Vec<String>> {
+        self.inner.tier.clear();
+        let mut problems = Vec::new();
+        let nodes = self.txn.open_table(NODES)?;
+        let rels = self.txn.open_table(RELS)?;
+        let out_adj = self.txn.open_table(OUT_ADJ)?;
+        let in_adj = self.txn.open_table(IN_ADJ)?;
+        let label_idx = self.txn.open_table(LABEL_IDX)?;
+        let type_idx = self.txn.open_table(TYPE_IDX)?;
+        let prop_idx = self.txn.open_table(PROP_IDX)?;
+
+        let mut defs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for d in self.list_indexes()? {
+            defs.entry(d.label).or_default().insert(d.key);
+        }
+
+        // nodes -> label index, property index
+        let mut label_counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut node_total = 0u64;
+        for e in nodes.iter()? {
+            let (k, v) = e?;
+            let id = NodeId(k.value());
+            node_total += 1;
+            let node = match decode_node(id, v.value()) {
+                Ok(n) => n,
+                Err(err) => {
+                    problems.push(format!("node {id}: undecodable record: {err}"));
+                    continue;
+                }
+            };
+            for label in &node.labels {
+                *label_counts.entry(label.clone()).or_default() += 1;
+                if label_idx
+                    .get(name_id_key(label, id.0).as_slice())?
+                    .is_none()
+                {
+                    problems.push(format!(
+                        "node {id}: label index entry for `{label}` is missing"
+                    ));
+                }
+                for key in defs.get(label).into_iter().flatten() {
+                    if let Some(value) = node.props.get(key) {
+                        if prop_idx
+                            .get(prop_key(label, key, value, id).as_slice())?
+                            .is_none()
+                        {
+                            problems.push(format!(
+                                "node {id}: property index entry for (:{label}, {key}) is missing"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // label index -> nodes
+        let mut seen_label_counts: BTreeMap<String, u64> = BTreeMap::new();
+        for e in label_idx.iter()? {
+            let (k, _) = e?;
+            let (label, id) = parse_name_id_key(k.value())?;
+            *seen_label_counts.entry(label.to_string()).or_default() += 1;
+            match load_node(&nodes, NodeId(id))? {
+                None => problems.push(format!(
+                    "label index entry (`{label}`, node {id}) references a missing node"
+                )),
+                Some(n) if !n.labels.contains(label) => problems.push(format!(
+                    "label index entry (`{label}`, node {id}) but the node lacks that label"
+                )),
+                Some(_) => {}
+            }
+        }
+        if seen_label_counts != label_counts {
+            problems.push(format!(
+                "label index holds {seen_label_counts:?} but nodes imply {label_counts:?}"
+            ));
+        }
+        let stored: BTreeMap<String, u64> = self.counted_names(b'L')?.into_iter().collect();
+        if stored != label_counts {
+            problems.push(format!(
+                "label counters {stored:?} disagree with data {label_counts:?}"
+            ));
+        }
+
+        // property index -> nodes
+        for e in prop_idx.iter()? {
+            let (k, _) = e?;
+            let (label, key, vk, id) = parse_prop_key(k.value())?;
+            if !defs.get(label).is_some_and(|keys| keys.contains(key)) {
+                problems.push(format!(
+                    "property index entry for undeclared index (:{label}, {key})"
+                ));
+                continue;
+            }
+            match load_node(&nodes, id)? {
+                None => problems.push(format!(
+                    "property index entry (:{label}, {key}) references missing node {id}"
+                )),
+                Some(n) => {
+                    let ok = n.labels.contains(label)
+                        && n.props.get(key).is_some_and(|v| v.to_key_bytes() == vk);
+                    if !ok {
+                        problems.push(format!(
+                            "property index entry (:{label}, {key}) is stale for node {id}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        // relationships -> adjacency, type index
+        let mut type_counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut rel_total = 0u64;
+        for e in rels.iter()? {
+            let (k, v) = e?;
+            let id = RelId(k.value());
+            rel_total += 1;
+            let rel = match decode_rel(id, v.value()) {
+                Ok(r) => r,
+                Err(err) => {
+                    problems.push(format!("relationship {id}: undecodable record: {err}"));
+                    continue;
+                }
+            };
+            *type_counts.entry(rel.rel_type.clone()).or_default() += 1;
+            for end in [rel.src, rel.dst] {
+                if load_node(&nodes, end)?.is_none() {
+                    problems.push(format!("relationship {id}: endpoint node {end} is missing"));
+                }
+            }
+            let out_ok = out_adj
+                .get(adj_key(rel.src, &rel.rel_type, id).as_slice())?
+                .is_some_and(|g| g.value() == rel.dst.0);
+            if !out_ok {
+                problems.push(format!(
+                    "relationship {id}: outgoing adjacency entry missing or wrong"
+                ));
+            }
+            let in_ok = in_adj
+                .get(adj_key(rel.dst, &rel.rel_type, id).as_slice())?
+                .is_some_and(|g| g.value() == rel.src.0);
+            if !in_ok {
+                problems.push(format!(
+                    "relationship {id}: incoming adjacency entry missing or wrong"
+                ));
+            }
+            if type_idx
+                .get(name_id_key(&rel.rel_type, id.0).as_slice())?
+                .is_none()
+            {
+                problems.push(format!("relationship {id}: type index entry is missing"));
+            }
+        }
+        for (table, outgoing, name) in [(&out_adj, true, "outgoing"), (&in_adj, false, "incoming")]
+        {
+            for e in table.iter()? {
+                let (k, v) = e?;
+                let (node, ty, rel_id) = parse_adj_key(k.value())?;
+                match load_rel(&rels, rel_id)? {
+                    None => problems.push(format!(
+                        "{name} adjacency entry of node {node} references missing relationship {rel_id}"
+                    )),
+                    Some(r) => {
+                        let (own, other) = if outgoing { (r.src, r.dst) } else { (r.dst, r.src) };
+                        if own != node || r.rel_type != ty || other.0 != v.value() {
+                            problems.push(format!(
+                                "{name} adjacency entry of node {node} disagrees with relationship {rel_id}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        let mut seen_type_counts: BTreeMap<String, u64> = BTreeMap::new();
+        for e in type_idx.iter()? {
+            let (k, _) = e?;
+            let (ty, id) = parse_name_id_key(k.value())?;
+            *seen_type_counts.entry(ty.to_string()).or_default() += 1;
+            match load_rel(&rels, RelId(id))? {
+                None => problems.push(format!(
+                    "type index entry (`{ty}`, relationship {id}) references a missing relationship"
+                )),
+                Some(r) if r.rel_type != ty => problems.push(format!(
+                    "type index entry (`{ty}`, relationship {id}) has the wrong type"
+                )),
+                Some(_) => {}
+            }
+        }
+        if seen_type_counts != type_counts {
+            problems.push(format!(
+                "type index holds {seen_type_counts:?} but relationships imply {type_counts:?}"
+            ));
+        }
+        let stored: BTreeMap<String, u64> = self.counted_names(b'R')?.into_iter().collect();
+        if stored != type_counts {
+            problems.push(format!(
+                "type counters {stored:?} disagree with data {type_counts:?}"
+            ));
+        }
+
+        // global counters
+        if self.node_count()? != node_total {
+            problems.push(format!(
+                "node counter {} but {node_total} nodes stored",
+                self.node_count()?
+            ));
+        }
+        if self.rel_count()? != rel_total {
+            problems.push(format!(
+                "relationship counter {} but {rel_total} stored",
+                self.rel_count()?
+            ));
+        }
+        // a table length cross-check that does not depend on decoding
+        if nodes.len()? != node_total || rels.len()? != rel_total {
+            problems.push("table length disagrees with iteration".to_string());
+        }
+        Ok(problems)
+    }
+}

@@ -1,0 +1,180 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::cap::{Cap, Read, Width, Word, Write};
+use crate::error::SysError;
+use crate::raw;
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) const MAX_ALIGN: usize = 1 << 30;
+
+fn fresh_id() -> u64 {
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    LargePages,
+    NormalPages,
+    StdAlloc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackReason {
+    PrivilegeMissing,
+    LargePagesUnsupported,
+    AllocationFailed(u32),
+    AlignmentTooLarge,
+    NotWindows,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Request {
+    pub bytes: usize,
+    pub align: usize,
+    pub prefer_huge: bool,
+}
+
+pub struct Region {
+    block: raw::Block,
+    id: u64,
+    backend: Backend,
+    fallback: Option<FallbackReason>,
+}
+
+fn validate_span(region_len: usize, offset: usize, len: usize, width: Width) -> Result<(), SysError> {
+    if len == 0 {
+        return Err(SysError::ZeroSize);
+    }
+    let end = offset.checked_add(len).ok_or(SysError::OutOfRange)?;
+    if end > region_len {
+        return Err(SysError::OutOfRange);
+    }
+    let w = width.bytes();
+    if !offset.is_multiple_of(w) || !len.is_multiple_of(w) {
+        return Err(SysError::Misaligned);
+    }
+    Ok(())
+}
+
+impl Region {
+    pub fn allocate(request: Request) -> Result<Region, SysError> {
+        if request.bytes == 0 {
+            return Err(SysError::ZeroSize);
+        }
+        if request.bytes > isize::MAX as usize {
+            return Err(SysError::TooLarge);
+        }
+        if !request.align.is_power_of_two() || request.align > MAX_ALIGN {
+            return Err(SysError::InvalidAlign);
+        }
+        let allocation = raw::Block::allocate(request.bytes, request.align, request.prefer_huge)?;
+        Ok(Region {
+            block: allocation.block,
+            id: fresh_id(),
+            backend: allocation.backend,
+            fallback: allocation.fallback,
+        })
+    }
+
+    pub fn len(&self) -> usize {
+        self.block.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.block.len() == 0
+    }
+
+    pub fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    pub fn fallback_reason(&self) -> Option<FallbackReason> {
+        self.fallback
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn revoke_all_caps(&mut self) {
+        self.id = fresh_id();
+    }
+
+    pub fn cap_read(&self, offset: usize, len: usize, width: Width) -> Result<Cap<Read>, SysError> {
+        validate_span(self.block.len(), offset, len, width)?;
+        Ok(Cap::mint(self.id, offset, len, width))
+    }
+
+    pub fn cap_write(&self, offset: usize, len: usize, width: Width) -> Result<Cap<Write>, SysError> {
+        validate_span(self.block.len(), offset, len, width)?;
+        Ok(Cap::mint(self.id, offset, len, width))
+    }
+
+    pub fn alignment_of<K>(&self, cap: &Cap<K>) -> Result<usize, SysError> {
+        self.check_cap(cap)?;
+        Ok(self.block.alignment_at(cap.offset()))
+    }
+
+    pub(crate) fn check_cap<K>(&self, cap: &Cap<K>) -> Result<(), SysError> {
+        if cap.region_id() != self.id {
+            return Err(SysError::WrongRegion);
+        }
+        validate_span(self.block.len(), cap.offset(), cap.len(), cap.width())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn block_mut(&mut self) -> &mut raw::Block {
+        &mut self.block
+    }
+
+    fn locate<T: Word, K>(&self, cap: &Cap<K>, at: usize) -> Result<usize, SysError> {
+        self.check_cap(cap)?;
+        if T::WIDTH != cap.width() {
+            return Err(SysError::WrongWidth);
+        }
+        let size = T::WIDTH.bytes();
+        let end = at.checked_add(size).ok_or(SysError::OutOfRange)?;
+        if end > cap.len() {
+            return Err(SysError::OutOfRange);
+        }
+        if !at.is_multiple_of(size) {
+            return Err(SysError::Misaligned);
+        }
+        Ok(cap.offset() + at)
+    }
+
+    pub fn read<T: Word>(&self, cap: &Cap<Read>, at: usize) -> Result<T, SysError> {
+        let offset = self.locate::<T, Read>(cap, at)?;
+        self.block.read_checked::<T>(offset)
+    }
+
+    pub fn write<T: Word>(&mut self, cap: &Cap<Write>, at: usize, value: T) -> Result<(), SysError> {
+        let offset = self.locate::<T, Write>(cap, at)?;
+        self.block.write_checked::<T>(offset, value)
+    }
+
+    fn locate_view<T: Word, K>(&self, cap: &Cap<K>) -> Result<(usize, usize), SysError> {
+        self.check_cap(cap)?;
+        if T::WIDTH != cap.width() {
+            return Err(SysError::WrongWidth);
+        }
+        Ok((cap.offset(), cap.len() / T::WIDTH.bytes()))
+    }
+
+    pub fn view<T: Word>(&self, cap: &Cap<Read>) -> Result<&[T], SysError> {
+        let (offset, count) = self.locate_view::<T, Read>(cap)?;
+        self.block.slice_checked::<T>(offset, count)
+    }
+
+    pub fn view_mut<T: Word>(&mut self, cap: &Cap<Write>) -> Result<&mut [T], SysError> {
+        let (offset, count) = self.locate_view::<T, Write>(cap)?;
+        self.block.slice_mut_checked::<T>(offset, count)
+    }
+
+    pub fn prefetch(&self, cap: &Cap<Read>) -> Result<(), SysError> {
+        self.check_cap(cap)?;
+        self.block.prefetch_checked(cap.offset(), cap.len());
+        Ok(())
+    }
+}

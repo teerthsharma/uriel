@@ -1,0 +1,373 @@
+//! The [`Graph`] handle: opening, transactions, epoch and commit notifications.
+
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
+
+use redb::backends::InMemoryBackend;
+use redb::{Builder, Database, ReadableDatabase, ReadableTable};
+
+use crate::catalog::{ConstraintDef, ConstraintKind, IndexDef, Schema};
+use crate::error::{Error, Result};
+use crate::read::ReadTx;
+use crate::tables::{
+    meta, CONSTRAINTS, COUNTS, INDEXES, IN_ADJ, LABEL_IDX, META, NODES, OUT_ADJ, PROP_IDX, RELS,
+    TYPE_IDX,
+};
+use crate::tier::{TierState, TierStats};
+use crate::write::WriteTx;
+
+pub(crate) const FORMAT_VERSION: u64 = 2;
+pub(crate) const LEGACY_FORMAT_VERSION: u64 = 1;
+
+/// Tuning knobs for [`Graph::open_with`].
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// Size of `redb`'s page cache in bytes. `redb` itself defaults to 1 GiB; seal defaults
+    /// to 64 MiB to keep resident memory small.
+    pub cache_bytes: usize,
+    pub hot_entries: usize,
+    pub hot_bytes: usize,
+    pub warm_bytes: usize,
+    pub cold_threshold_bytes: usize,
+    pub compress_cold: bool,
+    pub admission_gate: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            cache_bytes: 64 * 1024 * 1024,
+            hot_entries: 4096,
+            hot_bytes: 8 * 1024 * 1024,
+            warm_bytes: 8 * 1024 * 1024,
+            cold_threshold_bytes: 256,
+            compress_cold: true,
+            admission_gate: true,
+        }
+    }
+}
+
+/// What a committed write transaction changed, delivered to commit subscribers.
+///
+/// A consumer that caches query results can drop every entry whose query mentions one of
+/// `labels` or `rel_types`. Two things are deliberately *not* reported and must be handled
+/// by the consumer: a query with an untyped relationship pattern depends on all
+/// relationship types, and a query over unlabeled nodes depends on all nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitInfo {
+    /// Epoch assigned to this commit (the graph's [`Graph::epoch`] right after it).
+    pub epoch: u64,
+    /// Labels of every node whose existence, labels or properties changed, plus labels
+    /// whose indexes or constraints changed.
+    pub labels: BTreeSet<String>,
+    /// Types of every relationship created, deleted or changed (including those removed by
+    /// `detach_delete_node`).
+    pub rel_types: BTreeSet<String>,
+}
+
+/// Labels and relationship types modified so far by a [`WriteTx`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Touched {
+    /// Modified labels.
+    pub labels: BTreeSet<String>,
+    /// Modified relationship types.
+    pub rel_types: BTreeSet<String>,
+}
+
+/// Handle returned by [`Graph::on_commit`], used to [`Graph::unsubscribe`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SubscriptionId(pub u64);
+
+type Callback = Arc<dyn Fn(&CommitInfo) + Send + Sync>;
+
+pub(crate) struct Inner {
+    pub(crate) db: Database,
+    pub(crate) tier: TierState,
+    epoch: AtomicU64,
+    writer_busy: Mutex<bool>,
+    writer_cv: Condvar,
+    subs: RwLock<Vec<(SubscriptionId, Callback)>>,
+    next_sub: AtomicU64,
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Proof that the caller is the one active writer. Dropping it admits the next writer.
+pub(crate) struct WriterGate(Arc<Inner>);
+
+impl Drop for WriterGate {
+    fn drop(&mut self) {
+        *lock(&self.0.writer_busy) = false;
+        self.0.writer_cv.notify_one();
+    }
+}
+
+impl Inner {
+    fn acquire_writer(self: &Arc<Self>) -> WriterGate {
+        let mut busy = lock(&self.writer_busy);
+        while *busy {
+            busy = self
+                .writer_cv
+                .wait(busy)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *busy = true;
+        drop(busy);
+        WriterGate(self.clone())
+    }
+
+    /// Publishes a commit: advances the epoch and notifies subscribers. Called while the
+    /// writer gate is still held, so notifications are totally ordered by epoch.
+    pub(crate) fn publish(&self, info: &CommitInfo) {
+        self.epoch.store(info.epoch, Ordering::SeqCst);
+        let callbacks: Vec<Callback> = self
+            .subs
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(_, cb)| cb.clone())
+            .collect();
+        for cb in callbacks {
+            cb(info);
+        }
+    }
+}
+
+/// An open property graph. Cheap to clone; clones share the same database.
+///
+/// `Graph` is `Send + Sync`. Any number of [`ReadTx`] can run concurrently with at most
+/// one [`WriteTx`]; a second `begin_write` blocks until the first transaction commits or is
+/// dropped.
+#[derive(Clone)]
+pub struct Graph {
+    pub(crate) inner: Arc<Inner>,
+}
+
+impl std::fmt::Debug for Graph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Graph")
+            .field("epoch", &self.epoch())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Graph {
+    /// Opens (creating if absent) the single-file database at `path` with default
+    /// [`Options`].
+    pub fn open(path: impl AsRef<Path>) -> Result<Graph> {
+        Graph::open_with(path, &Options::default())
+    }
+
+    /// Opens (creating if absent) the database at `path`.
+    ///
+    /// Fails with [`Error::Storage`] if the file is already open in this or another
+    /// process, and with [`Error::UnsupportedFormat`] if it was written by an incompatible
+    /// version.
+    pub fn open_with(path: impl AsRef<Path>, options: &Options) -> Result<Graph> {
+        let db = Builder::new()
+            .set_cache_size(options.cache_bytes)
+            .create(path)?;
+        Graph::init(db, options)
+    }
+
+    /// Opens a fresh graph that lives only in memory. Everything is lost on drop.
+    pub fn open_in_memory() -> Result<Graph> {
+        let db = Builder::new()
+            .set_cache_size(8 * 1024 * 1024)
+            .create_with_backend(InMemoryBackend::new())?;
+        Graph::init(db, &Options::default())
+    }
+
+    fn init(db: Database, options: &Options) -> Result<Graph> {
+        // create every table up front so read transactions never see a missing table,
+        // and stamp / verify the format version
+        let txn = db.begin_write()?;
+        {
+            txn.open_table(NODES)?;
+            txn.open_table(RELS)?;
+            txn.open_table(OUT_ADJ)?;
+            txn.open_table(IN_ADJ)?;
+            txn.open_table(LABEL_IDX)?;
+            txn.open_table(TYPE_IDX)?;
+            txn.open_table(PROP_IDX)?;
+            txn.open_table(COUNTS)?;
+            txn.open_table(INDEXES)?;
+            txn.open_table(CONSTRAINTS)?;
+            let mut m = txn.open_table(META)?;
+            let found = m.get(meta::FORMAT)?.map(|g| g.value());
+            match found {
+                None => {
+                    m.insert(meta::FORMAT, FORMAT_VERSION)?;
+                }
+                Some(v) if v == FORMAT_VERSION => {}
+                Some(v) if v == LEGACY_FORMAT_VERSION => {
+                    m.insert(meta::FORMAT, FORMAT_VERSION)?;
+                }
+                Some(found) => {
+                    return Err(Error::UnsupportedFormat {
+                        found,
+                        expected: FORMAT_VERSION,
+                    })
+                }
+            }
+        }
+        txn.commit()?;
+
+        let epoch = {
+            let r = db.begin_read()?;
+            let m = r.open_table(META)?;
+            let e = m.get(meta::EPOCH)?.map(|g| g.value()).unwrap_or(0);
+            e
+        };
+        Ok(Graph {
+            inner: Arc::new(Inner {
+                db,
+                tier: TierState::new(options, epoch),
+                epoch: AtomicU64::new(epoch),
+                writer_busy: Mutex::new(false),
+                writer_cv: Condvar::new(),
+                subs: RwLock::new(Vec::new()),
+                next_sub: AtomicU64::new(1),
+            }),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_in_memory_with(options: &Options) -> Result<Graph> {
+        let db = Builder::new()
+            .set_cache_size(8 * 1024 * 1024)
+            .create_with_backend(InMemoryBackend::new())?;
+        Graph::init(db, options)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn db(&self) -> &Database {
+        &self.inner.db
+    }
+
+    pub fn tier_stats(&self) -> Result<TierStats> {
+        let txn = self.inner.db.begin_read()?;
+        let (mut stored, mut logical) = (0u64, 0u64);
+        for def in [NODES, RELS] {
+            for e in txn.open_table(def)?.iter()? {
+                let (_, v) = e?;
+                let bytes = v.value();
+                stored += bytes.len() as u64;
+                logical += seal_tier::logical_len(bytes)
+                    .map_err(|e| Error::Corrupt(e.to_string()))? as u64;
+            }
+        }
+        Ok(self.inner.tier.counters(stored, logical))
+    }
+
+    /// Starts a read transaction: a consistent snapshot that is unaffected by later
+    /// commits. Never blocks on writers.
+    pub fn begin_read(&self) -> Result<ReadTx> {
+        ReadTx::begin(&self.inner)
+    }
+
+    /// Starts the write transaction, waiting until any other write transaction has
+    /// committed or been dropped.
+    ///
+    /// Dropping the returned [`WriteTx`] without [`WriteTx::commit`] rolls everything back.
+    pub fn begin_write(&self) -> Result<WriteTx> {
+        let gate = self.inner.acquire_writer();
+        WriteTx::begin(self.inner.clone(), gate)
+    }
+
+    /// Number of write commits so far; persisted. A commit that changed nothing does not
+    /// advance it. Strictly increases by one per effective commit.
+    pub fn epoch(&self) -> u64 {
+        self.inner.epoch.load(Ordering::SeqCst)
+    }
+
+    /// Registers `callback` to run after every effective write commit, with the new epoch
+    /// and the labels / relationship types it touched.
+    /// The callback runs on the committing thread after the commit is durable and visible
+    /// to new readers, while later writers are still held back, so callbacks observe
+    /// commits in strictly increasing epoch order. It must be quick and must not start a
+    /// write transaction (that would deadlock). Reading, subscribing and unsubscribing
+    /// from inside a callback are fine.
+    pub fn on_commit(&self, callback: Box<dyn Fn(&CommitInfo) + Send + Sync>) -> SubscriptionId {
+        let id = SubscriptionId(self.inner.next_sub.fetch_add(1, Ordering::SeqCst));
+        self.inner
+            .subs
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((id, Arc::from(callback)));
+        id
+    }
+
+    /// Alias of [`Graph::on_commit`].
+    pub fn subscribe_commits(
+        &self,
+        callback: Box<dyn Fn(&CommitInfo) + Send + Sync>,
+    ) -> SubscriptionId {
+        self.on_commit(callback)
+    }
+
+    /// Removes a subscription. Returns `false` if it was already removed.
+    pub fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        let mut subs = self
+            .inner
+            .subs
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let before = subs.len();
+        subs.retain(|(s, _)| *s != id);
+        subs.len() != before
+    }
+
+    fn in_write<T>(&self, f: impl FnOnce(&mut WriteTx) -> Result<T>) -> Result<T> {
+        let mut tx = self.begin_write()?;
+        let out = f(&mut tx)?;
+        tx.commit()?;
+        Ok(out)
+    }
+
+    /// Creates a property index in its own transaction. See [`WriteTx::create_index`].
+    pub fn create_index(&self, label: &str, key: &str) -> Result<()> {
+        self.in_write(|tx| tx.create_index(label, key))
+    }
+
+    /// Drops a property index in its own transaction. See [`WriteTx::drop_index`].
+    pub fn drop_index(&self, label: &str, key: &str) -> Result<()> {
+        self.in_write(|tx| tx.drop_index(label, key))
+    }
+
+    /// Lists all indexes, sorted by label then key.
+    pub fn list_indexes(&self) -> Result<Vec<IndexDef>> {
+        self.begin_read()?.list_indexes()
+    }
+
+    /// Creates a uniqueness constraint in its own transaction. See
+    /// [`WriteTx::create_unique_constraint`].
+    pub fn create_unique_constraint(&self, label: &str, key: &str) -> Result<()> {
+        self.in_write(|tx| tx.create_unique_constraint(label, key))
+    }
+
+    /// Creates an existence constraint in its own transaction. See
+    /// [`WriteTx::create_exists_constraint`].
+    pub fn create_exists_constraint(&self, label: &str, key: &str) -> Result<()> {
+        self.in_write(|tx| tx.create_exists_constraint(label, key))
+    }
+
+    /// Drops a constraint in its own transaction. See [`WriteTx::drop_constraint`].
+    pub fn drop_constraint(&self, kind: ConstraintKind, label: &str, key: &str) -> Result<()> {
+        self.in_write(|tx| tx.drop_constraint(kind, label, key))
+    }
+
+    /// Lists all constraints, sorted by label, key, then kind (unique before exists).
+    pub fn list_constraints(&self) -> Result<Vec<ConstraintDef>> {
+        self.begin_read()?.list_constraints()
+    }
+
+    /// Schema of the current snapshot. See [`ReadTx::schema`].
+    pub fn schema(&self) -> Result<Schema> {
+        self.begin_read()?.schema()
+    }
+}

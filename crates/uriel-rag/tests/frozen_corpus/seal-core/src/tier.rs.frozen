@@ -1,0 +1,396 @@
+
+use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use seal_tier::{
+    stable_hash, Budget, Codec, Evicted, HotCache, Insert, KeyClass, Lz4, Shed, Tier,
+    TierController,
+};
+
+use crate::codec::{decode_node, encode_node};
+use crate::error::{Error, Result};
+use crate::graph::Options;
+use crate::ids::{Edge, Node, NodeId, Props, RelId};
+use crate::value::Value;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) enum CacheKey {
+    Node(u64),
+    Out(u64),
+    In(u64),
+}
+
+impl CacheKey {
+    fn class(self) -> KeyClass {
+        match self {
+            CacheKey::Node(_) => KeyClass::Node,
+            CacheKey::Out(_) | CacheKey::In(_) => KeyClass::Adjacency,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum Entry {
+    Node(Node),
+    Adj(Arc<Vec<Edge>>),
+}
+
+pub(crate) const MAX_CACHED_EDGES: usize = 4096;
+const OVERHEAD: usize = 64;
+const WARM_THRESHOLD: u8 = 2;
+
+fn value_bytes(v: &Value) -> usize {
+    match v {
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::Float(_) => 16,
+        Value::String(s) => 24 + s.len(),
+        Value::Bytes(b) => 24 + b.len(),
+        Value::Vector(x) => 24 + 4 * x.len(),
+        Value::List(l) => 24 + l.iter().map(value_bytes).sum::<usize>(),
+        Value::Map(m) => {
+            24 + m
+                .iter()
+                .map(|(k, v)| 32 + k.len() + value_bytes(v))
+                .sum::<usize>()
+        }
+    }
+}
+
+fn props_bytes(p: &Props) -> usize {
+    p.iter().map(|(k, v)| 32 + k.len() + value_bytes(v)).sum()
+}
+
+fn weight(e: &Entry) -> usize {
+    OVERHEAD
+        + match e {
+            Entry::Node(n) => {
+                n.labels.iter().map(|l| 32 + l.len()).sum::<usize>() + props_bytes(&n.props)
+            }
+            Entry::Adj(a) => a.iter().map(|e| 48 + e.rel_type.len()).sum(),
+        }
+}
+
+fn put_u32(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(&u32::try_from(n).unwrap_or(u32::MAX).to_le_bytes());
+}
+
+fn entry_bytes(e: &Entry) -> Vec<u8> {
+    match e {
+        Entry::Node(n) => encode_node(&n.labels, &n.props),
+        Entry::Adj(list) => {
+            let mut out = Vec::with_capacity(4 + list.len() * 24);
+            put_u32(&mut out, list.len());
+            for e in list.iter() {
+                out.extend_from_slice(&e.rel.0.to_le_bytes());
+                out.extend_from_slice(&e.other.0.to_le_bytes());
+                put_u32(&mut out, e.rel_type.len());
+                out.extend_from_slice(e.rel_type.as_bytes());
+            }
+            out
+        }
+    }
+}
+
+fn corrupt(msg: &str) -> Error {
+    Error::Corrupt(format!("warm tier: {msg}"))
+}
+
+fn take<'a>(buf: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
+    if n > buf.len() {
+        return Err(corrupt("truncated adjacency blob"));
+    }
+    let (head, tail) = buf.split_at(n);
+    *buf = tail;
+    Ok(head)
+}
+
+fn take_u32(buf: &mut &[u8]) -> Result<usize> {
+    let b = take(buf, 4)?;
+    Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+}
+
+fn take_u64(buf: &mut &[u8]) -> Result<u64> {
+    let b = take(buf, 8)?;
+    Ok(u64::from_le_bytes([
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+    ]))
+}
+
+fn decode_adj(mut buf: &[u8]) -> Result<Vec<Edge>> {
+    let n = take_u32(&mut buf)?;
+    if n.saturating_mul(20) > buf.len() {
+        return Err(corrupt("adjacency count exceeds blob"));
+    }
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let rel = RelId(take_u64(&mut buf)?);
+        let other = NodeId(take_u64(&mut buf)?);
+        let len = take_u32(&mut buf)?;
+        let ty = std::str::from_utf8(take(&mut buf, len)?)
+            .map_err(|_| corrupt("adjacency type is not UTF-8"))?;
+        out.push(Edge {
+            rel,
+            rel_type: ty.to_string(),
+            other,
+        });
+    }
+    Ok(out)
+}
+
+fn compress_entry(e: &Entry) -> Vec<u8> {
+    Lz4.compress(&entry_bytes(e))
+}
+
+fn decompress_entry(key: CacheKey, blob: &[u8]) -> Result<Entry> {
+    let bytes = Lz4
+        .decompress(blob)
+        .map_err(|e| Error::Corrupt(format!("warm tier: {e}")))?;
+    Ok(match key {
+        CacheKey::Node(id) => Entry::Node(decode_node(NodeId(id), &bytes)?),
+        CacheKey::Out(_) | CacheKey::In(_) => Entry::Adj(Arc::new(decode_adj(&bytes)?)),
+    })
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TierCounters {
+    pub hits: u64,
+    pub misses: u64,
+    pub promotions: u64,
+    pub evictions: u64,
+    pub entries: usize,
+    pub bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TierStats {
+    pub hot: TierCounters,
+    pub warm: TierCounters,
+    pub disk_reads: u64,
+    pub bypassed: u64,
+    pub gate_rejected: u64,
+    pub invalidated: u64,
+    pub budget_bytes: usize,
+    pub stored_bytes: u64,
+    pub logical_bytes: u64,
+}
+
+impl TierStats {
+    pub fn compression_ratio(&self) -> f64 {
+        if self.stored_bytes == 0 {
+            1.0
+        } else {
+            self.logical_bytes as f64 / self.stored_bytes as f64
+        }
+    }
+}
+
+struct Inner {
+    hot: HotCache<CacheKey, Entry>,
+    warm: HotCache<CacheKey, Vec<u8>>,
+    controller: TierController,
+    budget: Budget,
+    current: u64,
+    inflight: bool,
+    warm_promotions: u64,
+    bypassed: u64,
+    invalidated: u64,
+}
+
+impl Inner {
+    fn usable(&self, epoch: u64) -> bool {
+        !self.inflight && epoch == self.current
+    }
+
+    fn insert_warm(&mut self, key: CacheKey, blob: Vec<u8>) {
+        let w = blob.len() + OVERHEAD;
+        if matches!(self.warm.insert(key, blob, w), Insert::Admitted { .. }) {
+            self.warm_promotions += 1;
+        }
+    }
+
+    fn demote(&mut self, evicted: Vec<Evicted<CacheKey, Entry>>) {
+        for e in evicted {
+            let blob = compress_entry(&e.value);
+            self.insert_warm(e.key, blob);
+        }
+    }
+
+    fn enforce_budget(&mut self) {
+        loop {
+            let shed = self.budget.shed(self.hot.bytes(), self.warm.bytes());
+            let dropped = match shed {
+                Shed::Nothing => break,
+                Shed::Warm => self.warm.pop_lru().is_some(),
+                Shed::Hot => self.hot.pop_lru().is_some(),
+            };
+            if !dropped {
+                break;
+            }
+        }
+    }
+
+    fn remove_key(&mut self, key: &CacheKey) -> u64 {
+        let in_hot = self.hot.remove(key).is_some();
+        let in_warm = self.warm.remove(key).is_some();
+        u64::from(in_hot) + u64::from(in_warm)
+    }
+}
+
+pub(crate) struct TierState {
+    compress_cold: bool,
+    cold_threshold: usize,
+    disk_reads: AtomicU64,
+    inner: Mutex<Inner>,
+}
+
+impl TierState {
+    pub(crate) fn new(o: &Options, epoch: u64) -> TierState {
+        let budget = Budget::new(o.hot_bytes.saturating_add(o.warm_bytes));
+        TierState {
+            compress_cold: o.compress_cold,
+            cold_threshold: o.cold_threshold_bytes,
+            disk_reads: AtomicU64::new(0),
+            inner: Mutex::new(Inner {
+                hot: if o.admission_gate {
+                    HotCache::new(o.hot_entries, o.hot_bytes)
+                } else {
+                    HotCache::with_gate(o.hot_entries, o.hot_bytes, seal_tier::Gate::disabled())
+                },
+                warm: HotCache::with_gate(usize::MAX, o.warm_bytes, seal_tier::Gate::disabled()),
+                controller: TierController::new(
+                    o.hot_entries.max(16),
+                    WARM_THRESHOLD,
+                    (o.hot_entries.max(16) as u64) * 10,
+                ),
+                budget,
+                current: epoch,
+                inflight: false,
+                warm_promotions: 0,
+                bypassed: 0,
+                invalidated: 0,
+            }),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn store(&self, record: &[u8]) -> Vec<u8> {
+        let tier = if self.compress_cold {
+            Tier::Cold
+        } else {
+            Tier::Hot
+        };
+        seal_tier::encode_value(record, tier, self.cold_threshold)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disk_reads_for_test(&self) -> u64 {
+        self.disk_reads.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_disk_read(&self) {
+        self.disk_reads.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn lookup(&self, epoch: u64, key: CacheKey) -> Option<Entry> {
+        let mut g = self.lock();
+        if !g.usable(epoch) {
+            g.bypassed += 1;
+            return None;
+        }
+        let h = stable_hash(&key);
+        g.controller.on_access(key.class(), h);
+        if let Some(e) = g.hot.get(&key) {
+            return Some(e.clone());
+        }
+        let blob = g.warm.get(&key)?.clone();
+        let Ok(entry) = decompress_entry(key, &blob) else {
+            g.warm.remove(&key);
+            return None;
+        };
+        let w = weight(&entry);
+        if let Insert::Admitted { evicted } = g.hot.insert(key, entry.clone(), w) {
+            g.warm.remove(&key);
+            g.demote(evicted);
+        }
+        g.enforce_budget();
+        Some(entry)
+    }
+
+    pub(crate) fn fill(&self, epoch: u64, key: CacheKey, entry: Entry) {
+        let mut g = self.lock();
+        if !g.usable(epoch) {
+            return;
+        }
+        let w = weight(&entry);
+        match g.hot.insert(key, entry, w) {
+            Insert::Admitted { evicted } => g.demote(evicted),
+            Insert::Rejected(k, v) => {
+                if g.controller
+                    .should_promote_to_warm(k.class(), stable_hash(&k))
+                {
+                    let blob = compress_entry(&v);
+                    g.insert_warm(k, blob);
+                }
+            }
+        }
+        g.enforce_budget();
+    }
+
+    pub(crate) fn begin_commit(&self, touched: &BTreeSet<CacheKey>) {
+        let mut g = self.lock();
+        g.inflight = true;
+        let n: u64 = touched.iter().map(|k| g.remove_key(k)).sum();
+        g.invalidated += n;
+    }
+
+    pub(crate) fn finish_commit(&self, touched: &BTreeSet<CacheKey>, epoch: u64) {
+        let mut g = self.lock();
+        let n: u64 = touched.iter().map(|k| g.remove_key(k)).sum();
+        g.invalidated += n;
+        g.current = epoch;
+        g.inflight = false;
+    }
+
+    pub(crate) fn abort_commit(&self) {
+        self.lock().inflight = false;
+    }
+
+    pub(crate) fn clear(&self) {
+        let mut g = self.lock();
+        g.hot.clear();
+        g.warm.clear();
+    }
+
+    pub(crate) fn counters(&self, stored: u64, logical: u64) -> TierStats {
+        let g = self.lock();
+        let (h, w) = (g.hot.stats(), g.warm.stats());
+        TierStats {
+            hot: TierCounters {
+                hits: h.hits,
+                misses: h.misses,
+                promotions: h.admitted,
+                evictions: h.evicted,
+                entries: g.hot.len(),
+                bytes: g.hot.bytes(),
+            },
+            warm: TierCounters {
+                hits: w.hits,
+                misses: w.misses,
+                promotions: g.warm_promotions,
+                evictions: w.evicted,
+                entries: g.warm.len(),
+                bytes: g.warm.bytes(),
+            },
+            disk_reads: self.disk_reads.load(Ordering::Relaxed),
+            bypassed: g.bypassed,
+            gate_rejected: h.rejected,
+            invalidated: g.invalidated,
+            budget_bytes: g.budget.total(),
+            stored_bytes: stored,
+            logical_bytes: logical,
+        }
+    }
+}

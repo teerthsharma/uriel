@@ -1,0 +1,141 @@
+mod common;
+
+use common::Rng;
+use seal_sys::{Arena, HotCsr, SysError};
+
+fn model(n: usize, edges: &[(u32, u32)]) -> Vec<Vec<u32>> {
+    let mut adj = vec![Vec::new(); n];
+    for &(s, d) in edges {
+        adj[s as usize].push(d);
+    }
+    adj
+}
+
+fn check(n: usize, edges: &[(u32, u32)]) {
+    let mut arena = Arena::with_cap(1 << 20).unwrap();
+    let csr = HotCsr::build(&mut arena, n, edges).unwrap();
+    let adj = model(n, edges);
+    assert_eq!(csr.node_count(), n);
+    assert_eq!(csr.edge_count(), edges.len());
+    for (i, want) in adj.iter().enumerate() {
+        assert_eq!(csr.neighbours(i as u32), want.as_slice(), "node {i}");
+        assert_eq!(csr.degree(i as u32), Some(want.len() as u32));
+        assert_eq!(csr.tag(i as u32), Some(0));
+        assert_eq!(csr.visits(i as u32), Some(0));
+    }
+    assert!(csr.neighbours(n as u32).is_empty());
+    assert!(csr.neighbours(u32::MAX).is_empty());
+    assert_eq!(csr.degree(n as u32), None);
+    assert!(csr.layout_alignments().iter().all(|&a| a >= 64), "{:?}", csr.layout_alignments());
+    assert_eq!(csr.bytes_used() % 64, 0);
+}
+
+#[test]
+fn hand_written_edge_cases_match_the_model() {
+    check(0, &[]);
+    check(1, &[]);
+    check(1, &[(0, 0)]);
+    check(1, &[(0, 0), (0, 0), (0, 0)]);
+    check(5, &[]);
+    check(4, &[(0, 1), (0, 1), (0, 1), (3, 3), (3, 0), (3, 3)]);
+    check(6, &[(5, 0), (5, 1), (5, 2), (5, 3), (5, 4), (5, 5)]);
+    check(3, &[(2, 0), (1, 2), (0, 1), (2, 1), (1, 0), (0, 2)]);
+}
+
+#[test]
+fn hundred_random_graphs_match_a_plain_adjacency_list_model() {
+    let mut rng = Rng(0x5EA1);
+    let (mut with_isolated, mut with_self_loop, mut with_parallel, mut empty) = (0, 0, 0, 0);
+    for graph in 0..100u32 {
+        let n = match graph {
+            0 => 0,
+            1 => 1,
+            _ => rng.below(60) as usize,
+        };
+        let m = if n == 0 || graph == 2 { 0 } else { rng.below(300) as usize };
+        let span = if graph % 3 == 0 { (n as u64 / 2).max(1) } else { n as u64 };
+        let edges: Vec<(u32, u32)> = (0..m)
+            .map(|_| (rng.below(span) as u32, rng.below(span) as u32))
+            .collect();
+        let adj = model(n, &edges);
+        with_isolated += adj.iter().any(|a| a.is_empty()) as u32;
+        with_self_loop += edges.iter().any(|&(s, d)| s == d) as u32;
+        with_parallel += adj.iter().any(|a| {
+            let mut s = a.clone();
+            s.sort_unstable();
+            s.windows(2).any(|w| w[0] == w[1])
+        }) as u32;
+        empty += edges.is_empty() as u32;
+        check(n, &edges);
+    }
+    assert!(with_isolated > 20 && with_self_loop > 20 && with_parallel > 20 && empty >= 2,
+        "isolated={with_isolated} self={with_self_loop} parallel={with_parallel} empty={empty}");
+}
+
+#[test]
+fn invalid_endpoints_are_rejected_before_any_allocation() {
+    let mut arena = Arena::with_cap(1 << 16).unwrap();
+    assert_eq!(HotCsr::build(&mut arena, 3, &[(0, 3)]).err(), Some(SysError::OutOfRange));
+    assert_eq!(HotCsr::build(&mut arena, 3, &[(3, 0)]).err(), Some(SysError::OutOfRange));
+    assert_eq!(HotCsr::build(&mut arena, 0, &[(0, 0)]).err(), Some(SysError::OutOfRange));
+    assert_eq!(HotCsr::build(&mut arena, 2, &[(u32::MAX, 0)]).err(), Some(SysError::OutOfRange));
+    assert_eq!(arena.used(), 0);
+}
+
+#[test]
+fn oversized_graphs_hit_the_cap_or_size_limit_without_panicking() {
+    let mut arena = Arena::with_cap(4096).unwrap();
+    for n in [100_000usize, 1_000_000_000, u32::MAX as usize - 1] {
+        let err = HotCsr::build(&mut arena, n, &[]).err();
+        assert!(matches!(err, Some(SysError::CapExceeded { .. }) | Some(SysError::TooLarge)), "n={n} err={err:?}");
+    }
+    for n in [u32::MAX as usize, usize::MAX] {
+        assert_eq!(HotCsr::build(&mut arena, n, &[]).err(), Some(SysError::TooLarge));
+    }
+    assert_eq!(arena.used(), 0);
+    let edges: Vec<(u32, u32)> = (0..2000).map(|i| (i % 10, (i + 1) % 10)).collect();
+    assert!(matches!(
+        HotCsr::build(&mut arena, 10, &edges).err(),
+        Some(SysError::CapExceeded { .. })
+    ));
+    assert_eq!(arena.used(), 0);
+    assert!(HotCsr::build(&mut arena, 10, &edges[..100]).is_ok());
+    assert!(arena.used() <= arena.cap());
+}
+
+#[test]
+fn hot_attributes_are_independent_structure_of_arrays() {
+    let mut arena = Arena::with_cap(1 << 16).unwrap();
+    let mut csr = HotCsr::build(&mut arena, 4, &[(0, 1), (1, 2), (2, 3)]).unwrap();
+    csr.set_tag(2, 77).unwrap();
+    assert_eq!(csr.bump_visits(2).unwrap(), 1);
+    assert_eq!(csr.bump_visits(2).unwrap(), 2);
+    assert_eq!(csr.tag(2), Some(77));
+    assert_eq!(csr.visits(2), Some(2));
+    assert_eq!(csr.tag(1), Some(0));
+    assert_eq!(csr.degree(2), Some(1));
+    assert_eq!(csr.neighbours(2), &[3]);
+    assert_eq!(csr.set_tag(4, 1), Err(SysError::OutOfRange));
+    assert_eq!(csr.bump_visits(9), Err(SysError::OutOfRange));
+}
+
+#[test]
+fn two_graphs_in_two_arenas_do_not_alias_and_one_arena_is_reusable_after_reset() {
+    let mut a = Arena::with_cap(1 << 16).unwrap();
+    let mut b = Arena::with_cap(1 << 16).unwrap();
+    {
+        let mut ca = HotCsr::build(&mut a, 3, &[(0, 1), (1, 2)]).unwrap();
+        let mut cb = HotCsr::build(&mut b, 3, &[(2, 0), (2, 1)]).unwrap();
+        ca.set_tag(0, 11).unwrap();
+        cb.set_tag(0, 22).unwrap();
+        assert_eq!(ca.tag(0), Some(11));
+        assert_eq!(cb.tag(0), Some(22));
+        assert_eq!(ca.neighbours(0), &[1]);
+        assert_eq!(cb.neighbours(2), &[0, 1]);
+        assert!(cb.neighbours(0).is_empty());
+    }
+    a.reset().unwrap();
+    let c = HotCsr::build(&mut a, 2, &[(1, 0)]).unwrap();
+    assert_eq!(c.neighbours(1), &[0]);
+    assert_eq!(c.tag(0), Some(0));
+}

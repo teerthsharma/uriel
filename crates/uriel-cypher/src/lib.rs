@@ -1,0 +1,28 @@
+//! `uriel-cypher`: a hand-written openCypher (Neo4j 5 dialect) front end.
+//!
+//! A lexer, a recursive-descent / precedence-climbing parser and a typed AST
+//! with canonical [`Display`](std::fmt::Display) output. No parser generators,
+//! no dependencies beyond `thiserror`.
+//!
+//! ```
+//! let q = uriel_cypher::parse("MATCH (n:Person) WHERE n.age > 30 RETURN n.name").unwrap();
+//! assert_eq!(
+//!     q.to_string(),
+//!     "MATCH (n:Person) WHERE n.age > 30 RETURN n.name"
+//! );
+//! ```
+#![deny(missing_docs)]
+
+pub mod ast;
+pub mod error;
+mod keywords;
+mod lexer;
+mod parser;
+
+pub use ast::*;
+pub use error::{ParseError, Span};
+
+/// Parses a single Cypher statement (an optional trailing `;` is allowed).
+pub fn parse(input: &str) -> Result<Query, ParseError> {
+    parser::parse_query(input)
+}

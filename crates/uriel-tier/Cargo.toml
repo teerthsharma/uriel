@@ -1,0 +1,14 @@
+[package]
+name = "uriel-tier"
+description = "Storage-tier policy for seal: TinyLFU gate, hot cache, value codecs, tier controller and RAM budget (no I/O)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode", "std"] }
+thiserror = "2"
+zstd = "0.13"
+
+[dev-dependencies]
