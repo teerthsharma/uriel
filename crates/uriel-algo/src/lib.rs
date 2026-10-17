@@ -5,6 +5,7 @@ mod community;
 mod components;
 mod error;
 mod flow;
+mod islands;
 mod paths;
 mod projection;
 mod rng;
@@ -28,6 +29,7 @@ pub use components::{
 };
 pub use error::{Error, Result};
 pub use flow::{max_flow, MaxFlow};
+pub use islands::{bucket_islands, island_labels};
 pub use paths::{
     all_pairs_shortest_paths, astar, bellman_ford, dijkstra, dijkstra_path, yen_k_shortest_paths,
     Path, ShortestPaths, MAX_ALL_PAIRS_NODES,
