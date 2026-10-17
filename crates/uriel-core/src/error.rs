@@ -122,6 +122,15 @@ pub enum Error {
     #[error("record {id} in table `{table}` failed its checksum")]
     CorruptRecord { table: &'static str, id: u64 },
 
+    #[error("batch is for epoch {found} but this graph expects epoch {expected}")]
+    StaleBatch { expected: u64, found: u64 },
+
+    #[error("batch creates {kind} id {id}, which is already allocated")]
+    BatchIdCollision { kind: &'static str, id: u64 },
+
+    #[error("invalid write batch: {0}")]
+    InvalidBatch(String),
+
     #[error("the graph is read-only")]
     ReadOnly,
 

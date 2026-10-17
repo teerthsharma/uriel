@@ -15,6 +15,7 @@ use redb::ReadableTable;
 use crate::catalog::ConstraintKind;
 use crate::checksum::crc32c;
 use crate::codec::{encode_node, encode_rel};
+use crate::command::{Command, WriteBatch};
 use crate::error::{Error, Result};
 use crate::graph::{CommitInfo, Inner, Touched, WriterGate};
 use crate::ids::{Edge, Node, NodeId, Props, Rel, RelId};
@@ -110,10 +111,11 @@ pub struct WriteTx {
     touched_edges: Vec<(u64, u64)>,
     dirty: bool,
     poisoned: bool,
+    log: Option<Vec<Command>>,
 }
 
 impl WriteTx {
-    pub(crate) fn begin(inner: Arc<Inner>, gate: WriterGate) -> Result<WriteTx> {
+    pub(crate) fn begin(inner: Arc<Inner>, gate: WriterGate, recording: bool) -> Result<WriteTx> {
         let txn = inner.database()?.begin_write()?;
         let mut st = State::default();
         {
@@ -159,6 +161,7 @@ impl WriteTx {
             touched_edges: Vec::new(),
             dirty: false,
             poisoned: false,
+            log: recording.then(Vec::new),
         })
     }
 
@@ -168,6 +171,10 @@ impl WriteTx {
     /// A transaction that changed nothing commits as a no-op: the epoch is unchanged,
     /// subscribers are not called, and the current epoch is returned.
     pub fn commit(self) -> Result<u64> {
+        self.commit_recorded().map(|(epoch, _)| epoch)
+    }
+
+    pub fn commit_recorded(self) -> Result<(u64, Option<WriteBatch>)> {
         let WriteTx {
             txn,
             gate,
@@ -178,13 +185,14 @@ impl WriteTx {
             touched_edges,
             dirty,
             poisoned,
+            log,
         } = self;
         if poisoned {
             return Err(Error::TransactionPoisoned);
         }
         if !dirty {
             txn.abort()?;
-            return Ok(st.epoch);
+            return Ok((st.epoch, None));
         }
         if inner.mode() != crate::graph::Mode::Full {
             return Err(Error::ReadOnly);
@@ -231,7 +239,8 @@ impl WriteTx {
         // still holding the writer gate: subscribers see commits in epoch order
         inner.publish(&info);
         drop(gate);
-        Ok(epoch)
+        let batch = log.map(|commands| WriteBatch { epoch, commands });
+        Ok((epoch, batch))
     }
 
     /// Discards every change. Equivalent to dropping the transaction.
@@ -298,6 +307,12 @@ impl WriteTx {
 
     fn must_rel(&self, id: RelId) -> Result<Rel> {
         self.get_rel(id)?.ok_or(Error::RelNotFound(id))
+    }
+
+    fn record(&mut self, make: impl FnOnce() -> Command) {
+        if let Some(log) = self.log.as_mut() {
+            log.push(make());
+        }
     }
 
     fn bump(&mut self, key: Vec<u8>, by: i64) {
@@ -474,32 +489,47 @@ impl WriteTx {
     /// [`Error::ConstraintViolation`] if a constraint on any of the labels would break. A
     /// failed call allocates no id.
     pub fn create_node(&mut self, labels: &[&str], props: Props) -> Result<NodeId> {
+        let id = NodeId(self.st.next_node);
+        let node = self.create_node_at(id, labels, props)?;
+        self.record(|| Command::CreateNode {
+            id,
+            labels: node.labels,
+            props: node.props,
+        });
+        Ok(id)
+    }
+
+    fn create_node_at(&mut self, id: NodeId, labels: &[&str], props: Props) -> Result<Node> {
         self.guarded(|tx| {
             let labels = normalize_labels(labels)?;
             let mut clean = Props::new();
             merge_props(&mut clean, props)?;
-            let mut node = Node {
-                id: NodeId(tx.st.next_node),
+            let node = Node {
+                id,
                 labels,
                 props: clean,
             };
             tx.check_constraints(&node, None)?;
-            tx.st.next_node += 1;
-            node.id = NodeId(tx.st.next_node - 1);
+            tx.st.next_node = tx.st.next_node.max(id.0 + 1);
             tx.apply_node_change(None, Some(&node))?;
-            Ok(node.id)
+            Ok(node)
         })
     }
 
     /// Merges `props` into the node's properties: listed keys are set, `Null` removes a key,
     /// other keys are kept.
     pub fn set_node_props(&mut self, id: NodeId, props: Props) -> Result<()> {
+        let logged = self.log.is_some().then(|| props.clone());
         self.guarded(|tx| {
             let old = tx.must_node(id)?;
             let mut new = old.clone();
             merge_props(&mut new.props, props)?;
             tx.replace_node(old, new)
-        })
+        })?;
+        if let Some(props) = logged {
+            self.record(|| Command::SetNodeProps { id, props });
+        }
+        Ok(())
     }
 
     /// Adds a label (no-op if present). Constraints on the label apply to the node from now on.
@@ -510,7 +540,12 @@ impl WriteTx {
             let mut new = old.clone();
             new.labels.insert(label.to_string());
             tx.replace_node(old, new)
-        })
+        })?;
+        self.record(|| Command::AddLabel {
+            id,
+            label: label.to_string(),
+        });
+        Ok(())
     }
 
     /// Removes a label (no-op if absent).
@@ -521,7 +556,12 @@ impl WriteTx {
             let mut new = old.clone();
             new.labels.remove(label);
             tx.replace_node(old, new)
-        })
+        })?;
+        self.record(|| Command::RemoveLabel {
+            id,
+            label: label.to_string(),
+        });
+        Ok(())
     }
 
     fn has_adjacent(&self, node: NodeId) -> Result<bool> {
@@ -544,21 +584,29 @@ impl WriteTx {
                 return Err(Error::NodeHasRelationships(id));
             }
             tx.apply_node_change(Some(&node), None)
-        })
+        })?;
+        self.record(|| Command::DeleteNode { id });
+        Ok(())
     }
 
     /// Deletes a node together with all its incoming and outgoing relationships.
     pub fn detach_delete_node(&mut self, id: NodeId) -> Result<()> {
-        self.guarded(|tx| {
+        let rels = self.guarded(|tx| {
             let node = tx.must_node(id)?;
             let mut rels: BTreeSet<RelId> = BTreeSet::new();
             rels.extend(tx.out_edges(id, None)?.into_iter().map(|e| e.rel));
             rels.extend(tx.in_edges(id, None)?.into_iter().map(|e| e.rel)); // self-loops dedup
-            for rel in rels {
-                tx.delete_rel_inner(rel)?;
+            for rel in &rels {
+                tx.delete_rel_inner(*rel)?;
             }
-            tx.apply_node_change(Some(&node), None)
-        })
+            tx.apply_node_change(Some(&node), None)?;
+            Ok(rels)
+        })?;
+        if let Some(log) = self.log.as_mut() {
+            log.extend(rels.into_iter().map(|id| Command::DeleteRel { id }));
+            log.push(Command::DeleteNode { id });
+        }
+        Ok(())
     }
 
     // ------------------------------------------------------------------ public relationships
@@ -574,14 +622,33 @@ impl WriteTx {
         rel_type: &str,
         props: Props,
     ) -> Result<RelId> {
+        let id = RelId(self.st.next_rel);
+        let clean = self.create_rel_at(id, src, dst, rel_type, props)?;
+        self.record(|| Command::CreateRel {
+            id,
+            src,
+            dst,
+            rel_type: rel_type.to_string(),
+            props: clean,
+        });
+        Ok(id)
+    }
+
+    fn create_rel_at(
+        &mut self,
+        id: RelId,
+        src: NodeId,
+        dst: NodeId,
+        rel_type: &str,
+        props: Props,
+    ) -> Result<Props> {
         self.guarded(|tx| {
             check_name(rel_type)?;
             let mut clean = Props::new();
             merge_props(&mut clean, props)?;
             tx.must_node(src)?;
             tx.must_node(dst)?;
-            let id = RelId(tx.st.next_rel);
-            tx.st.next_rel += 1;
+            tx.st.next_rel = tx.st.next_rel.max(id.0 + 1);
             let stored = tx
                 .inner
                 .tier
@@ -606,12 +673,13 @@ impl WriteTx {
             tx.touched_keys.insert(CacheKey::In(dst.0));
             tx.touched_edges.push((src.0, dst.0));
             tx.dirty = true;
-            Ok(id)
+            Ok(clean)
         })
     }
 
     /// Merges `props` into the relationship's properties (`Null` removes a key).
     pub fn set_rel_props(&mut self, id: RelId, props: Props) -> Result<()> {
+        let logged = self.log.is_some().then(|| props.clone());
         self.guarded(|tx| {
             let rel = tx.must_rel(id)?;
             let mut merged = rel.props.clone();
@@ -628,7 +696,11 @@ impl WriteTx {
                 tx.dirty = true;
             }
             Ok(())
-        })
+        })?;
+        if let Some(props) = logged {
+            self.record(|| Command::SetRelProps { id, props });
+        }
+        Ok(())
     }
 
     fn delete_rel_inner(&mut self, id: RelId) -> Result<()> {
@@ -655,7 +727,9 @@ impl WriteTx {
 
     /// Deletes a relationship.
     pub fn delete_rel(&mut self, id: RelId) -> Result<()> {
-        self.guarded(|tx| tx.delete_rel_inner(id))
+        self.guarded(|tx| tx.delete_rel_inner(id))?;
+        self.record(|| Command::DeleteRel { id });
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------------- DDL
@@ -750,7 +824,12 @@ impl WriteTx {
                 });
             }
             tx.create_index_inner(label, key, false)
-        })
+        })?;
+        self.record(|| Command::CreateIndex {
+            label: label.to_string(),
+            key: key.to_string(),
+        });
+        Ok(())
     }
 
     /// Drops an index and all its entries. Fails with [`Error::IndexNotFound`] if absent and
@@ -772,7 +851,12 @@ impl WriteTx {
                 });
             }
             tx.drop_index_inner(label, key)
-        })
+        })?;
+        self.record(|| Command::DropIndex {
+            label: label.to_string(),
+            key: key.to_string(),
+        });
+        Ok(())
     }
 
     /// First two nodes holding an equal value under `(label, key)`, scanning the index.
@@ -843,7 +927,13 @@ impl WriteTx {
             tx.touched.labels.insert(label.to_string());
             tx.dirty = true;
             Ok(())
-        })
+        })?;
+        self.record(|| Command::CreateConstraint {
+            kind: ConstraintKind::Unique,
+            label: label.to_string(),
+            key: key.to_string(),
+        });
+        Ok(())
     }
 
     /// Creates an existence constraint: every node with `label` must have a non-null `key`.
@@ -895,7 +985,13 @@ impl WriteTx {
             tx.touched.labels.insert(label.to_string());
             tx.dirty = true;
             Ok(())
-        })
+        })?;
+        self.record(|| Command::CreateConstraint {
+            kind: ConstraintKind::Exists,
+            label: label.to_string(),
+            key: key.to_string(),
+        });
+        Ok(())
     }
 
     /// Drops a constraint. For a unique constraint that created its own backing index, the
@@ -930,6 +1026,77 @@ impl WriteTx {
             tx.touched.labels.insert(label.to_string());
             tx.dirty = true;
             Ok(())
-        })
+        })?;
+        self.record(|| Command::DropConstraint {
+            kind,
+            label: label.to_string(),
+            key: key.to_string(),
+        });
+        Ok(())
+    }
+
+    pub(crate) fn apply(&mut self, batch: &WriteBatch) -> Result<()> {
+        if batch.commands.is_empty() {
+            return Err(Error::InvalidBatch("batch has no commands".to_string()));
+        }
+        let expected = self.st.epoch + 1;
+        if batch.epoch != expected {
+            return Err(Error::StaleBatch {
+                expected,
+                found: batch.epoch,
+            });
+        }
+        let node_floor = self.st.next_node;
+        let rel_floor = self.st.next_rel;
+        let mut node_ids = BTreeSet::new();
+        let mut rel_ids = BTreeSet::new();
+        for command in &batch.commands {
+            match command {
+                Command::CreateNode { id, labels, props } => {
+                    if id.0 < node_floor || !node_ids.insert(id.0) {
+                        return Err(Error::BatchIdCollision {
+                            kind: "node",
+                            id: id.0,
+                        });
+                    }
+                    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+                    self.create_node_at(*id, &labels, props.clone())?;
+                }
+                Command::SetNodeProps { id, props } => self.set_node_props(*id, props.clone())?,
+                Command::AddLabel { id, label } => self.add_label(*id, label)?,
+                Command::RemoveLabel { id, label } => self.remove_label(*id, label)?,
+                Command::DeleteNode { id } => self.delete_node(*id)?,
+                Command::CreateRel {
+                    id,
+                    src,
+                    dst,
+                    rel_type,
+                    props,
+                } => {
+                    if id.0 < rel_floor || !rel_ids.insert(id.0) {
+                        return Err(Error::BatchIdCollision {
+                            kind: "relationship",
+                            id: id.0,
+                        });
+                    }
+                    self.create_rel_at(*id, *src, *dst, rel_type, props.clone())?;
+                }
+                Command::SetRelProps { id, props } => self.set_rel_props(*id, props.clone())?,
+                Command::DeleteRel { id } => self.delete_rel(*id)?,
+                Command::CreateIndex { label, key } => self.create_index(label, key)?,
+                Command::DropIndex { label, key } => self.drop_index(label, key)?,
+                Command::CreateConstraint { kind, label, key } => match kind {
+                    ConstraintKind::Unique => self.create_unique_constraint(label, key)?,
+                    ConstraintKind::Exists => self.create_exists_constraint(label, key)?,
+                },
+                Command::DropConstraint { kind, label, key } => {
+                    self.drop_constraint(*kind, label, key)?;
+                }
+            }
+        }
+        if !self.dirty {
+            return Err(Error::InvalidBatch("batch changed nothing".to_string()));
+        }
+        Ok(())
     }
 }
