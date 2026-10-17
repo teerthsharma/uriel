@@ -34,13 +34,13 @@ fn persist_dir(cfg: &Config) -> Option<std::path::PathBuf> {
 
 pub fn build_server(cfg: &Config) -> Result<Server, String> {
     let engine = if cfg.in_memory {
-        Engine::open_in_memory()
+        Engine::open_in_memory(cfg.memory)
     } else {
         if let Some(dir) = cfg.db.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         }
-        Engine::open(&cfg.db)
+        Engine::open(&cfg.db, cfg.memory)
     }
     .map_err(|e| format!("cannot open database: {e}"))?;
     let ctx = Context {

@@ -36,7 +36,7 @@ fn write_corpus(dir: &Path, files: usize) {
 pub fn corpus(files: usize) -> Corpus {
     let dir = tempfile::tempdir().expect("tempdir");
     write_corpus(dir.path(), files);
-    let graph = Graph::open_in_memory().expect("graph");
+    let graph = Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph");
     let rag = Rag::open(graph, RagConfig::default()).expect("rag");
     rag.index_dir(dir.path(), &IndexOptions::default())
         .expect("index");

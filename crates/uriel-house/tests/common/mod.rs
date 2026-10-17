@@ -29,7 +29,7 @@ pub fn env_with(free_mb: u64, total_mb: u64, tweak: impl FnOnce(&mut HouseConfig
     tweak(&mut cfg);
     let sink = Arc::new(VecSink::new());
     let probe = Arc::new(FakeProbe::new(free_mb, total_mb));
-    let graph = Graph::open_in_memory().expect("graph");
+    let graph = Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph");
     let house =
         House::open(graph, cfg, Box::new(probe.clone()), Box::new(sink.clone())).expect("open");
     Env {

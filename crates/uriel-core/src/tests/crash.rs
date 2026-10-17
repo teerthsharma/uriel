@@ -7,7 +7,7 @@ fn options() -> Options {
         hot_entries: 16,
         hot_bytes: 1 << 16,
         warm_bytes: 1 << 16,
-        ..Options::default()
+        ..Options::new(crate::MemoryBudget::mib(80))
     }
 }
 
@@ -135,7 +135,7 @@ fn a_cut_before_the_first_write_leaves_an_empty_database() {
 fn a_graph_over_the_fault_backend_matches_an_in_memory_graph() {
     let script = script(99, 150);
     let a = FaultBackend::new().open(&options()).unwrap();
-    let b = Graph::open_in_memory().unwrap();
+    let b = Graph::open_in_memory(crate::MemoryBudget::mib(80)).unwrap();
     assert!(!run(&a, &script, |_, _| {}).failed);
     assert!(!run(&b, &script, |_, _| {}).failed);
     assert_eq!(export(&a).unwrap(), export(&b).unwrap());

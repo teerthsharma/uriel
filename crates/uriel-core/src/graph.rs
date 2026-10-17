@@ -10,6 +10,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{Builder, Database, ReadableDatabase, ReadableTable, StorageBackend};
 
+use crate::budget::MemoryBudget;
 use crate::catalog::{ConstraintDef, ConstraintKind, IndexDef, Schema};
 use crate::checksum::crc32c;
 use crate::error::{Error, Result};
@@ -27,11 +28,9 @@ pub(crate) const FORMAT_VERSION: u64 = 3;
 pub(crate) const SUMLESS_FORMAT_VERSION: u64 = 2;
 pub(crate) const LEGACY_FORMAT_VERSION: u64 = 1;
 
-/// Tuning knobs for [`Graph::open_with`].
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// Size of `redb`'s page cache in bytes. `redb` itself defaults to 1 GiB; seal defaults
-    /// to 64 MiB to keep resident memory small.
+    pub budget: MemoryBudget,
     pub cache_bytes: usize,
     pub hot_entries: usize,
     pub hot_bytes: usize,
@@ -46,13 +45,14 @@ pub struct Options {
     pub record_events: bool,
 }
 
-impl Default for Options {
-    fn default() -> Self {
+impl Options {
+    pub fn new(budget: MemoryBudget) -> Options {
         Options {
-            cache_bytes: 64 * 1024 * 1024,
-            hot_entries: 4096,
-            hot_bytes: 8 * 1024 * 1024,
-            warm_bytes: 8 * 1024 * 1024,
+            budget,
+            cache_bytes: budget.redb_cache(),
+            hot_entries: budget.hot_entries(),
+            hot_bytes: budget.hot(),
+            warm_bytes: budget.warm(),
             cold_threshold_bytes: 256,
             compress_cold: true,
             admission_gate: true,
@@ -169,6 +169,7 @@ pub(crate) struct Inner {
     degrade: Option<Reopen>,
     modes: Mutex<ModeState>,
     pub(crate) tier: TierState,
+    budget: MemoryBudget,
     epoch: AtomicU64,
     writer_busy: Mutex<bool>,
     writer_cv: Condvar,
@@ -398,10 +399,10 @@ impl std::fmt::Debug for Graph {
 }
 
 impl Graph {
-    /// Opens (creating if absent) the single-file database at `path` with default
-    /// [`Options`].
-    pub fn open(path: impl AsRef<Path>) -> Result<Graph> {
-        Graph::open_with(path, &Options::default())
+    /// Opens (creating if absent) the single-file database at `path` with the caps split
+    /// from `budget`.
+    pub fn open(path: impl AsRef<Path>, budget: MemoryBudget) -> Result<Graph> {
+        Graph::open_with(path, &Options::new(budget))
     }
 
     /// Opens (creating if absent) the database at `path`.
@@ -466,11 +467,12 @@ impl Graph {
     }
 
     /// Opens a fresh graph that lives only in memory. Everything is lost on drop.
-    pub fn open_in_memory() -> Result<Graph> {
+    pub fn open_in_memory(budget: MemoryBudget) -> Result<Graph> {
+        let options = Options::new(budget);
         let db = Builder::new()
-            .set_cache_size(8 * 1024 * 1024)
+            .set_cache_size(options.cache_bytes)
             .create_with_backend(InMemoryBackend::new())?;
-        Graph::init(db, &Options::default(), None, None)
+        Graph::init(db, &options, None, None)
     }
 
     fn init(
@@ -543,6 +545,7 @@ impl Graph {
                     log: Vec::new(),
                 }),
                 tier: TierState::new(options, epoch),
+                budget: options.budget,
                 epoch: AtomicU64::new(epoch),
                 writer_busy: Mutex::new(false),
                 writer_cv: Condvar::new(),
@@ -563,6 +566,10 @@ impl Graph {
     #[cfg(test)]
     pub(crate) fn db(&self) -> Arc<Database> {
         self.inner.database().expect("database")
+    }
+
+    pub fn budget(&self) -> MemoryBudget {
+        self.inner.budget
     }
 
     pub fn placement_log(&self) -> Vec<uriel_place::Event> {

@@ -24,7 +24,7 @@ fn planned(
         warm_bytes,
         cold_threshold_bytes: 64,
         record_events: true,
-        ..Options::default()
+        ..Options::new(crate::MemoryBudget::mib(80))
     }
 }
 
@@ -511,7 +511,7 @@ fn measure_planned_against_local() {
     let docs = windows(&corpus, N, 1024);
     let (_d, path) = super::tmp_graph_path();
     {
-        let g = Graph::open_with(&path, &Options::default()).unwrap();
+        let g = Graph::open_with(&path, &Options::new(crate::MemoryBudget::mib(80))).unwrap();
         for chunk in docs.chunks(2000).enumerate() {
             let mut tx = g.begin_write().unwrap();
             for (j, t) in chunk.1.iter().enumerate() {
@@ -541,7 +541,7 @@ fn measure_planned_against_local() {
             placement,
             region_ids,
             plan_every,
-            ..Options::default()
+            ..Options::new(crate::MemoryBudget::mib(80))
         };
         vec![
             ("Local gate on".into(), base(Placement::Local, true, 1, 1)),
@@ -629,14 +629,14 @@ fn measure_planned_against_local() {
         ns.sort_unstable();
         ns[BATCHES / 2]
     };
-    let local = median(&Options::default());
+    let local = median(&Options::new(crate::MemoryBudget::mib(80)));
     println!("Local                      {local} ns");
     for (r, n) in [(1usize, 128usize), (16, 128), (16, 1024)] {
         let o = Options {
             placement: Placement::Planned,
             region_ids: r,
             plan_every: n,
-            ..Options::default()
+            ..Options::new(crate::MemoryBudget::mib(80))
         };
         let m = median(&o);
         println!(

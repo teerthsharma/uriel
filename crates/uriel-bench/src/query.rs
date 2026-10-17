@@ -8,7 +8,7 @@ pub const TWO_HOP: &str =
     "MATCH (p:Person {id: $id})-[:KNOWS]->(:Person)-[:KNOWS]->(f:Person) RETURN f.id AS id";
 
 pub fn engine(nodes: usize) -> Engine {
-    let engine = Engine::open_in_memory().expect("engine");
+    let engine = Engine::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("engine");
     let graph = engine.graph();
     graph.create_index("Person", "id").expect("index");
     let mut tx = graph.begin_write().expect("begin write");

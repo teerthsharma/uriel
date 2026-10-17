@@ -543,7 +543,7 @@ fn data_ids_and_epoch_survive_reopen_and_ids_are_never_reused() {
     let (_dir, path) = tmp_graph_path();
     let (a, c, rel);
     {
-        let g = Graph::open(&path).unwrap();
+        let g = Graph::open(&path, crate::MemoryBudget::mib(80)).unwrap();
         let mut tx = g.begin_write().unwrap();
         a = tx
             .create_node(&["Person"], p(&[("name", "Ada".into())]))
@@ -561,7 +561,7 @@ fn data_ids_and_epoch_survive_reopen_and_ids_are_never_reused() {
         tx.commit().unwrap();
         assert_eq!(g.epoch(), 2);
     }
-    let g = Graph::open(&path).unwrap();
+    let g = Graph::open(&path, crate::MemoryBudget::mib(80)).unwrap();
     assert_eq!(g.epoch(), 2);
     let r = g.begin_read().unwrap();
     assert_eq!(r.node_count().unwrap(), 2);
@@ -588,15 +588,15 @@ fn data_ids_and_epoch_survive_reopen_and_ids_are_never_reused() {
 #[test]
 fn a_database_file_cannot_be_opened_twice_at_once() {
     let (_dir, path) = tmp_graph_path();
-    let _g = Graph::open(&path).unwrap();
-    assert!(matches!(Graph::open(&path), Err(Error::Storage(_))));
+    let _g = Graph::open(&path, crate::MemoryBudget::mib(80)).unwrap();
+    assert!(matches!(Graph::open(&path, crate::MemoryBudget::mib(80)), Err(Error::Storage(_))));
 }
 
 #[test]
 fn opening_a_path_in_a_missing_directory_fails_cleanly() {
     let (dir, _) = tmp_graph_path();
     let bad = dir.path().join("no-such-dir").join("x.redb");
-    assert!(matches!(Graph::open(bad), Err(Error::Storage(_))));
+    assert!(matches!(Graph::open(bad, crate::MemoryBudget::mib(80)), Err(Error::Storage(_))));
 }
 
 #[test]
@@ -792,7 +792,7 @@ fn a_small_cache_option_is_accepted() {
         &path,
         &crate::Options {
             cache_bytes: 1 << 20,
-            ..crate::Options::default()
+            ..crate::Options::new(crate::MemoryBudget::mib(80))
         },
     )
     .unwrap();

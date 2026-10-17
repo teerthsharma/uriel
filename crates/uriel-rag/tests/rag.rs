@@ -60,7 +60,7 @@ const PACKET: &[&str] = &[
 
 fn memory_rag() -> Rag {
     Rag::open(
-        Graph::open_in_memory().expect("graph"),
+        Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph"),
         RagConfig::default(),
     )
     .expect("rag")
@@ -144,7 +144,7 @@ fn deterministic_and_identical_after_reopen() {
     };
 
     let before: Vec<_> = {
-        let rag = Rag::open(Graph::open(&db).expect("open"), RagConfig::default()).expect("rag");
+        let rag = Rag::open(Graph::open(&db, uriel_core::MemoryBudget::mib(80)).expect("open"), RagConfig::default()).expect("rag");
         rag.index_dir(&src, &IndexOptions::default())
             .expect("index");
         let first: Vec<_> = queries
@@ -158,7 +158,7 @@ fn deterministic_and_identical_after_reopen() {
         assert_eq!(first, again, "same process, same query, same order");
         first
     };
-    let rag = Rag::open(Graph::open(&db).expect("reopen"), RagConfig::default()).expect("rag");
+    let rag = Rag::open(Graph::open(&db, uriel_core::MemoryBudget::mib(80)).expect("reopen"), RagConfig::default()).expect("rag");
     let after: Vec<_> = queries
         .iter()
         .map(|q| key(&rag.search(q, &opts).expect("s")))
@@ -179,7 +179,7 @@ fn incremental_reindex_skips_unchanged_and_replaces_edited() {
             "zebra giraffe keepers",
         ],
     );
-    let graph = Graph::open_in_memory().expect("graph");
+    let graph = Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph");
     let rag = Rag::open(graph.clone(), RagConfig::default()).expect("rag");
     let first = rag
         .index_dir(dir.path(), &IndexOptions::default())
@@ -252,14 +252,14 @@ fn stale_chunks_are_not_resurrected_on_reopen() {
     write(&src, "zoo.txt", &["zebra giraffe savanna enclosure"]);
     let db = dir.path().join("rag.redb");
     {
-        let rag = Rag::open(Graph::open(&db).expect("g"), RagConfig::default()).expect("rag");
+        let rag = Rag::open(Graph::open(&db, uriel_core::MemoryBudget::mib(80)).expect("g"), RagConfig::default()).expect("rag");
         rag.index_dir(&src, &IndexOptions::default())
             .expect("index");
         write(&src, "zoo.txt", &["walrus penguin arctic aquarium"]);
         rag.index_dir(&src, &IndexOptions::default())
             .expect("index");
     }
-    let rag = Rag::open(Graph::open(&db).expect("g"), RagConfig::default()).expect("rag");
+    let rag = Rag::open(Graph::open(&db, uriel_core::MemoryBudget::mib(80)).expect("g"), RagConfig::default()).expect("rag");
     assert_eq!(rag.stats().expect("stats").chunks, 1);
     let hits = rag
         .search("zebra giraffe walrus", &SearchOptions::default())
@@ -394,7 +394,7 @@ fn feedback_persists_across_reopen() {
     write(&src, "a.rs", CHECKSUM);
     let db = dir.path().join("rag.redb");
     let id = {
-        let rag = Rag::open(Graph::open(&db).expect("g"), RagConfig::default()).expect("rag");
+        let rag = Rag::open(Graph::open(&db, uriel_core::MemoryBudget::mib(80)).expect("g"), RagConfig::default()).expect("rag");
         rag.index_dir(&src, &IndexOptions::default())
             .expect("index");
         let id = rag
@@ -410,7 +410,7 @@ fn feedback_persists_across_reopen() {
         assert!(hits[0].score > 0.0);
         id
     };
-    let graph = Graph::open(&db).expect("g");
+    let graph = Graph::open(&db, uriel_core::MemoryBudget::mib(80)).expect("g");
     let node = graph
         .begin_read()
         .expect("r")
@@ -538,5 +538,5 @@ fn invalid_options_are_errors() {
         compression_ratio: 0,
         ..RagConfig::default()
     };
-    assert!(Rag::open(Graph::open_in_memory().expect("g"), cfg).is_err());
+    assert!(Rag::open(Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("g"), cfg).is_err());
 }

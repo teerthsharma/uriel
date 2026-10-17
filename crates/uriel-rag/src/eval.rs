@@ -436,7 +436,7 @@ fn run_on(root: &Path, queries: &[EvalQuery]) -> Result<EvalReport, RagError> {
         })
     };
 
-    let rag = Rag::open(Graph::open_in_memory()?, RagConfig::default())?;
+    let rag = Rag::open(Graph::open_in_memory(uriel_core::MemoryBudget::mib(80))?, RagConfig::default())?;
     rag.index_dir(root, &IndexOptions::default())?;
     let stats = rag.stats()?;
     let opts = SearchOptions {

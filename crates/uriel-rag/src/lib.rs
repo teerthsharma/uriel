@@ -1054,7 +1054,7 @@ mod tests {
     fn index_ids_match_database_after_edit() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("a.txt"), "alpha beta gamma").expect("write");
-        let graph = Graph::open_in_memory().expect("graph");
+        let graph = Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph");
         let rag = Rag::open(graph.clone(), RagConfig::default()).expect("rag");
         rag.index_dir(dir.path(), &IndexOptions::default())
             .expect("index");

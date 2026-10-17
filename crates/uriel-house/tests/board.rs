@@ -27,7 +27,7 @@ fn board_gates_accept_the_emitted_events() {
     let log = tmp.path().join("house-events.jsonl");
     let cfg = HouseConfig::at(tmp.path());
     let house = House::open(
-        Graph::open_in_memory().expect("graph"),
+        Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph"),
         cfg,
         Box::new(FakeProbe::new(16_000, 16_000)),
         Box::new(JsonlSink::new(&log)),

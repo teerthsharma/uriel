@@ -29,7 +29,7 @@ fn corpus(dir: &Path, n: usize) {
 fn indexed(n: usize) -> (tempfile::TempDir, Graph, Rag) {
     let dir = tempfile::tempdir().expect("tempdir");
     corpus(dir.path(), n);
-    let graph = Graph::open_in_memory().expect("graph");
+    let graph = Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph");
     let rag = Rag::open(graph.clone(), RagConfig::default()).expect("rag");
     rag.index_dir(dir.path(), &IndexOptions::default())
         .expect("index");
@@ -122,7 +122,7 @@ fn pack_ladder_never_exceeds_budget_and_degrades_before_dropping() {
 }
 
 fn old_format_graph() -> (Graph, u64) {
-    let graph = Graph::open_in_memory().expect("graph");
+    let graph = Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph");
     let text = "/// Render a table of rows as aligned plain text columns.\npub fn render_table(rows: &[Vec<String>]) -> String {\n    let mut out = String::new();\n    for row in rows {\n        out.push_str(&row.join(\"  \"));\n        out.push('\\n');\n    }\n    out\n}";
     let mut tx = graph.begin_write().expect("tx");
     let mut fp = Props::new();

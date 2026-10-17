@@ -287,7 +287,7 @@ fn leap_use_survives_a_reopen() {
     let project = project();
     let open = || {
         House::open(
-            Graph::open(&db).expect("graph"),
+            Graph::open(&db, uriel_core::MemoryBudget::mib(80)).expect("graph"),
             HouseConfig::at(project.path()),
             Box::new(FakeProbe::new(16_000, 16_000)),
             Box::new(Arc::new(VecSink::new())),

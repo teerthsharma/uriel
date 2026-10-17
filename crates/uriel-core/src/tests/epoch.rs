@@ -71,14 +71,14 @@ fn a_reader_keeps_the_epoch_of_its_snapshot() {
 fn epoch_survives_reopen() {
     let (_dir, path) = tmp_graph_path();
     {
-        let g = Graph::open(&path).unwrap();
+        let g = Graph::open(&path, crate::MemoryBudget::mib(80)).unwrap();
         for _ in 0..3 {
             let mut tx = g.begin_write().unwrap();
             tx.create_node(&[], p(&[])).unwrap();
             tx.commit().unwrap();
         }
     }
-    let g = Graph::open(&path).unwrap();
+    let g = Graph::open(&path, crate::MemoryBudget::mib(80)).unwrap();
     assert_eq!(g.epoch(), 3);
     let log = recorder(&g);
     let mut tx = g.begin_write().unwrap();

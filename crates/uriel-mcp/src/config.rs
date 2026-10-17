@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
+use uriel_core::MemoryBudget;
+
 pub const DEFAULT_TOKEN_LIMIT: usize = 20_000;
+pub const DEFAULT_MEMORY_MIB: usize = 50;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
@@ -54,6 +57,7 @@ pub struct Config {
     pub config: Option<PathBuf>,
     pub format: Format,
     pub placement: PlacementMode,
+    pub memory: MemoryBudget,
 }
 
 impl Config {
@@ -87,6 +91,8 @@ OPTIONS:
     --config <PATH>      JSON config with model slots (default: ~/.seal/config.json if present)
     --format <F>         Result format of rag_search, seal_recall and read_neo4j_cypher:
                          compact (default; fewer tokens) or json (exact v1 output)
+    --memory-mib <N>     Memory budget in MiB split between the page cache, the node tiers, the
+                         query cache and the RAG index (default: 50, minimum: 16)
     --placement <M>      local (default) or planned: planned keeps a placement model fed by the
                          nodes the tools read, which why_hot and pin explain and steer
     -h, --help           Print this help
@@ -120,6 +126,7 @@ where
         config: None,
         format: Format::Compact,
         placement: PlacementMode::Local,
+        memory: MemoryBudget::mib(DEFAULT_MEMORY_MIB),
     };
     let mut it = args.into_iter().map(Into::into);
     while let Some(arg) = it.next() {
@@ -157,6 +164,20 @@ where
                 let v = value(&flag, inline, &mut it)?;
                 cfg.placement = PlacementMode::parse(&v)
                     .ok_or_else(|| format!("--placement expects local or planned, got '{v}'"))?;
+            }
+            "--memory-mib" => {
+                let v = value(&flag, inline, &mut it)?;
+                let mib = v
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| n.saturating_mul(1024 * 1024) >= MemoryBudget::MIN_BYTES)
+                    .ok_or_else(|| {
+                        format!(
+                            "--memory-mib expects an integer of at least {}, got '{v}'",
+                            MemoryBudget::MIN_BYTES / (1024 * 1024)
+                        )
+                    })?;
+                cfg.memory = MemoryBudget::mib(mib);
             }
             other => return Err(format!("unknown argument '{other}'")),
         }
@@ -284,6 +305,16 @@ mod tests {
     fn placement_mode_names_round_trip() {
         for m in [PlacementMode::Local, PlacementMode::Planned] {
             assert_eq!(PlacementMode::parse(m.name()), Some(m));
+        }
+    }
+
+    #[test]
+    fn memory_flag_sets_the_budget_and_defaults_to_fifty_mib() {
+        assert_eq!(run(&[]).memory, MemoryBudget::mib(50));
+        assert_eq!(run(&["--memory-mib", "64"]).memory, MemoryBudget::mib(64));
+        assert_eq!(run(&["--memory-mib=16"]).memory, MemoryBudget::mib(16));
+        for bad in [&["--memory-mib", "15"][..], &["--memory-mib", "0"], &["--memory-mib", "x"], &["--memory-mib"]] {
+            assert!(parse_args(bad.iter().copied()).is_err(), "{bad:?}");
         }
     }
 

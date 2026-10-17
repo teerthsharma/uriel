@@ -1,3 +1,4 @@
+mod budget;
 mod codec;
 mod constraints;
 mod crash;
@@ -19,7 +20,7 @@ use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableDefiniti
 use crate::{Graph, Props, Value};
 
 pub(crate) fn mem() -> Graph {
-    Graph::open_in_memory().expect("open in memory")
+    Graph::open_in_memory(crate::MemoryBudget::mib(80)).expect("open in memory")
 }
 
 pub(crate) fn p(pairs: &[(&str, Value)]) -> Props {

@@ -400,7 +400,7 @@ fn index_created_in_a_rolled_back_tx_leaves_nothing() {
 fn list_indexes_is_sorted_and_survives_reopen() {
     let (_dir, path) = tmp_graph_path();
     {
-        let g = Graph::open(&path).unwrap();
+        let g = Graph::open(&path, crate::MemoryBudget::mib(80)).unwrap();
         let mut tx = g.begin_write().unwrap();
         tx.create_node(&["B"], p(&[("z", 1.into())])).unwrap();
         tx.commit().unwrap();
@@ -408,7 +408,7 @@ fn list_indexes_is_sorted_and_survives_reopen() {
         g.create_index("A", "y").unwrap();
         g.create_index("A", "x").unwrap();
     }
-    let g = Graph::open(&path).unwrap();
+    let g = Graph::open(&path, crate::MemoryBudget::mib(80)).unwrap();
     let defs: Vec<(String, String)> = g
         .list_indexes()
         .unwrap()

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread::{self, JoinHandle};
 
-use uriel_core::Value;
+use uriel_core::{MemoryBudget, Value};
 use uriel_query::{AccessMode, Engine, QueryResult};
 use uriel_rag::{ContextPack, IndexOptions, Rag, RagConfig, SearchOptions};
 use uriel_sys::{Arena, Slab, Width};
@@ -24,6 +24,7 @@ pub struct HostConfig {
     pub db_path: PathBuf,
     pub root: PathBuf,
     pub hot_cap_bytes: usize,
+    pub memory: MemoryBudget,
     pub sock_name: String,
 }
 
@@ -306,7 +307,7 @@ impl Host {
     pub fn open(cfg: HostConfig) -> Result<Host, HostError> {
         validate_config(&cfg)?;
         let arena = Arena::with_cap(cfg.hot_cap_bytes)?;
-        let engine = Engine::open(&cfg.db_path)?;
+        let engine = Engine::open(&cfg.db_path, cfg.memory)?;
         let rag = Rag::open(engine.graph().clone(), RagConfig::default())?;
         rag.index_dir(&cfg.root, &IndexOptions::default())?;
         let port_file = port_file_for(&cfg);

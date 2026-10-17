@@ -73,7 +73,7 @@ fn record_forty() -> (Env, Recorded) {
 }
 
 fn replay_once(root: &Path, rec: &Recorded) -> Vec<DecisionRecord> {
-    let graph = uriel_core::Graph::open_in_memory().expect("graph");
+    let graph = uriel_core::Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph");
     House::replay(
         HouseConfig::at(root),
         graph,
@@ -144,7 +144,7 @@ fn replay_on_a_graph_in_another_temp_path_gives_the_same_digest() {
     let (_e, rec) = record_forty();
     let other_root = project();
     let graph_dir = tempfile::tempdir().expect("tempdir");
-    let graph = uriel_core::Graph::open(graph_dir.path().join("replay.seal")).expect("graph");
+    let graph = uriel_core::Graph::open(graph_dir.path().join("replay.seal"), uriel_core::MemoryBudget::mib(80)).expect("graph");
     let log = House::replay(
         HouseConfig::at(other_root.path()),
         graph,
@@ -162,7 +162,7 @@ fn changing_one_probe_value_changes_the_digest() {
     let k = rec.script.len() / 2;
     let mut script = rec.script.clone();
     script[k].free_ram_mb += 1;
-    let graph = uriel_core::Graph::open_in_memory().expect("graph");
+    let graph = uriel_core::Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph");
     let log = House::replay(
         HouseConfig::at(e.dir.path()),
         graph,

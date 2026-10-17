@@ -20,7 +20,7 @@ fn options() -> Options {
         hot_bytes: 1 << 16,
         warm_bytes: 1 << 16,
         compress_cold: false,
-        ..Options::default()
+        ..Options::new(crate::MemoryBudget::mib(80))
     }
 }
 

@@ -6,10 +6,10 @@
 //! no async runtime; higher crates build Cypher execution and caching on top.
 //!
 //! ```
-//! use uriel_core::{Graph, Props, Value};
+//! use uriel_core::{Graph, MemoryBudget, Props, Value};
 //!
 //! # fn main() -> uriel_core::Result<()> {
-//! let graph = Graph::open_in_memory()?;
+//! let graph = Graph::open_in_memory(MemoryBudget::mib(64))?;
 //! graph.create_index("Person", "name")?;
 //!
 //! let mut tx = graph.begin_write()?;
@@ -46,6 +46,7 @@
 
 #![forbid(unsafe_code)]
 
+mod budget;
 pub mod catalog;
 mod checksum;
 mod codec;
@@ -64,6 +65,7 @@ mod write;
 #[cfg(test)]
 mod tests;
 
+pub use budget::MemoryBudget;
 pub use catalog::{ConstraintDef, ConstraintKind, EntitySchema, IndexDef, Schema};
 pub use error::{Error, Result};
 pub use graph::{

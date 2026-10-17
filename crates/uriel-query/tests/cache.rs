@@ -211,7 +211,7 @@ fn distributed_cache_bridge_with_one_node() {
     assert!(cached(&e, q).1);
 
     // a second engine with an empty graph is served the shared entry
-    let other = Engine::open_in_memory()
+    let other = Engine::open_in_memory(uriel_core::MemoryBudget::mib(80))
         .unwrap()
         .with_dist_cache(dist.clone());
     assert_eq!(cached(&other, q), (vec!["[6]".to_string()], true));
