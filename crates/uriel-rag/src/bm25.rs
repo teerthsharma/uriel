@@ -4,19 +4,41 @@ use crate::tokenize::terms;
 
 const K1: f64 = 1.2;
 const B: f64 = 0.75;
+const VOCAB_ENTRY_BYTES: u64 = 28;
+const LIST_HEADER_BYTES: u64 = 24;
+const POSTING_BYTES: u64 = 8;
+const TERM_ID_BYTES: u64 = 4;
+const DOC_BYTES: u64 = 32;
 
 #[derive(Debug, Clone)]
 struct DocInfo {
     len: u32,
-    terms: Vec<(String, u32)>,
+    terms: Box<[u32]>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct Bm25Index {
-    postings: HashMap<String, Vec<(u32, u32)>>,
+    vocab: HashMap<String, u32>,
+    postings: Vec<Vec<(u32, u32)>>,
     docs: Vec<Option<DocInfo>>,
     live: usize,
+    live_terms: usize,
     total_len: u64,
+    bytes: u64,
+}
+
+pub(crate) fn idf(n: f64, df: f64) -> f64 {
+    (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+}
+
+pub(crate) fn term_weight(idf: f64, tf: u32, doc_len: u32, avg_len: f64) -> f64 {
+    let tf = f64::from(tf);
+    let norm = tf + K1 * (1.0 - B + B * f64::from(doc_len) / avg_len);
+    idf * tf * (K1 + 1.0) / norm
+}
+
+pub(crate) fn average_len(total_len: u64, live: usize) -> f64 {
+    (total_len as f64 / live as f64).max(1.0)
 }
 
 impl Bm25Index {
@@ -32,17 +54,29 @@ impl Bm25Index {
             *counts.entry(t).or_insert(0) += 1;
             len += 1;
         }
-        for (t, tf) in &counts {
-            self.postings
-                .entry(t.clone())
-                .or_default()
-                .push((slot, *tf));
+        let mut ids: Vec<u32> = Vec::with_capacity(counts.len());
+        for (t, tf) in counts {
+            let next = u32::try_from(self.postings.len()).unwrap_or(u32::MAX);
+            let term_bytes = t.len() as u64 + VOCAB_ENTRY_BYTES + LIST_HEADER_BYTES;
+            let tid = *self.vocab.entry(t).or_insert(next);
+            if tid == next {
+                self.postings.push(Vec::new());
+                self.bytes += term_bytes;
+            }
+            let list = &mut self.postings[tid as usize];
+            if list.is_empty() {
+                self.live_terms += 1;
+            }
+            list.push((slot, tf));
+            self.bytes += POSTING_BYTES;
+            ids.push(tid);
         }
+        self.bytes += ids.len() as u64 * TERM_ID_BYTES + DOC_BYTES;
         self.total_len += u64::from(len);
         self.live += 1;
         self.docs.push(Some(DocInfo {
             len,
-            terms: counts.into_iter().collect(),
+            terms: ids.into_boxed_slice(),
         }));
         slot
     }
@@ -51,14 +85,15 @@ impl Bm25Index {
         let Some(info) = self.docs.get_mut(slot as usize).and_then(Option::take) else {
             return false;
         };
-        for (t, _) in &info.terms {
-            if let Some(list) = self.postings.get_mut(t) {
-                list.retain(|(s, _)| *s != slot);
-                if list.is_empty() {
-                    self.postings.remove(t);
-                }
+        for tid in info.terms.iter() {
+            let list = &mut self.postings[*tid as usize];
+            list.retain(|(s, _)| *s != slot);
+            self.bytes -= POSTING_BYTES + TERM_ID_BYTES;
+            if list.is_empty() {
+                self.live_terms -= 1;
             }
         }
+        self.bytes -= DOC_BYTES;
         self.total_len -= u64::from(info.len);
         self.live -= 1;
         true
@@ -73,22 +108,11 @@ impl Bm25Index {
     }
 
     pub fn term_count(&self) -> usize {
-        self.postings.len()
+        self.live_terms
     }
 
     pub fn approx_bytes(&self) -> u64 {
-        let postings: usize = self
-            .postings
-            .iter()
-            .map(|(t, l)| t.len() + l.len() * 8 + 24)
-            .sum();
-        let docs: usize = self
-            .docs
-            .iter()
-            .flatten()
-            .map(|d| d.terms.iter().map(|(t, _)| t.len() + 4 + 24).sum::<usize>() + 32)
-            .sum();
-        (postings + docs) as u64
+        self.bytes
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<(u32, f32)> {
@@ -97,21 +121,22 @@ impl Bm25Index {
         }
         let unique: BTreeSet<String> = terms(query).into_iter().collect();
         let n = self.live as f64;
-        let avg = (self.total_len as f64 / n).max(1.0);
+        let avg = average_len(self.total_len, self.live);
         let mut acc: HashMap<u32, f64> = HashMap::new();
         for t in &unique {
-            let Some(list) = self.postings.get(t) else {
+            let Some(&tid) = self.vocab.get(t) else {
                 continue;
             };
-            let df = list.len() as f64;
-            let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+            let list = &self.postings[tid as usize];
+            if list.is_empty() {
+                continue;
+            }
+            let idf = idf(n, list.len() as f64);
             for &(slot, tf) in list {
                 let Some(Some(doc)) = self.docs.get(slot as usize) else {
                     continue;
                 };
-                let tf = f64::from(tf);
-                let norm = tf + K1 * (1.0 - B + B * f64::from(doc.len) / avg);
-                *acc.entry(slot).or_insert(0.0) += idf * tf * (K1 + 1.0) / norm;
+                *acc.entry(slot).or_insert(0.0) += term_weight(idf, tf, doc.len, avg);
             }
         }
         let mut out: Vec<(u32, f32)> = acc

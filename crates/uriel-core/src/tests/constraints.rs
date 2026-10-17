@@ -385,14 +385,14 @@ fn constraint_ddl_listing_errors_and_drop() {
 fn constraints_persist_across_reopen_and_stay_enforced() {
     let (_dir, path) = tmp_graph_path();
     {
-        let g = Graph::open(&path).unwrap();
+        let g = Graph::open(&path, crate::MemoryBudget::mib(80)).unwrap();
         g.create_unique_constraint("U", "k").unwrap();
         g.create_exists_constraint("U", "k").unwrap();
         let mut tx = g.begin_write().unwrap();
         tx.create_node(&["U"], p(&[("k", 1.into())])).unwrap();
         tx.commit().unwrap();
     }
-    let g = Graph::open(&path).unwrap();
+    let g = Graph::open(&path, crate::MemoryBudget::mib(80)).unwrap();
     assert_eq!(g.list_constraints().unwrap().len(), 2);
     let mut tx = g.begin_write().unwrap();
     assert!(unique_violation(

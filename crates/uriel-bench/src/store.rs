@@ -10,18 +10,18 @@ pub enum Tier {
 
 pub fn tier_options(tier: Tier) -> Options {
     match tier {
-        Tier::T0 => Options::default(),
+        Tier::T0 => uriel_core::Options::new(uriel_core::MemoryBudget::mib(80)),
         Tier::T1 => Options {
             hot_entries: 1,
             admission_gate: false,
-            ..Options::default()
+            ..uriel_core::Options::new(uriel_core::MemoryBudget::mib(80))
         },
         Tier::T2 => Options {
             hot_entries: 0,
             hot_bytes: 0,
             warm_bytes: 0,
             admission_gate: false,
-            ..Options::default()
+            ..uriel_core::Options::new(uriel_core::MemoryBudget::mib(80))
         },
     }
 }
@@ -32,7 +32,7 @@ pub fn zipf_options(placement: Placement) -> Options {
         hot_entries: 256,
         hot_bytes: 256 * 1024,
         warm_bytes: 512 * 1024,
-        ..Options::default()
+        ..uriel_core::Options::new(uriel_core::MemoryBudget::mib(80))
     }
 }
 

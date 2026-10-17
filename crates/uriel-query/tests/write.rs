@@ -7,7 +7,7 @@ use uriel_query::{AccessMode, Engine, QueryError};
 
 #[test]
 fn create_reports_stats() {
-    let e = Engine::open_in_memory().unwrap();
+    let e = Engine::open_in_memory(uriel_core::MemoryBudget::mib(80)).unwrap();
     let r = write(&e, "CREATE (n:Person:Admin {name:'X', age:1})");
     assert_eq!(r.stats.nodes_created, 1);
     assert_eq!(r.stats.labels_added, 2);
@@ -23,7 +23,7 @@ fn create_reports_stats() {
 
 #[test]
 fn create_returns_values_in_write_mode() {
-    let e = Engine::open_in_memory().unwrap();
+    let e = Engine::open_in_memory(uriel_core::MemoryBudget::mib(80)).unwrap();
     let r = write(&e, "CREATE (n:T {x:1}) RETURN n.x");
     assert_eq!(render(&r), vec!["[1]"]);
     let r = write(
@@ -46,7 +46,7 @@ fn create_returns_values_in_write_mode() {
 
 #[test]
 fn merge_is_idempotent() {
-    let e = Engine::open_in_memory().unwrap();
+    let e = Engine::open_in_memory(uriel_core::MemoryBudget::mib(80)).unwrap();
     let q = "MERGE (c:City {name:'Rome'}) ON CREATE SET c.created = true ON MATCH SET c.seen = true RETURN c.created, c.seen";
     let r1 = write(&e, q);
     assert_eq!(render(&r1), vec!["[true,null]"]);
@@ -527,10 +527,10 @@ fn persistent_open_roundtrip() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("g.seal");
     {
-        let e = Engine::open(&path).unwrap();
+        let e = Engine::open(&path, uriel_core::MemoryBudget::mib(80)).unwrap();
         write(&e, "CREATE (:Keep {v: 1})");
     }
-    let e = Engine::open(&path).unwrap();
+    let e = Engine::open(&path, uriel_core::MemoryBudget::mib(80)).unwrap();
     check(&e, "MATCH (k:Keep) RETURN k.v", &["[1]"]);
     drop(e);
     let _ = std::fs::remove_dir_all(&dir);

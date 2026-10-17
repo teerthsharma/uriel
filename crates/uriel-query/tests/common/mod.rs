@@ -31,7 +31,7 @@ pub fn no_params() -> BTreeMap<String, Value> {
 }
 
 pub fn fixture() -> Engine {
-    let e = Engine::open_in_memory().unwrap();
+    let e = Engine::open_in_memory(uriel_core::MemoryBudget::mib(80)).unwrap();
     e.execute(FIXTURE, &no_params(), AccessMode::Write).unwrap();
     e
 }

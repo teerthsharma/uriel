@@ -941,6 +941,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "enable-ansi-support",
+ "serde_json",
  "sysinfo 0.33.1",
  "tempfile",
  "uriel-core",
@@ -1007,6 +1008,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "uriel-core",
@@ -1031,6 +1033,7 @@ version = "0.1.0"
 dependencies = [
  "regex",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "uriel-algo",

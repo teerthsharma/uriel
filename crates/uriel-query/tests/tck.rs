@@ -516,7 +516,7 @@ const CASES: &[Case] = &[
 fn tck_table() {
     let mut failures: Vec<String> = Vec::new();
     for (i, (setup, mode, query, want)) in CASES.iter().enumerate() {
-        let e = Engine::open_in_memory().unwrap();
+        let e = Engine::open_in_memory(uriel_core::MemoryBudget::mib(80)).unwrap();
         if !setup.is_empty() {
             write(&e, setup);
         }

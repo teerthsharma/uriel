@@ -10,6 +10,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use redb::backends::{FileBackend, InMemoryBackend};
 use redb::{Builder, Database, ReadableDatabase, ReadableTable, StorageBackend};
 
+use crate::budget::MemoryBudget;
 use crate::catalog::{ConstraintDef, ConstraintKind, IndexDef, Schema};
 use crate::checksum::crc32c;
 use crate::error::{Error, Result};
@@ -27,11 +28,10 @@ pub(crate) const FORMAT_VERSION: u64 = 3;
 pub(crate) const SUMLESS_FORMAT_VERSION: u64 = 2;
 pub(crate) const LEGACY_FORMAT_VERSION: u64 = 1;
 
-/// Tuning knobs for [`Graph::open_with`].
 #[derive(Debug, Clone)]
 pub struct Options {
-    /// Size of `redb`'s page cache in bytes. `redb` itself defaults to 1 GiB; seal defaults
-    /// to 64 MiB to keep resident memory small.
+    pub budget: MemoryBudget,
+    pub read_only: bool,
     pub cache_bytes: usize,
     pub hot_entries: usize,
     pub hot_bytes: usize,
@@ -46,13 +46,15 @@ pub struct Options {
     pub record_events: bool,
 }
 
-impl Default for Options {
-    fn default() -> Self {
+impl Options {
+    pub fn new(budget: MemoryBudget) -> Options {
         Options {
-            cache_bytes: 64 * 1024 * 1024,
-            hot_entries: 4096,
-            hot_bytes: 8 * 1024 * 1024,
-            warm_bytes: 8 * 1024 * 1024,
+            budget,
+            read_only: false,
+            cache_bytes: budget.redb_cache(),
+            hot_entries: budget.hot_entries(),
+            hot_bytes: budget.hot(),
+            warm_bytes: budget.warm(),
             cold_threshold_bytes: 256,
             compress_cold: true,
             admission_gate: true,
@@ -169,11 +171,25 @@ pub(crate) struct Inner {
     degrade: Option<Reopen>,
     modes: Mutex<ModeState>,
     pub(crate) tier: TierState,
+    budget: MemoryBudget,
+    read_only: bool,
     epoch: AtomicU64,
     writer_busy: Mutex<bool>,
     writer_cv: Condvar,
     subs: RwLock<Vec<(SubscriptionId, Callback)>>,
     next_sub: AtomicU64,
+}
+
+fn open_overlay(path: &Path, cache: usize) -> Result<Database> {
+    guard(|| {
+        let file = File::open(path).map_err(|e| Error::from(redb::StorageError::Io(e)))?;
+        let base = FileBackend::new(file)?;
+        let overlay = Overlay::new(base).map_err(|e| Error::from(redb::StorageError::Io(e)))?;
+        Builder::new()
+            .set_cache_size(cache)
+            .create_with_backend(overlay)
+            .map_err(Error::from)
+    })
 }
 
 fn guard<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -398,10 +414,8 @@ impl std::fmt::Debug for Graph {
 }
 
 impl Graph {
-    /// Opens (creating if absent) the single-file database at `path` with default
-    /// [`Options`].
-    pub fn open(path: impl AsRef<Path>) -> Result<Graph> {
-        Graph::open_with(path, &Options::default())
+    pub fn open(path: impl AsRef<Path>, budget: MemoryBudget) -> Result<Graph> {
+        Graph::open_with(path, &Options::new(budget))
     }
 
     /// Opens (creating if absent) the database at `path`.
@@ -409,29 +423,32 @@ impl Graph {
     /// Fails with [`Error::Storage`] if the file is already open in this or another
     /// process, and with [`Error::UnsupportedFormat`] if it was written by an incompatible
     /// version.
+    pub fn open_read_only(path: impl AsRef<Path>, budget: MemoryBudget) -> Result<Graph> {
+        let options = Options {
+            read_only: true,
+            ..Options::new(budget)
+        };
+        Graph::open_with(path, &options)
+    }
+
     pub fn open_with(path: impl AsRef<Path>, options: &Options) -> Result<Graph> {
         let path: PathBuf = path.as_ref().to_path_buf();
         let cache = options.cache_bytes;
         let degrade_path = path.clone();
-        let reopen: Reopen = Box::new(move || {
-            guard(|| {
-                Builder::new()
-                    .set_cache_size(cache)
-                    .create(&path)
-                    .map_err(Error::from)
+        let reopen: Reopen = if options.read_only {
+            let ro_path = path.clone();
+            Box::new(move || open_overlay(&ro_path, cache))
+        } else {
+            Box::new(move || {
+                guard(|| {
+                    Builder::new()
+                        .set_cache_size(cache)
+                        .create(&path)
+                        .map_err(Error::from)
+                })
             })
-        });
-        let degrade: Reopen = Box::new(move || {
-            guard(|| {
-                let file = File::open(&degrade_path).map_err(|e| Error::from(redb::StorageError::Io(e)))?;
-                let base = FileBackend::new(file)?;
-                let overlay = Overlay::new(base).map_err(|e| Error::from(redb::StorageError::Io(e)))?;
-                Builder::new()
-                    .set_cache_size(cache)
-                    .create_with_backend(overlay)
-                    .map_err(Error::from)
-            })
-        });
+        };
+        let degrade: Reopen = Box::new(move || open_overlay(&degrade_path, cache));
         let db = reopen()?;
         Graph::init(db, options, Some(reopen), Some(degrade))
     }
@@ -466,11 +483,12 @@ impl Graph {
     }
 
     /// Opens a fresh graph that lives only in memory. Everything is lost on drop.
-    pub fn open_in_memory() -> Result<Graph> {
+    pub fn open_in_memory(budget: MemoryBudget) -> Result<Graph> {
+        let options = Options::new(budget);
         let db = Builder::new()
-            .set_cache_size(8 * 1024 * 1024)
+            .set_cache_size(options.cache_bytes)
             .create_with_backend(InMemoryBackend::new())?;
-        Graph::init(db, &Options::default(), None, None)
+        Graph::init(db, &options, None, None)
     }
 
     fn init(
@@ -538,11 +556,17 @@ impl Graph {
                 reopen,
                 degrade,
                 modes: Mutex::new(ModeState {
-                    mode: Mode::Full,
+                    mode: if options.read_only {
+                        Mode::ReadOnly
+                    } else {
+                        Mode::Full
+                    },
                     corrupt: false,
                     log: Vec::new(),
                 }),
                 tier: TierState::new(options, epoch),
+                budget: options.budget,
+                read_only: options.read_only,
                 epoch: AtomicU64::new(epoch),
                 writer_busy: Mutex::new(false),
                 writer_cv: Condvar::new(),
@@ -563,6 +587,14 @@ impl Graph {
     #[cfg(test)]
     pub(crate) fn db(&self) -> Arc<Database> {
         self.inner.database().expect("database")
+    }
+
+    pub fn budget(&self) -> MemoryBudget {
+        self.inner.budget
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.inner.read_only
     }
 
     pub fn placement_log(&self) -> Vec<uriel_place::Event> {
@@ -602,7 +634,7 @@ impl Graph {
     ///
     /// Dropping the returned [`WriteTx`] without [`WriteTx::commit`] rolls everything back.
     pub fn begin_write(&self) -> Result<WriteTx> {
-        if self.inner.mode() != Mode::Full {
+        if self.inner.read_only || self.inner.mode() != Mode::Full {
             return Err(Error::ReadOnly);
         }
         let gate = self.inner.acquire_writer();
@@ -760,6 +792,9 @@ impl Graph {
     }
 
     pub fn repair_from(&self, replica: &Graph) -> Result<ScrubReport> {
+        if self.inner.read_only {
+            return Err(Error::ReadOnly);
+        }
         let before = self.scrub()?;
         if before.corrupt.is_empty() {
             return Ok(before);
@@ -808,7 +843,7 @@ impl Graph {
 
     pub fn try_recover(&self) -> Result<Mode> {
         let mode = self.inner.mode();
-        if mode == Mode::Full {
+        if mode == Mode::Full || self.inner.read_only {
             return Ok(mode);
         }
         let reopened = match self.inner.refresh_db(false) {

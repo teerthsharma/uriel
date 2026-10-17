@@ -8,7 +8,7 @@ fn options() -> Options {
         hot_bytes: 1 << 20,
         warm_bytes: 1 << 20,
         admission_gate: false,
-        ..Options::default()
+        ..Options::new(crate::MemoryBudget::mib(80))
     }
 }
 

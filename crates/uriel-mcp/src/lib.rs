@@ -34,13 +34,23 @@ fn persist_dir(cfg: &Config) -> Option<std::path::PathBuf> {
 
 pub fn build_server(cfg: &Config) -> Result<Server, String> {
     let engine = if cfg.in_memory {
-        Engine::open_in_memory()
+        Engine::open_in_memory(cfg.memory)
+    } else if cfg.read_only {
+        if cfg.db.is_file() {
+            Engine::open_read_only(&cfg.db, cfg.memory)
+        } else {
+            eprintln!(
+                "uriel-mcp: {} does not exist; serving an empty read-only graph",
+                cfg.db.display()
+            );
+            Engine::open_in_memory(cfg.memory)
+        }
     } else {
         if let Some(dir) = cfg.db.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         }
-        Engine::open(&cfg.db)
+        Engine::open(&cfg.db, cfg.memory)
     }
     .map_err(|e| format!("cannot open database: {e}"))?;
     let ctx = Context {
@@ -48,7 +58,7 @@ pub fn build_server(cfg: &Config) -> Result<Server, String> {
         read_only: cfg.read_only,
         services: Services::from_config(cfg)?,
         format: cfg.format,
-        session: session::Session::new(),
+        session: session::Session::for_budget(cfg.memory),
         placement: placement::PlaceState::new(cfg.placement, persist_dir(cfg)),
     };
     if !cfg.read_only {

@@ -65,7 +65,7 @@ fn opts_every(
         hot_bytes,
         warm_bytes,
         cold_threshold_bytes: 64,
-        ..Options::default()
+        ..Options::new(crate::MemoryBudget::mib(80))
     }
 }
 
@@ -760,7 +760,7 @@ fn measure_disk_bytes_and_codec_ratios() {
         let (d, path) = tmp_graph_path();
         let o = Options {
             compress_cold: compress,
-            ..Options::default()
+            ..Options::new(crate::MemoryBudget::mib(80))
         };
         let t0 = std::time::Instant::now();
         let g = Graph::open_with(&path, &o).unwrap();
@@ -866,7 +866,7 @@ fn measure_hot_set_hit_rate_with_and_without_the_gate() {
     let docs = windows(&corpus, N, 1024);
     let (_d, path) = tmp_graph_path();
     {
-        let g = Graph::open_with(&path, &Options::default()).unwrap();
+        let g = Graph::open_with(&path, &Options::new(crate::MemoryBudget::mib(80))).unwrap();
         for chunk in docs.chunks(2000).enumerate() {
             let mut tx = g.begin_write().unwrap();
             for (j, t) in chunk.1.iter().enumerate() {
@@ -903,7 +903,7 @@ fn measure_hot_set_hit_rate_with_and_without_the_gate() {
                     hot_bytes: 1 << 30,
                     warm_bytes: 0,
                     admission_gate: gate,
-                    ..Options::default()
+                    ..Options::new(crate::MemoryBudget::mib(80))
                 },
             )
             .unwrap();
@@ -946,7 +946,7 @@ fn measure_read_latency_per_tier() {
     let docs = windows(&corpus, N, 1024);
     let (_d, path) = tmp_graph_path();
     {
-        let g = Graph::open_with(&path, &Options::default()).unwrap();
+        let g = Graph::open_with(&path, &Options::new(crate::MemoryBudget::mib(80))).unwrap();
         for chunk in docs.chunks(2000).enumerate() {
             let mut tx = g.begin_write().unwrap();
             for (j, t) in chunk.1.iter().enumerate() {
@@ -1002,7 +1002,7 @@ fn measure_read_latency_per_tier() {
     let base = Options {
         hot_bytes: 1 << 30,
         warm_bytes: 1 << 30,
-        ..Options::default()
+        ..Options::new(crate::MemoryBudget::mib(80))
     };
     println!("{SET} distinct 1 KiB-text nodes, {READS} random reads per row (1,000 batches of 1,000), release build");
     {

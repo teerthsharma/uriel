@@ -247,6 +247,7 @@ pub fn fixture(sock_name: &str) -> (tempfile::TempDir, HostConfig) {
         db_path: dir.path().join("host.redb"),
         root,
         hot_cap_bytes: 1 << 20,
+        memory: uriel_core::MemoryBudget::mib(80),
         sock_name: sock_name.to_owned(),
     };
     (dir, config)

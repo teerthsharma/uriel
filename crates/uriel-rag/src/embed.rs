@@ -70,8 +70,49 @@ impl Embedder for HashEmbedder {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+const Q_LEVELS: f32 = 127.0;
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QVec {
+    scale: f32,
+    q: Box<[i8]>,
+}
+
+impl QVec {
+    pub(crate) fn from_f32(v: &[f32]) -> QVec {
+        let max = v.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        if max == 0.0 || v.iter().any(|x| !x.is_finite()) {
+            return QVec {
+                scale: 0.0,
+                q: vec![0i8; v.len()].into_boxed_slice(),
+            };
+        }
+        let q = v
+            .iter()
+            .map(|x| (x / max * Q_LEVELS).round().clamp(-Q_LEVELS, Q_LEVELS) as i8)
+            .collect();
+        QVec {
+            scale: max / Q_LEVELS,
+            q,
+        }
+    }
+
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        (self.q.len() + std::mem::size_of::<f32>()) as u64
+    }
+
+    pub(crate) fn dot(&self, query: &[f32]) -> f32 {
+        if self.q.len() != query.len() {
+            return 0.0;
+        }
+        let sum: f32 = self.q.iter().zip(query).map(|(a, b)| f32::from(*a) * b).sum();
+        sum * self.scale
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +128,41 @@ mod tests {
         let norm: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-5);
         assert!(e.embed("").iter().all(|x| *x == 0.0));
+    }
+
+    #[test]
+    fn a_quantised_vector_costs_one_byte_per_dimension_plus_one_scale() {
+        let v = HashEmbedder::new(256).embed("rolling checksum over a byte buffer");
+        let q = QVec::from_f32(&v);
+        assert_eq!(q.q.len(), 256);
+        assert_eq!(q.resident_bytes(), 256 + 4);
+        assert!(std::mem::size_of_val(&*q.q) == 256);
+    }
+
+    #[test]
+    fn quantised_dot_tracks_the_f32_dot_within_one_percent_of_the_norm() {
+        let e = HashEmbedder::new(256);
+        let q = e.embed("compute checksum of bytes");
+        for text in [
+            "computing the checksum over a byte buffer",
+            "prune the roses in late winter",
+            "compute checksum of bytes",
+            "pub fn read_page(state: &mut State) -> usize",
+        ] {
+            let v = e.embed(text);
+            let exact = dot(&q, &v);
+            let approx = QVec::from_f32(&v).dot(&q);
+            assert!((exact - approx).abs() < 0.01, "{text}: {exact} vs {approx}");
+        }
+    }
+
+    #[test]
+    fn quantising_zero_and_non_finite_vectors_gives_a_zero_dot() {
+        let zero = QVec::from_f32(&[0.0; 8]);
+        assert_eq!(zero.dot(&[1.0; 8]), 0.0);
+        let bad = QVec::from_f32(&[f32::NAN, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(bad.dot(&[1.0; 8]), 0.0);
+        assert_eq!(QVec::from_f32(&[1.0; 8]).dot(&[1.0; 4]), 0.0, "dimension mismatch scores zero");
     }
 
     #[test]

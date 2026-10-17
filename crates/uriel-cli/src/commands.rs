@@ -44,7 +44,7 @@ pub fn index<W: Write>(out: &mut W, path: &Path, db: &Path) -> Result<(), String
         return Err(format!("{} is not a directory", path.display()));
     }
     ensure_parent(db)?;
-    let graph = uriel_core::Graph::open(db)
+    let graph = uriel_core::Graph::open(db, uriel_core::MemoryBudget::mib(uriel_mcp::config::DEFAULT_MEMORY_MIB))
         .map_err(|e| format!("cannot open database {}: {e}", db.display()))?;
     let rag = uriel_rag::Rag::open(graph, uriel_rag::RagConfig::default()).map_err(|e| e.to_string())?;
     let report = rag

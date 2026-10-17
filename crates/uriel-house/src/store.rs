@@ -121,7 +121,7 @@ impl Store {
             let has = existing
                 .iter()
                 .any(|c| c.kind == ConstraintKind::Unique && c.label == label && c.key == key);
-            if !has {
+            if !has && !graph.is_read_only() {
                 graph.create_unique_constraint(label, key)?;
             }
         }

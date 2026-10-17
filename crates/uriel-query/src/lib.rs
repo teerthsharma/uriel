@@ -8,7 +8,7 @@
 //! use std::collections::BTreeMap;
 //! use uriel_query::{AccessMode, Engine};
 //!
-//! let engine = Engine::open_in_memory().unwrap();
+//! let engine = Engine::open_in_memory(uriel_core::MemoryBudget::mib(64)).unwrap();
 //! let none = BTreeMap::new();
 //! engine
 //!     .execute("CREATE (:Person {name: 'Ada'})-[:KNOWS]->(:Person {name: 'Bob'})", &none, AccessMode::Write)
@@ -72,7 +72,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use uriel_cache::{CacheMeta, DistCache, LocalCache};
-use uriel_core::{CommitInfo, Graph, Value};
+use uriel_core::{CommitInfo, Graph, MemoryBudget, Value};
 use uriel_cypher::{Query, QueryBody, QueryMode};
 
 pub use error::QueryError;
@@ -164,22 +164,27 @@ pub struct Engine {
     registry: schema::Registry,
 }
 
-const CACHE_BYTES: usize = 32 * 1024 * 1024;
-
 impl Engine {
     /// Opens (creating if absent) the database file at `path`.
-    pub fn open(path: impl AsRef<Path>) -> Result<Engine, QueryError> {
-        Ok(Engine::from_graph(Graph::open(path)?))
+    pub fn open(path: impl AsRef<Path>, budget: MemoryBudget) -> Result<Engine, QueryError> {
+        Ok(Engine::from_graph(Graph::open(path, budget)?))
+    }
+
+    pub fn open_read_only(
+        path: impl AsRef<Path>,
+        budget: MemoryBudget,
+    ) -> Result<Engine, QueryError> {
+        Ok(Engine::from_graph(Graph::open_read_only(path, budget)?))
     }
 
     /// Opens a database that lives only in memory.
-    pub fn open_in_memory() -> Result<Engine, QueryError> {
-        Ok(Engine::from_graph(Graph::open_in_memory()?))
+    pub fn open_in_memory(budget: MemoryBudget) -> Result<Engine, QueryError> {
+        Ok(Engine::from_graph(Graph::open_in_memory(budget)?))
     }
 
     fn from_graph(graph: Graph) -> Engine {
         let shared = Arc::new(Shared {
-            cache: Arc::new(LocalCache::new(CACHE_BYTES)),
+            cache: Arc::new(LocalCache::new(graph.budget().query_cache())),
             pending: Mutex::new(Vec::new()),
             dist_on: AtomicBool::new(false),
         });
@@ -215,6 +220,10 @@ impl Engine {
             self.shared.dist_on.store(true, Ordering::SeqCst);
         }
         self
+    }
+
+    pub fn cache_capacity(&self) -> usize {
+        self.shared.cache.max_bytes()
     }
 
     /// The underlying storage handle.

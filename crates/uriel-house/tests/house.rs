@@ -1101,7 +1101,7 @@ fn recording_a_run_for_an_unknown_test_is_an_error() {
 
 fn open_at(path: &std::path::Path, root: &std::path::Path) -> (House, Arc<VecSink>) {
     let sink = Arc::new(VecSink::new());
-    let graph = Graph::open(path).expect("graph");
+    let graph = Graph::open(path, uriel_core::MemoryBudget::mib(80)).expect("graph");
     let house = House::open(
         graph,
         HouseConfig::at(root),
@@ -1233,7 +1233,7 @@ fn graph_holds_the_spec_nodes_and_edges() {
             )
             .expect("run");
     }
-    let graph = Graph::open(&db).expect("graph");
+    let graph = Graph::open(&db, uriel_core::MemoryBudget::mib(80)).expect("graph");
     let tx = graph.begin_read().expect("read");
     let labels = tx.labels().expect("labels");
     for l in ["Goal", "Test", "File", "TestRun", "CostObs", "AltGroup"] {

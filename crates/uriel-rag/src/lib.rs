@@ -8,20 +8,22 @@ mod error;
 pub mod eval;
 mod index;
 mod ladder;
+mod scan;
 mod tokenize;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use uriel_core::{Graph, Node, NodeId, Props, Value};
+use uriel_core::{Graph, Node, NodeId, Props, ReadTx, Value};
 use sha2::{Digest, Sha256};
 
 use crate::chunk::{chunk_text, ChunkOptions, Lang, RawChunk};
 use crate::compress::{compress, Corpus};
-use crate::index::{rust_defs, rust_mentions, Entry, Index};
+use crate::embed::QVec;
+use crate::index::{rust_defs, rust_mentions, Entry, Index, HOP_DECAY};
 use crate::ladder::gist;
 use crate::tokenize::token_estimate;
 
@@ -35,6 +37,9 @@ const MAX_HOPS: usize = 2;
 const L1_RATIO: usize = 4;
 const LADDER_L1_HITS: usize = 1;
 const LADDER_L2_HITS: usize = 3;
+const FILE_REC_BYTES: usize = 96;
+const CAP_CHECK_EVERY: usize = 256;
+const GIST_FLUSH_BYTES: usize = 1 << 20;
 
 fn default_level(rank: usize) -> Level {
     if rank < LADDER_L1_HITS {
@@ -179,6 +184,8 @@ pub struct RagStats {
     pub text_bytes: u64,
     pub memory_bytes: u64,
     pub index_bytes: u64,
+    pub vector_bytes: u64,
+    pub spilled: bool,
 }
 
 #[derive(Debug)]
@@ -242,6 +249,25 @@ impl Rungs {
 struct State {
     index: Index,
     files: BTreeMap<String, FileRec>,
+    spilled: bool,
+}
+
+impl State {
+    fn files_bytes(&self) -> u64 {
+        self.files
+            .iter()
+            .map(|(p, r)| (p.len() + r.hash.len() + r.chunks.len() * 8 + FILE_REC_BYTES) as u64)
+            .sum()
+    }
+
+    fn over(&self, cap: u64) -> bool {
+        self.index.resident_bytes() + self.files_bytes() > cap
+    }
+
+    fn spill(&mut self) {
+        self.index = Index::default();
+        self.spilled = true;
+    }
 }
 
 struct PreparedChunk {
@@ -253,7 +279,6 @@ struct PreparedChunk {
     l1: String,
     hash: String,
     vector: Vec<f32>,
-    defs: Vec<String>,
     mentions: Vec<String>,
 }
 
@@ -281,6 +306,7 @@ pub struct Rag {
     embedder: Arc<dyn Embedder>,
     state: RwLock<State>,
     gate: Mutex<()>,
+    index_cap: u64,
 }
 
 impl fmt::Debug for Rag {
@@ -338,6 +364,11 @@ fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> RagError + '_ {
 
 impl Rag {
     pub fn open(graph: Graph, cfg: RagConfig) -> Result<Rag, RagError> {
+        let cap = graph.budget().rag_index() as u64;
+        Rag::open_capped(graph, cfg, cap)
+    }
+
+    fn open_capped(graph: Graph, cfg: RagConfig, index_cap: u64) -> Result<Rag, RagError> {
         if cfg.compression_ratio == 0 {
             return Err(RagError::InvalidOptions(
                 "compression_ratio must be at least 1".into(),
@@ -354,38 +385,43 @@ impl Rag {
                 Arc::new(HashEmbedder::new(cfg.embed_dim))
             }
         };
-        if !graph.begin_read()?.has_index("File", "path")? {
+        if !graph.is_read_only() && !graph.begin_read()?.has_index("File", "path")? {
             graph.create_index("File", "path")?;
         }
-        let (state, backfill) = Self::load(&graph, embedder.as_ref())?;
-        if !backfill.is_empty() {
-            if let Ok(mut tx) = graph.begin_write() {
-                let done = backfill.iter().all(|(id, g)| {
-                    let mut props = Props::new();
-                    props.insert("g3".into(), Value::from(g.as_str()));
-                    tx.set_node_props(*id, props).is_ok()
-                });
-                if done {
-                    let _ = tx.commit();
-                }
-            }
-        }
+        let state = Self::load(&graph, embedder.as_ref(), index_cap)?;
         Ok(Rag {
             graph,
             cfg,
             embedder,
             state: RwLock::new(state),
             gate: Mutex::new(()),
+            index_cap,
         })
     }
 
-    fn load(
-        graph: &Graph,
-        embedder: &dyn Embedder,
-    ) -> Result<(State, Vec<(NodeId, String)>), RagError> {
+    fn flush_gists(graph: &Graph, pending: &mut Vec<(NodeId, String)>) {
+        if pending.is_empty() || graph.is_read_only() {
+            pending.clear();
+            return;
+        }
+        if let Ok(mut tx) = graph.begin_write() {
+            let done = pending.iter().all(|(id, g)| {
+                let mut props = Props::new();
+                props.insert("g3".into(), Value::from(g.as_str()));
+                tx.set_node_props(*id, props).is_ok()
+            });
+            if done {
+                let _ = tx.commit();
+            }
+        }
+        pending.clear();
+    }
+
+    fn load(graph: &Graph, embedder: &dyn Embedder, cap: u64) -> Result<State, RagError> {
         let read = graph.begin_read()?;
         let mut state = State::default();
-        let mut backfill: Vec<(NodeId, String)> = Vec::new();
+        let mut pending: Vec<(NodeId, String)> = Vec::new();
+        let mut pending_bytes = 0usize;
         for node in read.nodes_by_label("File")? {
             let node = node?;
             let path = prop_str(&node, "path")?.to_string();
@@ -397,74 +433,61 @@ impl Rag {
             };
             state.files.insert(path, rec);
         }
-        let mut loaded: Vec<(Node, Option<u64>)> = Vec::new();
-        let mut prev_of: HashMap<u64, u64> = HashMap::new();
+        let mut seen = 0usize;
         for node in read.nodes_by_label("Chunk")? {
             let node = node?;
-            let next = read
-                .out_edges(node.id, Some("NEXT"))?
-                .next()
-                .transpose()?
-                .map(|e| e.other.0);
-            if let Some(n) = next {
-                prev_of.insert(n, node.id.0);
-            }
-            loaded.push((node, next));
-        }
-        for (node, next) in loaded {
-            let file = prop_str(&node, "file")?.to_string();
-            let mem = prop_str(&node, "mem")?.to_string();
+            let file = prop_str(&node, "file")?;
+            let mem = prop_str(&node, "mem")?;
             let text = prop_str(&node, "text")?;
-            let lang = Lang::from_path(&file);
-            let vector = match node.props.get("vec") {
-                Some(Value::Vector(v)) if v.len() == embedder.dim() => v.clone(),
-                _ => embedder.embed(&mem),
-            };
-            let utility = match node.props.get("utility") {
-                Some(Value::Float(u)) => (*u as f32).clamp(-1.0, 1.0),
-                _ => 0.0,
-            };
-            let rec = state.files.get_mut(&file).ok_or_else(|| {
+            let lang = Lang::from_path(file);
+            let rec = state.files.get_mut(file).ok_or_else(|| {
                 corrupt(format!(
                     "chunk {} belongs to unknown file `{file}`",
                     node.id
                 ))
             })?;
             rec.chunks.push(node.id.0);
-            let gist_text = match node.props.get("g3") {
-                Some(Value::String(g)) => g.clone(),
-                _ => {
-                    let g = gist(text, lang);
-                    backfill.push((node.id, g.clone()));
-                    g
+            prop_line(&node, "start")?;
+            prop_line(&node, "end")?;
+            if !matches!(node.props.get("g3"), Some(Value::String(_))) {
+                let g = gist(text, lang);
+                pending_bytes += g.len();
+                pending.push((node.id, g));
+                if pending_bytes >= GIST_FLUSH_BYTES {
+                    Self::flush_gists(graph, &mut pending);
+                    pending_bytes = 0;
                 }
-            };
-            state.index.insert(Entry {
-                id: node.id.0,
-                file,
-                start: prop_line(&node, "start")?,
-                end: prop_line(&node, "end")?,
-                memory: mem,
-                gist: gist_text,
-                vector,
-                utility,
-                lang,
-                defs: if lang == Lang::Rust {
-                    rust_defs(text)
-                } else {
-                    Vec::new()
+            }
+            seen += 1;
+            if state.spilled {
+                continue;
+            }
+            let vector = scan::vector_of(&node, mem, embedder);
+            state.index.insert(
+                Entry {
+                    id: node.id.0,
+                    vector: QVec::from_f32(&vector),
+                    utility: scan::utility_of(&node),
+                    lang,
+                    text_bytes: u32::try_from(text.len()).unwrap_or(u32::MAX),
+                    mem_len: u32::try_from(mem.len()).unwrap_or(u32::MAX),
                 },
-                mentions: if lang == Lang::Rust {
+                mem,
+                if lang == Lang::Rust {
                     rust_mentions(text)
                 } else {
                     Vec::new()
                 },
-                prev: prev_of.get(&node.id.0).copied(),
-                next,
-                text_bytes: text.len(),
-            });
+            );
+            if seen.is_multiple_of(CAP_CHECK_EVERY) && state.over(cap) {
+                state.spill();
+            }
         }
-        Ok((state, backfill))
+        if !state.spilled && state.over(cap) {
+            state.spill();
+        }
+        Self::flush_gists(graph, &mut pending);
+        Ok(state)
     }
 
     fn read_state(&self) -> RwLockReadGuard<'_, State> {
@@ -594,11 +617,6 @@ impl Rag {
                     start: c.start_line,
                     end: c.end_line,
                     hash: sha_hex(c.text.as_bytes()),
-                    defs: if lang == Lang::Rust {
-                        rust_defs(&c.text)
-                    } else {
-                        Vec::new()
-                    },
                     mentions: if lang == Lang::Rust {
                         rust_mentions(&c.text)
                     } else {
@@ -717,23 +735,21 @@ impl Rag {
             report.files_indexed += 1;
             report.chunks_added += a.new_chunks.len();
             let ids: Vec<u64> = a.new_chunks.iter().map(|(id, _)| *id).collect();
-            for (i, (id, c)) in a.new_chunks.into_iter().enumerate() {
-                state.index.insert(Entry {
-                    id,
-                    file: a.path.clone(),
-                    start: c.start,
-                    end: c.end,
-                    text_bytes: c.text.len(),
-                    memory: c.mem,
-                    gist: c.gist,
-                    vector: c.vector,
-                    utility: 0.0,
-                    lang: a.lang,
-                    defs: c.defs,
-                    mentions: c.mentions,
-                    prev: i.checked_sub(1).map(|j| ids[j]),
-                    next: ids.get(i + 1).copied(),
-                });
+            if !state.spilled {
+                for (id, c) in a.new_chunks {
+                    state.index.insert(
+                        Entry {
+                            id,
+                            vector: QVec::from_f32(&c.vector),
+                            utility: 0.0,
+                            lang: a.lang,
+                            text_bytes: u32::try_from(c.text.len()).unwrap_or(u32::MAX),
+                            mem_len: u32::try_from(c.mem.len()).unwrap_or(u32::MAX),
+                        },
+                        &c.mem,
+                        c.mentions,
+                    );
+                }
             }
             state.files.insert(
                 a.path,
@@ -745,7 +761,74 @@ impl Rag {
                 },
             );
         }
+        if !state.spilled && state.over(self.index_cap) {
+            state.spill();
+        }
         Ok(())
+    }
+
+    fn hit(read: &ReadTx, id: u64, score: f32, via: HitVia) -> Result<Option<Hit>, RagError> {
+        let Some(node) = read
+            .get_node(NodeId(id))?
+            .filter(|n| n.labels.contains("Chunk"))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(Hit {
+            chunk_id: id,
+            file: prop_str(&node, "file")?.to_string(),
+            start_line: prop_line(&node, "start")?,
+            end_line: prop_line(&node, "end")?,
+            memory: prop_str(&node, "mem")?.to_string(),
+            score,
+            via,
+        }))
+    }
+
+    fn adjacent(read: &ReadTx, id: u64) -> Result<Vec<u64>, RagError> {
+        let mut out = Vec::with_capacity(2);
+        if let Some(e) = read.in_edges(NodeId(id), Some("NEXT"))?.next().transpose()? {
+            out.push(e.other.0);
+        }
+        if let Some(e) = read.out_edges(NodeId(id), Some("NEXT"))?.next().transpose()? {
+            out.push(e.other.0);
+        }
+        Ok(out)
+    }
+
+    fn expand_ids(
+        state: &State,
+        read: &ReadTx,
+        direct: &[(u64, f32)],
+        hops: usize,
+    ) -> Result<Vec<(u64, f32)>, RagError> {
+        let mut seen: HashSet<u64> = direct.iter().map(|(id, _)| *id).collect();
+        let mut frontier: Vec<(u64, f32)> = direct.to_vec();
+        let mut out = Vec::new();
+        for _ in 0..hops {
+            let mut next = Vec::new();
+            for &(id, score) in &frontier {
+                let decayed = score * HOP_DECAY;
+                let mut cands: Vec<u64> = Self::adjacent(read, id)?;
+                if !state.spilled {
+                    cands.retain(|c| state.index.contains(*c));
+                    if state.index.get(id).is_some_and(|e| e.lang == Lang::Rust) {
+                        if let Some(node) = read.get_node(NodeId(id))? {
+                            let defs = rust_defs(prop_str(&node, "text")?);
+                            cands.extend(state.index.symbol_neighbours(id, &defs));
+                        }
+                    }
+                }
+                for c in cands {
+                    if seen.insert(c) {
+                        next.push((c, decayed));
+                    }
+                }
+            }
+            out.extend(next.iter().copied());
+            frontier = next;
+        }
+        Ok(out)
     }
 
     pub fn search(&self, query: &str, opts: &SearchOptions) -> Result<Vec<Hit>, RagError> {
@@ -757,20 +840,29 @@ impl Rag {
         }
         let qvec = self.embedder.embed(query);
         let state = self.read_state();
-        let direct = state.index.direct(query, &qvec, opts.k, opts.use_utility);
-        let mut hits: Vec<Hit> = direct
-            .iter()
-            .filter_map(|(slot, score)| state.index.hit(*slot, *score, HitVia::Direct))
-            .collect();
+        let read = self.graph.begin_read()?;
+        let direct = if state.spilled {
+            scan::direct(
+                &read,
+                self.embedder.as_ref(),
+                query,
+                &qvec,
+                opts.k,
+                opts.use_utility,
+            )?
+        } else {
+            state.index.direct(query, &qvec, opts.k, opts.use_utility)
+        };
+        let mut hits: Vec<Hit> = Vec::with_capacity(direct.len());
+        for (id, score) in &direct {
+            hits.extend(Self::hit(&read, *id, *score, HitVia::Direct)?);
+        }
         if opts.expand_hops > 0 {
-            let mut extra: Vec<(u32, f32)> = state.index.expand(&direct, opts.expand_hops);
-            extra.sort_by(|a, b| {
-                b.1.total_cmp(&a.1)
-                    .then(state.index.entry_id(a.0).cmp(&state.index.entry_id(b.0)))
-            });
-            hits.extend(extra.iter().filter_map(|(slot, score)| {
-                state.index.hit(*slot, *score, HitVia::GraphNeighbour)
-            }));
+            let mut extra = Self::expand_ids(&state, &read, &direct, opts.expand_hops)?;
+            extra.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            for (id, score) in &extra {
+                hits.extend(Self::hit(&read, *id, *score, HitVia::GraphNeighbour)?);
+            }
         }
         Ok(hits)
     }
@@ -845,6 +937,9 @@ impl Rag {
         let text = prop_str(node, "text")?;
         let lang = Lang::from_path(prop_str(node, "file")?);
         let derived = derive(text, lang);
+        if self.graph.is_read_only() {
+            return Ok(derived);
+        }
         let _gate = lock(&self.gate);
         if let Ok(mut tx) = self.graph.begin_write() {
             let mut props = Props::new();
@@ -864,6 +959,17 @@ impl Rag {
         }
     }
 
+    fn gist_of(read: &ReadTx, id: u64) -> Result<String, RagError> {
+        let Some(node) = read.get_node(NodeId(id))? else {
+            return Ok(String::new());
+        };
+        if let Some(Value::String(g)) = node.props.get("g3") {
+            return Ok(g.clone());
+        }
+        let lang = Lang::from_path(prop_str(&node, "file")?);
+        Ok(gist(prop_str(&node, "text")?, lang))
+    }
+
     pub fn pack_ladder(&self, query: &str, opts: &SearchOptions) -> Result<LadderPack, RagError> {
         let hits = self.search(query, opts)?;
         self.ladder_pack(hits, opts.budget_tokens)
@@ -876,10 +982,10 @@ impl Rag {
     ) -> Result<LadderPack, RagError> {
         let total = hits.len();
         let gists: Vec<String> = {
-            let state = self.read_state();
+            let read = self.graph.begin_read()?;
             hits.iter()
-                .map(|h| state.index.gist_of(h.chunk_id).unwrap_or_default().to_string())
-                .collect()
+                .map(|h| Self::gist_of(&read, h.chunk_id))
+                .collect::<Result<_, _>>()?
         };
         let rungs: Vec<Rungs> = hits
             .iter()
@@ -955,10 +1061,15 @@ impl Rag {
         let mut updated: BTreeMap<u64, f32> = BTreeMap::new();
         {
             let state = self.read_state();
+            let read = self.graph.begin_read()?;
             for (ids, target) in [(used, 1.0f32), (unused, -1.0f32)] {
                 for id in ids {
                     let current = match updated.get(id) {
                         Some(u) => *u,
+                        None if state.spilled => match read.get_node(NodeId(*id))? {
+                            Some(n) if n.labels.contains("Chunk") => scan::utility_of(&n),
+                            _ => continue,
+                        },
                         None => match state.index.get(*id) {
                             Some(e) => e.utility,
                             None => continue,
@@ -991,9 +1102,21 @@ impl Rag {
 
     pub fn stats(&self) -> Result<RagStats, RagError> {
         let state = self.read_state();
-        let (text, mem) = state.index.byte_totals();
+        let (chunks, text, mem, index_bytes, vector_bytes) = if state.spilled {
+            let (chunks, text, mem) = scan::totals(&self.graph.begin_read()?)?;
+            (chunks, text, mem, 0, 0)
+        } else {
+            let (text, mem) = state.index.byte_totals();
+            (
+                state.index.len(),
+                text,
+                mem,
+                state.index.resident_bytes(),
+                state.index.vector_bytes(),
+            )
+        };
         Ok(RagStats {
-            chunks: state.index.len(),
+            chunks,
             files: state.files.len(),
             avg_compression_ratio: if mem == 0 {
                 0.0
@@ -1001,8 +1124,10 @@ impl Rag {
                 text as f64 / mem as f64
             },
             text_bytes: text,
-            memory_bytes: state.index.memory_bytes(),
-            index_bytes: state.index.index_bytes(),
+            memory_bytes: mem,
+            index_bytes,
+            vector_bytes,
+            spilled: state.spilled,
         })
     }
 }
@@ -1054,7 +1179,7 @@ mod tests {
     fn index_ids_match_database_after_edit() {
         let dir = tempfile::tempdir().expect("tempdir");
         fs::write(dir.path().join("a.txt"), "alpha beta gamma").expect("write");
-        let graph = Graph::open_in_memory().expect("graph");
+        let graph = Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph");
         let rag = Rag::open(graph.clone(), RagConfig::default()).expect("rag");
         rag.index_dir(dir.path(), &IndexOptions::default())
             .expect("index");
@@ -1070,6 +1195,66 @@ mod tests {
             .map(|n| n.expect("node").id.0)
             .collect();
         assert_eq!(ids, db);
+    }
+
+    fn f32_top(vectors: &[(u64, Vec<f32>)], q: &[f32], n: usize) -> Vec<u64> {
+        let mut scored: Vec<(u64, f32)> = vectors
+            .iter()
+            .map(|(id, v)| (*id, v.iter().zip(q).map(|(a, b)| a * b).sum::<f32>()))
+            .filter(|(_, s)| *s > 0.0)
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        scored.truncate(n);
+        scored.into_iter().map(|(id, _)| id).collect()
+    }
+
+    #[test]
+    fn int8_vector_leg_keeps_the_f32_top_10_on_the_frozen_queries() {
+        let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        let corpus = eval::materialize(&tests.join("frozen_corpus")).expect("materialize");
+        let graph = Graph::open_in_memory(uriel_core::MemoryBudget::mib(512)).expect("graph");
+        let rag = Rag::open(graph.clone(), RagConfig::default()).expect("rag");
+        rag.index_dir(corpus.root(), &IndexOptions::default())
+            .expect("index");
+        let set = eval::parse_queries(
+            &fs::read_to_string(tests.join("eval_queries.json")).expect("queries"),
+        )
+        .expect("parse");
+        let vectors: Vec<(u64, Vec<f32>)> = graph
+            .begin_read()
+            .expect("read")
+            .nodes_by_label("Chunk")
+            .expect("chunks")
+            .map(|n| {
+                let n = n.expect("node");
+                match n.props.get("vec") {
+                    Some(Value::Vector(v)) => (n.id.0, v.clone()),
+                    _ => panic!("chunk {} lacks a vector", n.id),
+                }
+            })
+            .collect();
+        let state = rag.read_state();
+        assert!(!state.spilled);
+        let (mut same_order, mut same_set, mut top1) = (0usize, 0usize, 0usize);
+        for q in &set.queries {
+            let qv = rag.embedder.embed(&q.query);
+            let exact = f32_top(&vectors, &qv, 10);
+            let quant = state.index.vector_ids(&qv, 10);
+            same_order += usize::from(exact == quant);
+            let (mut a, mut b) = (exact.clone(), quant.clone());
+            a.sort_unstable();
+            b.sort_unstable();
+            same_set += usize::from(a == b);
+            top1 += usize::from(exact.first() == quant.first());
+        }
+        println!(
+            "INT8 vs F32 vector leg over {} queries on {} chunks: identical top-10 order {same_order}, identical top-10 set {same_set}, identical top-1 {top1}",
+            set.queries.len(),
+            vectors.len()
+        );
+        assert_eq!(set.queries.len(), 100);
+        assert!(top1 >= 99, "top-1 agreement {top1}/100");
+        assert!(same_set >= 90, "top-10 set agreement {same_set}/100");
     }
 
     #[test]

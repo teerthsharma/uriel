@@ -2,12 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::bm25::Bm25Index;
 use crate::chunk::{rust_item_start, Lang};
-use crate::embed::dot;
+use crate::embed::QVec;
 use crate::tokenize::raw_words;
-use crate::{Hit, HitVia};
 
 const RRF_K: f32 = 60.0;
-const HOP_DECAY: f32 = 0.5;
+pub(crate) const HOP_DECAY: f32 = 0.5;
 const MAX_SYMBOL_NEIGHBOURS: usize = 3;
 pub(crate) const UTILITY_WEIGHT: f32 = 0.25;
 
@@ -72,19 +71,11 @@ pub(crate) fn rust_mentions(text: &str) -> Vec<String> {
 #[derive(Debug, Clone)]
 pub(crate) struct Entry {
     pub id: u64,
-    pub file: String,
-    pub start: u32,
-    pub end: u32,
-    pub memory: String,
-    pub gist: String,
-    pub vector: Vec<f32>,
+    pub vector: QVec,
     pub utility: f32,
     pub lang: Lang,
-    pub defs: Vec<String>,
-    pub mentions: Vec<String>,
-    pub prev: Option<u64>,
-    pub next: Option<u64>,
-    pub text_bytes: usize,
+    pub text_bytes: u32,
+    pub mem_len: u32,
 }
 
 #[derive(Debug, Default)]
@@ -97,11 +88,57 @@ pub(crate) struct Index {
     text_bytes: u64,
     mem_bytes: u64,
     vec_bytes: u64,
+    mention_bytes: u64,
+}
+
+const BY_ID_ENTRY_BYTES: u64 = 40;
+const MENTION_KEY_BYTES: u64 = 56;
+const MENTION_SLOT_BYTES: u64 = 4;
+const SLACK_NUM: u64 = 5;
+const SLACK_DEN: u64 = 4;
+
+pub(crate) fn fuse(
+    bm: &[u64],
+    vecs: &[u64],
+    k: usize,
+    use_utility: bool,
+    utility: impl Fn(u64) -> Option<f32>,
+) -> Vec<(u64, f32)> {
+    let mut fused: HashMap<u64, f32> = HashMap::new();
+    for (rank, id) in bm.iter().enumerate() {
+        *fused.entry(*id).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+    }
+    for (rank, id) in vecs.iter().enumerate() {
+        *fused.entry(*id).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
+    }
+    let mut out: Vec<(u64, f32)> = fused
+        .into_iter()
+        .filter_map(|(id, score)| {
+            let u = utility(id)?;
+            let score = if use_utility {
+                score * (1.0 + UTILITY_WEIGHT * u)
+            } else {
+                score
+            };
+            Some((id, score))
+        })
+        .collect();
+    out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    out.truncate(k);
+    out
+}
+
+pub(crate) fn candidates(k: usize) -> usize {
+    (k * 4).max(50)
 }
 
 impl Index {
     pub(crate) fn len(&self) -> usize {
         self.live
+    }
+
+    pub(crate) fn contains(&self, id: u64) -> bool {
+        self.by_id.contains_key(&id)
     }
 
     pub(crate) fn get(&self, id: u64) -> Option<&Entry> {
@@ -114,21 +151,28 @@ impl Index {
         self.slots.get_mut(slot as usize)?.as_mut()
     }
 
-    pub(crate) fn insert(&mut self, entry: Entry) {
-        let slot = self.bm25.add(&entry.memory);
+    pub(crate) fn insert(&mut self, entry: Entry, memory: &str, mentions: Vec<String>) {
+        let slot = self.bm25.add(memory);
         let idx = slot as usize;
         if self.slots.len() <= idx {
             self.slots.resize_with(idx + 1, || None);
         }
         if entry.lang == Lang::Rust {
-            for w in &entry.mentions {
-                self.mentions.entry(w.clone()).or_default().push(slot);
+            for w in mentions {
+                match self.mentions.get_mut(&w) {
+                    Some(list) => list.push(slot),
+                    None => {
+                        self.mention_bytes += w.len() as u64 + MENTION_KEY_BYTES;
+                        self.mentions.insert(w, vec![slot]);
+                    }
+                }
+                self.mention_bytes += MENTION_SLOT_BYTES;
             }
         }
         self.by_id.insert(entry.id, slot);
-        self.text_bytes += entry.text_bytes as u64;
-        self.mem_bytes += entry.memory.len() as u64;
-        self.vec_bytes += (entry.vector.len() * 4) as u64;
+        self.text_bytes += u64::from(entry.text_bytes);
+        self.mem_bytes += u64::from(entry.mem_len);
+        self.vec_bytes += entry.vector.resident_bytes();
         self.live += 1;
         self.slots[idx] = Some(entry);
     }
@@ -141,19 +185,9 @@ impl Index {
             return false;
         };
         self.bm25.remove(slot);
-        if entry.lang == Lang::Rust {
-            for w in &entry.mentions {
-                if let Some(list) = self.mentions.get_mut(w) {
-                    list.retain(|s| *s != slot);
-                    if list.is_empty() {
-                        self.mentions.remove(w);
-                    }
-                }
-            }
-        }
-        self.text_bytes -= entry.text_bytes as u64;
-        self.mem_bytes -= entry.memory.len() as u64;
-        self.vec_bytes -= (entry.vector.len() * 4) as u64;
+        self.text_bytes -= u64::from(entry.text_bytes);
+        self.mem_bytes -= u64::from(entry.mem_len);
+        self.vec_bytes -= entry.vector.resident_bytes();
         self.live -= 1;
         true
     }
@@ -169,15 +203,21 @@ impl Index {
         (self.text_bytes, self.mem_bytes)
     }
 
-    pub(crate) fn memory_bytes(&self) -> u64 {
-        self.mem_bytes
+    pub(crate) fn vector_bytes(&self) -> u64 {
+        self.vec_bytes
     }
 
-    pub(crate) fn index_bytes(&self) -> u64 {
-        self.bm25.approx_bytes() + self.mem_bytes + self.vec_bytes
+    pub(crate) fn resident_bytes(&self) -> u64 {
+        let slots = (self.slots.len() * std::mem::size_of::<Option<Entry>>()) as u64;
+        let raw = slots
+            + self.vec_bytes
+            + self.by_id.len() as u64 * BY_ID_ENTRY_BYTES
+            + self.bm25.approx_bytes()
+            + self.mention_bytes;
+        raw / SLACK_DEN * SLACK_NUM
     }
 
-    fn entry_at(&self, slot: u32) -> Option<&Entry> {
+    fn live_slot(&self, slot: u32) -> Option<&Entry> {
         self.slots.get(slot as usize)?.as_ref()
     }
 
@@ -187,114 +227,56 @@ impl Index {
         qvec: &[f32],
         k: usize,
         use_utility: bool,
-    ) -> Vec<(u32, f32)> {
+    ) -> Vec<(u64, f32)> {
         if k == 0 || self.live == 0 {
             return Vec::new();
         }
-        let cand = (k * 4).max(50);
-        let bm = self.bm25.search(query, cand);
+        let cand = candidates(k);
+        let bm: Vec<u64> = self
+            .bm25
+            .search(query, cand)
+            .into_iter()
+            .filter_map(|(slot, _)| self.live_slot(slot).map(|e| e.id))
+            .collect();
+        let vecs = self.vector_ids(qvec, cand);
+        fuse(&bm, &vecs, k, use_utility, |id| self.get(id).map(|e| e.utility))
+    }
+
+    pub(crate) fn vector_ids(&self, qvec: &[f32], n: usize) -> Vec<u64> {
         let mut vecs: Vec<(u32, f32)> = self
             .slots
             .iter()
             .enumerate()
             .filter_map(|(i, e)| {
-                let e = e.as_ref()?;
-                let s = if e.vector.len() == qvec.len() {
-                    dot(qvec, &e.vector)
-                } else {
-                    0.0
-                };
+                let s = e.as_ref()?.vector.dot(qvec);
                 (s > 0.0).then_some((u32::try_from(i).unwrap_or(u32::MAX), s))
             })
             .collect();
         vecs.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        vecs.truncate(cand);
-
-        let mut fused: HashMap<u32, f32> = HashMap::new();
-        for (rank, (slot, _)) in bm.iter().enumerate() {
-            *fused.entry(*slot).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
-        }
-        for (rank, (slot, _)) in vecs.iter().enumerate() {
-            *fused.entry(*slot).or_insert(0.0) += 1.0 / (RRF_K + rank as f32 + 1.0);
-        }
-        let mut out: Vec<(u32, f32, u64)> = fused
-            .into_iter()
-            .filter_map(|(slot, score)| {
-                let e = self.entry_at(slot)?;
-                let score = if use_utility {
-                    score * (1.0 + UTILITY_WEIGHT * e.utility)
-                } else {
-                    score
-                };
-                Some((slot, score, e.id))
-            })
-            .collect();
-        out.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.2.cmp(&b.2)));
-        out.truncate(k);
-        out.into_iter().map(|(s, sc, _)| (s, sc)).collect()
+        vecs.truncate(n);
+        vecs.into_iter()
+            .filter_map(|(slot, _)| self.live_slot(slot).map(|e| e.id))
+            .collect()
     }
 
-    pub(crate) fn expand(&self, direct: &[(u32, f32)], hops: usize) -> Vec<(u32, f32)> {
-        let mut seen: HashSet<u32> = direct.iter().map(|(s, _)| *s).collect();
-        let mut frontier: Vec<(u32, f32)> = direct.to_vec();
-        let mut out = Vec::new();
-        for _ in 0..hops {
-            let mut next = Vec::new();
-            for &(slot, score) in &frontier {
-                let Some(e) = self.entry_at(slot) else {
-                    continue;
-                };
-                let decayed = score * HOP_DECAY;
-                let mut cands: Vec<u32> = [e.prev, e.next]
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|id| self.by_id.get(&id).copied())
-                    .collect();
-                if e.lang == Lang::Rust {
-                    let mut votes: HashMap<u32, usize> = HashMap::new();
-                    for d in &e.defs {
-                        for &m in self.mentions.get(d).into_iter().flatten() {
-                            if m != slot {
-                                *votes.entry(m).or_insert(0) += 1;
-                            }
-                        }
-                    }
-                    let mut syms: Vec<(u32, usize)> = votes.into_iter().collect();
-                    syms.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                    syms.truncate(MAX_SYMBOL_NEIGHBOURS);
-                    cands.extend(syms.into_iter().map(|(s, _)| s));
-                }
-                for c in cands {
-                    if seen.insert(c) {
-                        next.push((c, decayed));
-                    }
+    pub(crate) fn symbol_neighbours(&self, id: u64, defs: &[String]) -> Vec<u64> {
+        let Some(&slot) = self.by_id.get(&id) else {
+            return Vec::new();
+        };
+        let mut votes: HashMap<u32, usize> = HashMap::new();
+        for d in defs {
+            for &m in self.mentions.get(d).into_iter().flatten() {
+                if m != slot && self.live_slot(m).is_some() {
+                    *votes.entry(m).or_insert(0) += 1;
                 }
             }
-            out.extend(next.iter().copied());
-            frontier = next;
         }
-        out
-    }
-
-    pub(crate) fn hit(&self, slot: u32, score: f32, via: HitVia) -> Option<Hit> {
-        let e = self.entry_at(slot)?;
-        Some(Hit {
-            chunk_id: e.id,
-            file: e.file.clone(),
-            start_line: e.start,
-            end_line: e.end,
-            memory: e.memory.clone(),
-            score,
-            via,
-        })
-    }
-
-    pub(crate) fn gist_of(&self, id: u64) -> Option<&str> {
-        self.get(id).map(|e| e.gist.as_str())
-    }
-
-    pub(crate) fn entry_id(&self, slot: u32) -> Option<u64> {
-        self.entry_at(slot).map(|e| e.id)
+        let mut syms: Vec<(u32, usize)> = votes.into_iter().collect();
+        syms.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        syms.truncate(MAX_SYMBOL_NEIGHBOURS);
+        syms.into_iter()
+            .filter_map(|(s, _)| self.live_slot(s).map(|e| e.id))
+            .collect()
     }
 }
 

@@ -21,3 +21,4 @@ uriel-place = { path = "../uriel-place" }
 
 [dev-dependencies]
 tempfile = "3"
+serde_json = "1"

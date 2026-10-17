@@ -8,7 +8,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use uriel_mcp::config::{default_db_path, Config, Format, PlacementMode, DEFAULT_TOKEN_LIMIT};
+use uriel_core::MemoryBudget;
+use uriel_mcp::config::{
+    default_db_path, Config, Format, PlacementMode, DEFAULT_MEMORY_MIB, DEFAULT_TOKEN_LIMIT,
+};
 
 use banner::{mode_from_env, render_banner, Mode};
 
@@ -55,6 +58,8 @@ struct McpArgs {
     format: Option<FormatArg>,
     #[arg(long, value_enum)]
     placement: Option<PlacementArg>,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(16..))]
+    memory_mib: Option<u64>,
 }
 
 #[derive(Debug, Args, PartialEq)]
@@ -97,6 +102,10 @@ impl McpArgs {
                 Some(PlacementArg::Planned) => PlacementMode::Planned,
                 Some(PlacementArg::Local) | None => PlacementMode::Local,
             },
+            memory: MemoryBudget::mib(
+                self.memory_mib
+                    .map_or(DEFAULT_MEMORY_MIB, |m| usize::try_from(m).unwrap_or(DEFAULT_MEMORY_MIB)),
+            ),
         }
     }
 }
@@ -230,7 +239,7 @@ mod tests {
     fn mcp_parses_every_flag() {
         let cmd = command(&[
             "mcp", "--db", "g.seal", "--root", "proj", "--read-only", "--format", "json",
-            "--placement", "planned",
+            "--placement", "planned", "--memory-mib", "64",
         ]);
         assert_eq!(
             cmd,
@@ -240,6 +249,7 @@ mod tests {
                 read_only: true,
                 format: Some(FormatArg::Json),
                 placement: Some(PlacementArg::Planned),
+                memory_mib: Some(64),
             }))
         );
     }
@@ -255,6 +265,17 @@ mod tests {
         assert_eq!(cfg.format, Format::Compact);
         assert_eq!(cfg.placement, PlacementMode::Local);
         assert_eq!(cfg.token_limit, DEFAULT_TOKEN_LIMIT);
+        assert_eq!(cfg.memory, MemoryBudget::mib(50));
+    }
+
+    #[test]
+    fn mcp_memory_flag_maps_into_the_budget_and_rejects_less_than_the_floor() {
+        let Some(Command::Mcp(args)) = command(&["mcp", "--memory-mib", "96"]) else {
+            panic!("expected mcp");
+        };
+        assert_eq!(args.to_config().memory, MemoryBudget::mib(96));
+        assert!(parse(&["mcp", "--memory-mib", "15"]).is_err());
+        assert!(parse(&["mcp", "--memory-mib", "0"]).is_err());
     }
 
     #[test]
@@ -353,6 +374,7 @@ mod tests {
                     read_only: false,
                     format: None,
                     placement: None,
+                    memory_mib: None,
                 })),
             };
             let result = dispatch(cli, mode, Cursor::new(Vec::new()), &mut rec);
@@ -373,6 +395,7 @@ mod tests {
                 read_only: true,
                 format: None,
                 placement: None,
+                memory_mib: None,
             })),
         };
         let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
