@@ -1,5 +1,3 @@
-use redb::ReadableDatabase;
-
 use super::{p, tmp_graph_path};
 use crate::tables::{meta, META};
 use crate::{Error, Graph, MemoryBudget, Mode};

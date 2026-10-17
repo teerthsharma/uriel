@@ -479,7 +479,7 @@ impl Rag {
                     Vec::new()
                 },
             );
-            if seen % CAP_CHECK_EVERY == 0 && state.over(cap) {
+            if seen.is_multiple_of(CAP_CHECK_EVERY) && state.over(cap) {
                 state.spill();
             }
         }

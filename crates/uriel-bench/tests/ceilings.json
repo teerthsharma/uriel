@@ -1,3 +1,20 @@
 {
-  "calibrated": false
+  "calibrated": true,
+  "debug": {
+    "arena_alloc_1024_slabs_and_reset": 228267.5,
+    "compact_encode_table_200_rows": 52903533.333,
+    "gate_admit": 826.952,
+    "hot_csr_neighbours_100k": 505.905,
+    "place_apply_1000": 1473.615,
+    "place_plan_1000": 15267550.0,
+    "query_point_lookup": 327630.0,
+    "query_two_hop_traversal": 631006.667,
+    "rag_search_20_files": 729480.0,
+    "sketch_increment": 650.239,
+    "tier_read_t0": 6578.8,
+    "tier_read_t1": 79678.0,
+    "tier_read_t2": 125875.5,
+    "topo_persistence_500": 79846500.0
+  },
+  "factor": 5.0
 }
