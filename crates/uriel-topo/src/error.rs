@@ -14,6 +14,8 @@ pub enum Error {
     OutOfRange(String),
     #[error("uriel-algo: {0}")]
     Algo(String),
+    #[error("malformed csr export: {0}")]
+    Malformed(String),
     #[error("io: {0}")]
     Io(String),
 }

@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod eval;
+pub mod export;
 pub mod layout;
 pub mod measure;
 pub mod persistence;
