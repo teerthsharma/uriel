@@ -22,6 +22,16 @@ pub struct NotLeader {
     pub hint: Option<NodeId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum StorageError {
+    #[error("io: {0}")]
+    Io(String),
+    #[error("corrupt: {0}")]
+    Corrupt(String),
+    #[error("invalid: {0}")]
+    Invalid(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     pub term: Term,
@@ -66,17 +76,21 @@ pub struct Message {
 
 pub trait Storage {
     fn hard_state(&self) -> HardState;
-    fn set_hard_state(&mut self, hs: HardState);
+    fn set_hard_state(&mut self, hs: HardState) -> Result<(), StorageError>;
+    fn applied(&self) -> Index;
+    fn set_applied(&mut self, applied: Index) -> Result<(), StorageError>;
     fn last_index(&self) -> Index;
     fn term_at(&self, index: Index) -> Option<Term>;
-    fn entries(&self, from: Index, to: Index) -> Vec<Entry>;
-    fn append(&mut self, entries: &[Entry]);
-    fn truncate_from(&mut self, index: Index);
+    fn entries(&self, from: Index, to: Index) -> Result<Vec<Entry>, StorageError>;
+    fn append(&mut self, entries: &[Entry]) -> Result<(), StorageError>;
+    fn truncate_from(&mut self, index: Index) -> Result<(), StorageError>;
+    fn sync(&mut self) -> Result<(), StorageError>;
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct MemStorage {
     hs: HardState,
+    applied: Index,
     log: Vec<Entry>,
 }
 
@@ -91,8 +105,18 @@ impl Storage for MemStorage {
         self.hs
     }
 
-    fn set_hard_state(&mut self, hs: HardState) {
+    fn set_hard_state(&mut self, hs: HardState) -> Result<(), StorageError> {
         self.hs = hs;
+        Ok(())
+    }
+
+    fn applied(&self) -> Index {
+        self.applied
+    }
+
+    fn set_applied(&mut self, applied: Index) -> Result<(), StorageError> {
+        self.applied = applied;
+        Ok(())
     }
 
     fn last_index(&self) -> Index {
@@ -106,22 +130,28 @@ impl Storage for MemStorage {
         self.log.get(index.0 as usize - 1).map(|e| e.term)
     }
 
-    fn entries(&self, from: Index, to: Index) -> Vec<Entry> {
+    fn entries(&self, from: Index, to: Index) -> Result<Vec<Entry>, StorageError> {
         let lo = (from.0.max(1) - 1) as usize;
         let hi = (to.0.saturating_sub(1) as usize).min(self.log.len());
         if lo >= hi {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        self.log[lo..hi].to_vec()
+        Ok(self.log[lo..hi].to_vec())
     }
 
-    fn append(&mut self, entries: &[Entry]) {
+    fn append(&mut self, entries: &[Entry]) -> Result<(), StorageError> {
         self.log.extend(entries.iter().cloned());
+        Ok(())
     }
 
-    fn truncate_from(&mut self, index: Index) {
+    fn truncate_from(&mut self, index: Index) -> Result<(), StorageError> {
         let keep = index.0.saturating_sub(1) as usize;
         self.log.truncate(keep);
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<(), StorageError> {
+        Ok(())
     }
 }
 
@@ -136,6 +166,9 @@ const ELECTION_MIN: u64 = 10;
 const ELECTION_MAX: u64 = 19;
 const HEARTBEAT_INTERVAL: u64 = 2;
 const MAX_BATCH: u64 = 100;
+const MAX_APPLY_BATCH: u64 = 1024;
+
+type Res = Result<(), StorageError>;
 
 pub struct Raft<S: Storage> {
     id: NodeId,
@@ -159,14 +192,22 @@ pub struct Raft<S: Storage> {
     check_quorum: bool,
     quorum_elapsed: u64,
     active: BTreeSet<NodeId>,
+    fault: Option<StorageError>,
 }
 
 impl<S: Storage> Raft<S> {
-    pub fn new(id: NodeId, peers: Vec<NodeId>, storage: S, seed: u64) -> Self {
+    pub fn new(id: NodeId, peers: Vec<NodeId>, storage: S, seed: u64) -> Result<Self, StorageError> {
         let hs = storage.hard_state();
+        let applied = storage.applied();
+        if hs.commit > storage.last_index() {
+            return Err(StorageError::Corrupt("commit index beyond the log".into()));
+        }
+        if applied > hs.commit {
+            return Err(StorageError::Corrupt("applied index beyond commit".into()));
+        }
         let mut rng = Rng::new(seed.wrapping_add(id.0));
         let election_timeout = rng.between(ELECTION_MIN, ELECTION_MAX);
-        Raft {
+        Ok(Raft {
             id,
             peers: peers.into_iter().filter(|p| *p != id).collect(),
             storage,
@@ -184,11 +225,12 @@ impl<S: Storage> Raft<S> {
             dirty: false,
             next_index: BTreeMap::new(),
             match_index: BTreeMap::new(),
-            applied: Index(0),
+            applied,
             check_quorum: false,
             quorum_elapsed: 0,
             active: BTreeSet::new(),
-        }
+            fault: None,
+        })
     }
 
     pub fn id(&self) -> NodeId {
@@ -203,18 +245,33 @@ impl<S: Storage> Raft<S> {
         self.commit
     }
 
+    pub fn applied_index(&self) -> Index {
+        self.applied
+    }
+
+    pub fn fault(&self) -> Option<&StorageError> {
+        self.fault.as_ref()
+    }
+
     pub fn propose(&mut self, data: Vec<u8>) -> Result<Index, NotLeader> {
-        if self.role != Role::Leader {
-            return Err(NotLeader { hint: self.leader });
+        if self.fault.is_some() || self.role != Role::Leader {
+            let hint = if self.fault.is_some() { None } else { self.leader };
+            return Err(NotLeader { hint });
         }
-        let index = self.storage.last_index().plus(1);
-        let entry = Entry { term: self.term, index, data };
-        self.storage.append(std::slice::from_ref(&entry));
-        for i in 0..self.peers.len() {
-            let peer = self.peers[i];
-            self.send_append(peer);
+        let mut index = Index(0);
+        self.run(|r| {
+            index = r.storage.last_index().plus(1);
+            let entry = Entry { term: r.term, index, data };
+            r.storage.append(std::slice::from_ref(&entry))?;
+            for i in 0..r.peers.len() {
+                let peer = r.peers[i];
+                r.send_append(peer)?;
+            }
+            r.maybe_commit()
+        });
+        if self.fault.is_some() {
+            return Err(NotLeader { hint: None });
         }
-        self.maybe_commit();
         Ok(index)
     }
 
@@ -234,17 +291,29 @@ impl<S: Storage> Raft<S> {
         &self.storage
     }
 
+    fn run(&mut self, f: impl FnOnce(&mut Self) -> Res) {
+        if self.fault.is_some() {
+            return;
+        }
+        let r = f(self).and_then(|()| self.storage.sync());
+        if let Err(e) = r {
+            self.fault = Some(e);
+            self.outbox.clear();
+        }
+    }
+
     fn quorum(&self) -> usize {
         self.peers.len().div_ceil(2) + 1
     }
 
-    fn persist(&mut self) {
+    fn persist(&mut self) -> Res {
         self.storage.set_hard_state(HardState {
             term: self.term,
             vote: self.vote,
             commit: self.commit,
-        });
+        })?;
         self.dirty = true;
+        Ok(())
     }
 
     fn reset_timer(&mut self) {
@@ -277,17 +346,18 @@ impl<S: Storage> Raft<S> {
             || (self.leader.is_some() && self.election_elapsed < self.election_timeout)
     }
 
-    fn become_follower(&mut self, term: Term, leader: Option<NodeId>) {
+    fn become_follower(&mut self, term: Term, leader: Option<NodeId>) -> Res {
         if term > self.term {
             self.term = term;
             self.vote = None;
-            self.persist();
+            self.persist()?;
         }
         self.role = Role::Follower;
         self.leader = leader;
         self.granted.clear();
         self.heartbeat_elapsed = 0;
         self.reset_timer();
+        Ok(())
     }
 
     fn accept_leader(&mut self, leader: NodeId) {
@@ -297,44 +367,44 @@ impl<S: Storage> Raft<S> {
         self.election_elapsed = 0;
     }
 
-    fn start_prevote(&mut self) {
+    fn start_prevote(&mut self) -> Res {
         self.role = Role::PreCandidate;
         self.leader = None;
         self.granted.clear();
         self.granted.insert(self.id);
         self.reset_timer();
         if self.granted.len() >= self.quorum() {
-            self.start_election();
-            return;
+            return self.start_election();
         }
         let body = Body::PreVote {
             last_index: self.storage.last_index(),
             last_term: self.last_term(),
         };
         self.broadcast(Term(self.term.0 + 1), body);
+        Ok(())
     }
 
-    fn start_election(&mut self) {
+    fn start_election(&mut self) -> Res {
         self.term = Term(self.term.0 + 1);
         self.vote = Some(self.id);
-        self.persist();
+        self.persist()?;
         self.role = Role::Candidate;
         self.leader = None;
         self.granted.clear();
         self.granted.insert(self.id);
         self.reset_timer();
         if self.granted.len() >= self.quorum() {
-            self.become_leader();
-            return;
+            return self.become_leader();
         }
         let body = Body::Vote {
             last_index: self.storage.last_index(),
             last_term: self.last_term(),
         };
         self.broadcast(self.term, body);
+        Ok(())
     }
 
-    fn become_leader(&mut self) {
+    fn become_leader(&mut self) -> Res {
         self.role = Role::Leader;
         self.leader = Some(self.id);
         self.granted.clear();
@@ -350,32 +420,33 @@ impl<S: Storage> Raft<S> {
             self.match_index.insert(peer, Index(0));
         }
         let noop = Entry { term: self.term, index: prev_index.plus(1), data: Vec::new() };
-        self.storage.append(std::slice::from_ref(&noop));
+        self.storage.append(std::slice::from_ref(&noop))?;
         for i in 0..self.peers.len() {
             let peer = self.peers[i];
-            self.send_append(peer);
+            self.send_append(peer)?;
         }
-        self.maybe_commit();
+        self.maybe_commit()
     }
 
-    fn send_append(&mut self, peer: NodeId) {
+    fn send_append(&mut self, peer: NodeId) -> Res {
         let last = self.storage.last_index();
         let next = self.next_index.get(&peer).copied().unwrap_or(last.plus(1)).max(Index(1));
         if next > last {
-            return;
+            return Ok(());
         }
         let prev_index = Index(next.0 - 1);
         let prev_term = self.storage.term_at(prev_index).unwrap_or_default();
         let upto = Index(last.0.min(next.0 + MAX_BATCH - 1));
-        let entries = self.storage.entries(next, upto.plus(1));
+        let entries = self.storage.entries(next, upto.plus(1))?;
         self.next_index.insert(peer, upto.plus(1));
         let commit = self.commit;
         self.send(peer, self.term, Body::Append { prev_index, prev_term, entries, commit });
+        Ok(())
     }
 
-    fn maybe_commit(&mut self) {
+    fn maybe_commit(&mut self) -> Res {
         if self.role != Role::Leader {
-            return;
+            return Ok(());
         }
         let mut matched: Vec<Index> = self
             .peers
@@ -387,8 +458,9 @@ impl<S: Storage> Raft<S> {
         let candidate = matched[self.quorum() - 1];
         if candidate > self.commit && self.storage.term_at(candidate) == Some(self.term) {
             self.commit = candidate;
-            self.persist();
+            self.persist()?;
         }
+        Ok(())
     }
 
     fn conflict_hint(&self, prev_index: Index) -> Index {
@@ -411,14 +483,14 @@ impl<S: Storage> Raft<S> {
         prev_term: Term,
         entries: Vec<Entry>,
         leader_commit: Index,
-    ) {
+    ) -> Res {
         self.accept_leader(from);
         let last = self.storage.last_index();
         if prev_index > last || self.storage.term_at(prev_index) != Some(prev_term) {
             let hint = self.conflict_hint(prev_index);
             let body = Body::AppendResp { success: false, match_index: Index(0), hint };
             self.send(from, self.term, body);
-            return;
+            return Ok(());
         }
         let last_new = prev_index.plus(entries.len() as u64);
         let mut skip = 0;
@@ -432,22 +504,29 @@ impl<S: Storage> Raft<S> {
         if skip < entries.len() {
             let first = entries[skip].index;
             if first <= self.storage.last_index() {
-                self.storage.truncate_from(first);
+                self.storage.truncate_from(first)?;
             }
-            self.storage.append(&entries[skip..]);
+            self.storage.append(&entries[skip..])?;
         }
         let target = leader_commit.min(last_new);
         if target > self.commit {
             self.commit = target;
-            self.persist();
+            self.persist()?;
         }
         let body = Body::AppendResp { success: true, match_index: last_new, hint: last_new };
         self.send(from, self.term, body);
+        Ok(())
     }
 
-    fn handle_append_resp(&mut self, from: NodeId, success: bool, match_index: Index, hint: Index) {
+    fn handle_append_resp(
+        &mut self,
+        from: NodeId,
+        success: bool,
+        match_index: Index,
+        hint: Index,
+    ) -> Res {
         if self.role != Role::Leader || !self.next_index.contains_key(&from) {
-            return;
+            return Ok(());
         }
         self.active.insert(from);
         let last = self.storage.last_index();
@@ -462,25 +541,26 @@ impl<S: Storage> Raft<S> {
             if next < floor {
                 self.next_index.insert(from, floor);
             }
-            self.maybe_commit();
+            self.maybe_commit()?;
         } else {
             let next = self.next_index.get(&from).copied().unwrap_or(last.plus(1));
             let lowered = next.min(hint.plus(1)).max(matched.plus(1));
             self.next_index.insert(from, lowered);
         }
-        self.send_append(from);
+        self.send_append(from)
     }
 
-    fn handle_heartbeat_resp(&mut self, from: NodeId) {
+    fn handle_heartbeat_resp(&mut self, from: NodeId) -> Res {
         if self.role != Role::Leader || !self.next_index.contains_key(&from) {
-            return;
+            return Ok(());
         }
         self.active.insert(from);
         let matched = self.match_index.get(&from).copied().unwrap_or_default();
         if matched < self.storage.last_index() {
             self.next_index.insert(from, matched.plus(1));
-            self.send_append(from);
+            self.send_append(from)?;
         }
+        Ok(())
     }
 
     fn reject_stale(&mut self, msg: &Message) {
@@ -499,6 +579,10 @@ impl<S: Storage> Raft<S> {
     }
 
     pub fn tick(&mut self) {
+        self.run(Self::tick_inner);
+    }
+
+    fn tick_inner(&mut self) -> Res {
         if self.role == Role::Leader {
             if self.check_quorum {
                 self.quorum_elapsed += 1;
@@ -507,8 +591,7 @@ impl<S: Storage> Raft<S> {
                     self.active.clear();
                     self.quorum_elapsed = 0;
                     if heard < self.quorum() {
-                        self.become_follower(self.term, None);
-                        return;
+                        return self.become_follower(self.term, None);
                     }
                 }
             }
@@ -525,23 +608,28 @@ impl<S: Storage> Raft<S> {
         } else {
             self.election_elapsed += 1;
             if self.election_elapsed >= self.election_timeout {
-                self.start_prevote();
+                return self.start_prevote();
             }
         }
+        Ok(())
     }
 
     pub fn step(&mut self, msg: Message) {
+        self.run(|r| r.step_inner(msg));
+    }
+
+    fn step_inner(&mut self, msg: Message) -> Res {
         if msg.term > self.term {
             match msg.body {
                 Body::PreVote { .. } | Body::PreVoteResp { granted: true } => {}
                 Body::Append { .. } | Body::Heartbeat { .. } => {
-                    self.become_follower(msg.term, Some(msg.from))
+                    self.become_follower(msg.term, Some(msg.from))?
                 }
-                _ => self.become_follower(msg.term, None),
+                _ => self.become_follower(msg.term, None)?,
             }
         } else if msg.term < self.term {
             self.reject_stale(&msg);
-            return;
+            return Ok(());
         }
         match msg.body {
             Body::PreVote { last_index, last_term } => {
@@ -558,7 +646,7 @@ impl<S: Storage> Raft<S> {
                 {
                     self.granted.insert(msg.from);
                     if self.granted.len() >= self.quorum() {
-                        self.start_election();
+                        self.start_election()?;
                     }
                 }
             }
@@ -567,7 +655,7 @@ impl<S: Storage> Raft<S> {
                 let grant = free && self.log_is_up_to_date(last_index, last_term);
                 if grant {
                     self.vote = Some(msg.from);
-                    self.persist();
+                    self.persist()?;
                     self.election_elapsed = 0;
                 }
                 self.send(msg.from, self.term, Body::VoteResp { granted: grant });
@@ -576,33 +664,47 @@ impl<S: Storage> Raft<S> {
                 if self.role == Role::Candidate && granted {
                     self.granted.insert(msg.from);
                     if self.granted.len() >= self.quorum() {
-                        self.become_leader();
+                        self.become_leader()?;
                     }
                 }
             }
             Body::Append { prev_index, prev_term, entries, commit } => {
-                self.handle_append(msg.from, prev_index, prev_term, entries, commit);
+                self.handle_append(msg.from, prev_index, prev_term, entries, commit)?;
             }
             Body::AppendResp { success, match_index, hint } => {
-                self.handle_append_resp(msg.from, success, match_index, hint);
+                self.handle_append_resp(msg.from, success, match_index, hint)?;
             }
             Body::Heartbeat { commit } => {
                 self.accept_leader(msg.from);
                 let target = commit.min(self.storage.last_index());
                 if target > self.commit {
                     self.commit = target;
-                    self.persist();
+                    self.persist()?;
                 }
                 self.send(msg.from, self.term, Body::HeartbeatResp);
             }
-            Body::HeartbeatResp => self.handle_heartbeat_resp(msg.from),
+            Body::HeartbeatResp => self.handle_heartbeat_resp(msg.from)?,
         }
+        Ok(())
     }
 
-    pub fn ready(&self) -> Ready {
-        let committed_entries = self
-            .storage
-            .entries(self.applied.plus(1), self.commit.plus(1));
+    pub fn ready(&mut self) -> Ready {
+        if self.fault.is_some() {
+            return Ready { messages: Vec::new(), hard_state_changed: false, committed_entries: Vec::new() };
+        }
+        let to = self.commit.min(self.applied.plus(MAX_APPLY_BATCH)).plus(1);
+        let committed_entries = match self.storage.entries(self.applied.plus(1), to) {
+            Ok(e) => e,
+            Err(e) => {
+                self.fault = Some(e);
+                self.outbox.clear();
+                return Ready {
+                    messages: Vec::new(),
+                    hard_state_changed: false,
+                    committed_entries: Vec::new(),
+                };
+            }
+        };
         Ready {
             messages: self.outbox.clone(),
             hard_state_changed: self.dirty,
@@ -615,7 +717,12 @@ impl<S: Storage> Raft<S> {
         self.outbox.drain(..n);
         self.dirty = false;
         if let Some(last) = ready.committed_entries.last() {
-            self.applied = self.applied.max(last.index);
+            let applied = self.applied.max(last.index);
+            self.run(|r| {
+                r.storage.set_applied(applied)?;
+                r.applied = applied;
+                Ok(())
+            });
         }
     }
 }
@@ -623,20 +730,26 @@ impl<S: Storage> Raft<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::durable::{FileStorage, SimDisk};
     use std::collections::{BTreeMap, VecDeque};
 
     fn ids(n: u64) -> Vec<NodeId> {
         (1..=n).map(NodeId).collect()
     }
 
-    struct Pump {
-        nodes: Vec<Raft<MemStorage>>,
+    struct Pump<S: Storage = MemStorage> {
+        nodes: Vec<Raft<S>>,
         alive: Vec<bool>,
+        restarted: Vec<bool>,
         isolated: BTreeSet<NodeId>,
         queue: VecDeque<Message>,
         leaders_by_term: BTreeMap<Term, NodeId>,
         applied: Vec<Vec<Entry>>,
         chaos: Option<Rng>,
+    }
+
+    fn slot(id: NodeId) -> usize {
+        id.0 as usize - 1
     }
 
     fn payload(i: u32) -> Vec<u8> {
@@ -653,22 +766,25 @@ mod tests {
         Entry { term: Term(term), index: Index(index), data: vec![index as u8] }
     }
 
-    impl Pump {
+    impl Pump<MemStorage> {
         fn new(n: u64, seed: u64) -> Self {
             Pump::with_storages((0..n).map(|_| MemStorage::new()).collect(), seed)
         }
+    }
 
-        fn with_storages(storages: Vec<MemStorage>, seed: u64) -> Self {
+    impl<S: Storage> Pump<S> {
+        fn with_storages(storages: Vec<S>, seed: u64) -> Self {
             let all = ids(storages.len() as u64);
             let nodes: Vec<_> = storages
                 .into_iter()
                 .zip(all.iter())
-                .map(|(s, id)| Raft::new(*id, all.clone(), s, seed))
+                .map(|(s, id)| Raft::new(*id, all.clone(), s, seed).unwrap())
                 .collect();
             let n = nodes.len();
             Pump {
                 nodes,
                 alive: vec![true; n],
+                restarted: vec![false; n],
                 isolated: BTreeSet::new(),
                 queue: VecDeque::new(),
                 leaders_by_term: BTreeMap::new(),
@@ -677,13 +793,16 @@ mod tests {
             }
         }
 
-        fn slot(id: NodeId) -> usize {
-            id.0 as usize - 1
+        fn restart(&mut self, i: usize, storage: S, seed: u64) {
+            let all = ids(self.nodes.len() as u64);
+            self.nodes[i] = Raft::new(all[i], all, storage, seed).unwrap();
+            self.alive[i] = true;
+            self.restarted[i] = true;
         }
 
         fn reachable(&self, a: NodeId, b: NodeId) -> bool {
-            self.alive[Pump::slot(a)]
-                && self.alive[Pump::slot(b)]
+            self.alive[slot(a)]
+                && self.alive[slot(b)]
                 && !self.isolated.contains(&a)
                 && !self.isolated.contains(&b)
         }
@@ -708,11 +827,22 @@ mod tests {
                     i + 1
                 );
                 for j in (i + 1)..n {
-                    let a = &self.nodes[i].storage.log;
-                    let b = &self.nodes[j].storage.log;
-                    let shared = a.len().min(b.len());
-                    if let Some(k) = (0..shared).rev().find(|k| a[*k].term == b[*k].term) {
-                        assert_eq!(a[..=k], b[..=k], "log matching broken between {} and {}", i + 1, j + 1);
+                    let a = &self.nodes[i].storage;
+                    let b = &self.nodes[j].storage;
+                    let shared = a.last_index().min(b.last_index()).0;
+                    if let Some(k) =
+                        (1..=shared).rev().find(|k| a.term_at(Index(*k)) == b.term_at(Index(*k)))
+                    {
+                        for m in 1..=k {
+                            assert_eq!(
+                                a.term_at(Index(m)),
+                                b.term_at(Index(m)),
+                                "log matching broken between {} and {} at {}",
+                                i + 1,
+                                j + 1,
+                                m
+                            );
+                        }
                     }
                     let c = self.applied[i].len().min(self.applied[j].len());
                     assert_eq!(
@@ -728,11 +858,10 @@ mod tests {
             let longest = (0..n).max_by_key(|i| self.applied[*i].len()).unwrap_or(0);
             for (i, node) in self.nodes.iter().enumerate() {
                 if self.alive[i] && node.role() == Role::Leader && node.term() == top {
-                    let log = &node.storage.log;
                     for e in &self.applied[longest] {
                         assert_eq!(
-                            log.get(e.index.0 as usize - 1),
-                            Some(e),
+                            node.storage.term_at(e.index),
+                            Some(e.term),
                             "leader {} lost committed index {}",
                             i + 1,
                             e.index.0
@@ -748,10 +877,19 @@ mod tests {
                     continue;
                 }
                 let ready = node.ready();
+                if node.fault().is_some() {
+                    self.alive[i] = false;
+                    continue;
+                }
                 self.queue.extend(ready.messages.iter().cloned());
                 for e in &ready.committed_entries {
-                    assert_eq!(e.index.0 as usize, self.applied[i].len() + 1, "gap or repeat in delivery");
-                    self.applied[i].push(e.clone());
+                    let have = self.applied[i].len();
+                    if self.restarted[i] && e.index.0 as usize <= have {
+                        assert_eq!(self.applied[i][e.index.0 as usize - 1], *e, "redelivery differs");
+                    } else {
+                        assert_eq!(e.index.0 as usize, have + 1, "gap or repeat in delivery");
+                        self.applied[i].push(e.clone());
+                    }
                 }
                 node.advance(ready);
             }
@@ -782,7 +920,7 @@ mod tests {
         }
 
         fn propose(&mut self, id: NodeId, data: Vec<u8>) -> Result<Index, NotLeader> {
-            let r = self.nodes[Pump::slot(id)].propose(data);
+            let r = self.nodes[slot(id)].propose(data);
             self.observe();
             self.drain();
             r
@@ -805,7 +943,7 @@ mod tests {
                 steps += 1;
                 assert!(steps < 100_000, "message storm");
                 if self.reachable(m.from, m.to) {
-                    let i = Pump::slot(m.to);
+                    let i = slot(m.to);
                     self.nodes[i].step(m);
                     self.observe();
                 }
@@ -824,7 +962,7 @@ mod tests {
         }
 
         fn tick_only(&mut self, id: NodeId) {
-            self.nodes[Pump::slot(id)].tick();
+            self.nodes[slot(id)].tick();
             self.observe();
             self.drain();
         }
@@ -852,7 +990,7 @@ mod tests {
     }
 
     fn lone() -> Raft<MemStorage> {
-        Raft::new(NodeId(1), ids(3), MemStorage::new(), 1)
+        Raft::new(NodeId(1), ids(3), MemStorage::new(), 1).unwrap()
     }
 
     fn take(r: &mut Raft<MemStorage>) -> Vec<Message> {
@@ -898,11 +1036,11 @@ mod tests {
 
     fn log_of(term: u64, len: u64) -> MemStorage {
         let mut s = MemStorage::new();
-        s.set_hard_state(HardState { term: Term(term), vote: None, commit: Index(0) });
+        s.set_hard_state(HardState { term: Term(term), vote: None, commit: Index(0) }).unwrap();
         let entries: Vec<Entry> = (1..=len)
             .map(|i| Entry { term: Term(term), index: Index(i), data: vec![i as u8] })
             .collect();
-        s.append(&entries);
+        s.append(&entries).unwrap();
         s
     }
 
@@ -927,13 +1065,13 @@ mod tests {
             for t in 0..120 {
                 if t == 40 {
                     if let Some(l) = p.leader() {
-                        p.alive[Pump::slot(l)] = false;
+                        p.alive[slot(l)] = false;
                         killed = Some(l);
                     }
                 }
                 if t == 70 {
                     if let Some(l) = killed {
-                        p.alive[Pump::slot(l)] = true;
+                        p.alive[slot(l)] = true;
                     }
                 }
                 p.tick();
@@ -949,18 +1087,18 @@ mod tests {
         for _ in 0..5 {
             p.tick();
         }
-        let term = p.nodes[Pump::slot(leader)].term();
+        let term = p.nodes[slot(leader)].term();
         let loner = ids(3).into_iter().find(|id| *id != leader).unwrap();
         p.isolated.insert(loner);
         for _ in 0..100 {
             p.tick();
         }
-        assert_eq!(p.nodes[Pump::slot(loner)].term(), term);
+        assert_eq!(p.nodes[slot(loner)].term(), term);
         p.isolated.clear();
         for _ in 0..25 {
             p.tick_only(loner);
         }
-        assert_eq!(p.nodes[Pump::slot(loner)].term(), term);
+        assert_eq!(p.nodes[slot(loner)].term(), term);
         for _ in 0..60 {
             p.tick();
         }
@@ -994,18 +1132,18 @@ mod tests {
     fn killing_the_leader_elects_a_new_one_with_a_higher_term() {
         let mut p = Pump::new(3, 3);
         let old = p.run_until_leader(60).expect("leader");
-        let old_term = p.nodes[Pump::slot(old)].term();
-        p.alive[Pump::slot(old)] = false;
+        let old_term = p.nodes[slot(old)].term();
+        p.alive[slot(old)] = false;
         let new = p.run_until_leader(60).expect("new leader");
         assert_ne!(new, old);
-        assert!(p.nodes[Pump::slot(new)].term() > old_term);
+        assert!(p.nodes[slot(new)].term() > old_term);
     }
 
     #[test]
     fn a_restarted_node_remembers_its_vote_and_term() {
         let mut r = lone();
         assert_eq!(vote_answer(&mut r, vote(2, 5)), Some(true));
-        let mut again = Raft::new(NodeId(1), ids(3), r.storage().clone(), 99);
+        let mut again = Raft::new(NodeId(1), ids(3), r.storage().clone(), 99).unwrap();
         assert_eq!(again.term(), Term(5));
         assert_eq!(again.role(), Role::Follower);
         assert_eq!(again.storage().hard_state().vote, Some(NodeId(2)));
@@ -1072,9 +1210,9 @@ mod tests {
 
     fn old_entry_leader() -> Raft<MemStorage> {
         let mut s = MemStorage::new();
-        s.set_hard_state(HardState { term: Term(3), vote: None, commit: Index(1) });
-        s.append(&[entry(1, 1), entry(2, 2)]);
-        let mut r = Raft::new(NodeId(1), ids(3), s, 1);
+        s.set_hard_state(HardState { term: Term(3), vote: None, commit: Index(1) }).unwrap();
+        s.append(&[entry(1, 1), entry(2, 2)]).unwrap();
+        let mut r = Raft::new(NodeId(1), ids(3), s, 1).unwrap();
         while r.role() == Role::Follower {
             r.tick();
         }
@@ -1097,7 +1235,7 @@ mod tests {
 
     #[test]
     fn a_follower_truncates_a_conflicting_suffix_then_appends() {
-        let mut r = Raft::new(NodeId(1), ids(3), log_of(1, 3), 1);
+        let mut r = Raft::new(NodeId(1), ids(3), log_of(1, 3), 1).unwrap();
         let answer = append_answer(&mut r, append_msg(2, 1, 1, vec![entry(2, 2)], 0));
         assert_eq!(answer, Some((true, Index(2), Index(2))));
         assert_eq!(r.storage().last_index(), Index(2));
@@ -1107,7 +1245,7 @@ mod tests {
 
     #[test]
     fn a_duplicate_shorter_append_does_not_truncate_a_matching_suffix() {
-        let mut r = Raft::new(NodeId(1), ids(3), log_of(1, 3), 1);
+        let mut r = Raft::new(NodeId(1), ids(3), log_of(1, 3), 1).unwrap();
         let answer = append_answer(&mut r, append_msg(1, 0, 0, vec![entry(1, 1)], 0));
         assert_eq!(answer, Some((true, Index(1), Index(1))));
         assert_eq!(r.storage().last_index(), Index(3));
@@ -1115,7 +1253,7 @@ mod tests {
 
     #[test]
     fn a_follower_commits_min_of_leader_commit_and_its_last_new_entry_and_never_lowers_it() {
-        let mut r = Raft::new(NodeId(1), ids(3), log_of(1, 2), 1);
+        let mut r = Raft::new(NodeId(1), ids(3), log_of(1, 2), 1).unwrap();
         let answer = append_answer(&mut r, append_msg(1, 2, 1, vec![entry(1, 3)], 9));
         assert_eq!(answer, Some((true, Index(3), Index(3))));
         assert_eq!(r.commit_index(), Index(3));
@@ -1128,9 +1266,9 @@ mod tests {
     #[test]
     fn a_rejected_append_hints_the_start_of_the_conflicting_term_or_the_log_end() {
         let mut s = MemStorage::new();
-        s.set_hard_state(HardState { term: Term(2), vote: None, commit: Index(0) });
-        s.append(&[entry(1, 1), entry(1, 2), entry(2, 3), entry(2, 4), entry(2, 5)]);
-        let mut r = Raft::new(NodeId(1), ids(3), s, 1);
+        s.set_hard_state(HardState { term: Term(2), vote: None, commit: Index(0) }).unwrap();
+        s.append(&[entry(1, 1), entry(1, 2), entry(2, 3), entry(2, 4), entry(2, 5)]).unwrap();
+        let mut r = Raft::new(NodeId(1), ids(3), s, 1).unwrap();
         let answer = append_answer(&mut r, append_msg(3, 5, 3, Vec::new(), 0));
         assert_eq!(answer, Some((false, Index(0), Index(2))));
         let answer = append_answer(&mut r, append_msg(3, 9, 2, Vec::new(), 0));
@@ -1196,7 +1334,7 @@ mod tests {
 
     #[test]
     fn committed_entries_are_delivered_once_and_only_after_advance() {
-        let mut r = Raft::new(NodeId(1), ids(1), MemStorage::new(), 1);
+        let mut r = Raft::new(NodeId(1), ids(1), MemStorage::new(), 1).unwrap();
         while r.role() != Role::Leader {
             r.tick();
         }
@@ -1255,13 +1393,13 @@ mod tests {
             p.propose(leader, payload(i)).expect("leader accepts");
         }
         p.settle(30);
-        let ahead = p.applied_data(Pump::slot(leader));
+        let ahead = p.applied_data(slot(leader));
         assert_eq!(ahead.len(), 200);
-        assert!(p.applied_data(Pump::slot(lag)).is_empty());
+        assert!(p.applied_data(slot(lag)).is_empty());
         p.isolated.clear();
         p.settle(40);
-        assert_eq!(p.applied_data(Pump::slot(lag)), ahead);
-        assert_eq!(p.nodes[Pump::slot(lag)].storage.log, p.nodes[Pump::slot(leader)].storage.log);
+        assert_eq!(p.applied_data(slot(lag)), ahead);
+        assert_eq!(p.nodes[slot(lag)].storage.log, p.nodes[slot(leader)].storage.log);
     }
 
     #[test]
@@ -1276,7 +1414,7 @@ mod tests {
         for i in 0..3 {
             assert_eq!(p.applied_data(i), first);
         }
-        p.alive[Pump::slot(old)] = false;
+        p.alive[slot(old)] = false;
         let new = p.run_until_leader(80).expect("new leader");
         assert_ne!(new, old);
         let second: Vec<Vec<u8>> = (0..50u32).map(|i| tagged(2, i)).collect();
@@ -1285,15 +1423,15 @@ mod tests {
         }
         p.settle(10);
         let both: Vec<Vec<u8>> = first.iter().chain(second.iter()).cloned().collect();
-        for i in (0..3).filter(|i| *i != Pump::slot(old)) {
+        for i in (0..3).filter(|i| *i != slot(old)) {
             assert_eq!(p.applied_data(i), both);
         }
-        p.alive[Pump::slot(old)] = true;
+        p.alive[slot(old)] = true;
         p.settle(40);
         for i in 0..3 {
             assert_eq!(p.applied_data(i), both, "replica {}", i + 1);
         }
-        assert_eq!(p.nodes[Pump::slot(old)].role(), Role::Follower);
+        assert_eq!(p.nodes[slot(old)].role(), Role::Follower);
     }
 
     #[test]
@@ -1305,15 +1443,15 @@ mod tests {
             p.propose(old, data.clone()).expect("leader accepts");
         }
         p.settle(10);
-        assert_eq!(p.applied_data(Pump::slot(old)), committed);
-        let commit_before = p.nodes[Pump::slot(old)].commit_index();
+        assert_eq!(p.applied_data(slot(old)), committed);
+        let commit_before = p.nodes[slot(old)].commit_index();
         p.isolated.insert(old);
         for i in 0..10u32 {
             p.propose(old, tagged(2, i)).expect("stale leader still accepts");
         }
         p.settle(5);
-        assert_eq!(p.nodes[Pump::slot(old)].commit_index(), commit_before);
-        assert_eq!(p.applied_data(Pump::slot(old)), committed);
+        assert_eq!(p.nodes[slot(old)].commit_index(), commit_before);
+        assert_eq!(p.applied_data(slot(old)), committed);
         let new = p.run_until_leader(80).expect("majority elects a leader");
         assert_ne!(new, old);
         let fresh: Vec<Vec<u8>> = (0..5u32).map(|i| tagged(3, i)).collect();
@@ -1322,14 +1460,14 @@ mod tests {
         }
         p.settle(10);
         let expected: Vec<Vec<u8>> = committed.iter().chain(fresh.iter()).cloned().collect();
-        assert!(p.nodes[Pump::slot(old)].storage.log.iter().any(|e| e.data.first() == Some(&2)));
+        assert!(p.nodes[slot(old)].storage.log.iter().any(|e| e.data.first() == Some(&2)));
         p.isolated.clear();
         p.settle(40);
         for i in 0..3 {
             assert_eq!(p.applied_data(i), expected, "replica {}", i + 1);
         }
-        assert!(p.nodes[Pump::slot(old)].storage.log.iter().all(|e| e.data.first() != Some(&2)));
-        assert_eq!(p.nodes[Pump::slot(old)].role(), Role::Follower);
+        assert!(p.nodes[slot(old)].storage.log.iter().all(|e| e.data.first() != Some(&2)));
+        assert_eq!(p.nodes[slot(old)].role(), Role::Follower);
     }
 
     #[test]
@@ -1341,13 +1479,13 @@ mod tests {
             for t in 0..200u32 {
                 if t == 80 {
                     if let Some(l) = p.leader() {
-                        p.alive[Pump::slot(l)] = false;
+                        p.alive[slot(l)] = false;
                         killed = Some(l);
                     }
                 }
                 if t == 130 {
                     if let Some(l) = killed {
-                        p.alive[Pump::slot(l)] = true;
+                        p.alive[slot(l)] = true;
                     }
                 }
                 if t % 2 == 0 {
@@ -1375,7 +1513,7 @@ mod tests {
         let leader = p.run_until_leader(60).expect("leader");
         p.isolated.insert(leader);
         p.settle(100);
-        assert_ne!(p.nodes[Pump::slot(leader)].role(), Role::Leader);
+        assert_ne!(p.nodes[slot(leader)].role(), Role::Leader);
         assert!(p.run_until_leader(80).is_some());
     }
 
@@ -1386,9 +1524,65 @@ mod tests {
             n.set_check_quorum(true);
         }
         let leader = p.run_until_leader(60).expect("leader");
-        let term = p.nodes[Pump::slot(leader)].term();
+        let term = p.nodes[slot(leader)].term();
         p.settle(200);
         assert_eq!(p.leader(), Some(leader));
-        assert_eq!(p.nodes[Pump::slot(leader)].term(), term);
+        assert_eq!(p.nodes[slot(leader)].term(), term);
+    }
+
+    fn crash_cluster(
+        target: usize,
+        fail_at: Option<u64>,
+        seed: u64,
+    ) -> (u64, Pump<FileStorage<SimDisk>>) {
+        let disks: Vec<SimDisk> = (0..3).map(|_| SimDisk::default()).collect();
+        let storages =
+            disks.iter().map(|d| FileStorage::open(d.clone(), 4).unwrap()).collect::<Vec<_>>();
+        let mut p = Pump::with_storages(storages, seed);
+        disks[target].fail_at(fail_at);
+        p.run_until_leader(80);
+        for i in 0..15u32 {
+            if let Some(l) = p.leader() {
+                let _ = p.propose(l, tagged(1, i));
+            }
+            p.tick();
+        }
+        p.settle(10);
+        for i in 0..10u32 {
+            if let Some(l) = p.leader() {
+                let _ = p.propose(l, tagged(2, i));
+            }
+            p.tick();
+        }
+        let before = (0..3).map(|i| p.applied_data(i)).max_by_key(|a| a.len()).unwrap();
+        let ops = disks[target].ops();
+        disks[target].crash(&mut Rng::new(seed ^ fail_at.unwrap_or(0xFFFF)));
+        let reopened = FileStorage::open(disks[target].clone(), 4).unwrap();
+        p.restart(target, reopened, seed + 1000);
+        p.settle(150);
+        let after = p.applied_data(0);
+        for i in 0..3 {
+            assert_eq!(p.applied_data(i), after, "replica {} after restart, fail_at {fail_at:?}", i + 1);
+        }
+        assert!(
+            after.starts_with(&before),
+            "a committed entry was lost: fail_at {fail_at:?} target {target}"
+        );
+        assert!(p.leader().is_some(), "no leader after heal, fail_at {fail_at:?}");
+        (ops, p)
+    }
+
+    #[test]
+    fn a_crash_at_every_write_boundary_keeps_election_safety_and_loses_no_committed_entry() {
+        for seed in [3u64, 8] {
+            for target in 0..3usize {
+                let (ops, clean) = crash_cluster(target, None, seed);
+                assert!(ops > 20, "scenario wrote too little to be a test: {ops}");
+                assert!(!clean.applied_data(0).is_empty());
+                for k in 0..=ops {
+                    crash_cluster(target, Some(k), seed);
+                }
+            }
+        }
     }
 }

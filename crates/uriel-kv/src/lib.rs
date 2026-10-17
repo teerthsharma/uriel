@@ -1,5 +1,6 @@
 #![deny(unsafe_code)]
 
+pub mod durable;
 pub mod hlc;
 pub mod mvcc;
 pub mod raft;
