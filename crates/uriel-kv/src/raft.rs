@@ -552,6 +552,10 @@ impl<S: Storage> Raft<S> {
         self.term
     }
 
+    pub fn vote(&self) -> Option<NodeId> {
+        self.vote
+    }
+
     pub fn leader(&self) -> Option<NodeId> {
         self.leader
     }
@@ -1078,8 +1082,6 @@ impl<S: Storage> Raft<S> {
         match msg.body {
             Body::PreVote { last_index, last_term } => {
                 let grant = msg.term > self.term
-                    && self.voter
-                    && member
                     && !self.leader_alive()
                     && self.log_is_up_to_date(last_index, last_term);
                 let term = if grant { msg.term } else { self.term };
@@ -1099,7 +1101,7 @@ impl<S: Storage> Raft<S> {
             }
             Body::Vote { last_index, last_term } => {
                 let free = self.vote.is_none() || self.vote == Some(msg.from);
-                let grant = free && self.voter && member && self.log_is_up_to_date(last_index, last_term);
+                let grant = free && self.log_is_up_to_date(last_index, last_term);
                 if grant {
                     self.vote = Some(msg.from);
                     self.persist()?;
@@ -1186,30 +1188,8 @@ impl<S: Storage> Raft<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::durable::{FileStorage, SimDisk};
-    use std::collections::{BTreeMap, VecDeque};
-
-    fn ids(n: u64) -> Vec<NodeId> {
-        (1..=n).map(NodeId).collect()
-    }
-
-    struct Pump<S: Storage = MemStorage> {
-        nodes: Vec<Raft<S>>,
-        alive: Vec<bool>,
-        restarted: Vec<bool>,
-        boot: Vec<NodeId>,
-        reads: Vec<Vec<ReadState>>,
-        snapshots_sent: usize,
-        isolated: BTreeSet<NodeId>,
-        queue: VecDeque<Message>,
-        leaders_by_term: BTreeMap<Term, NodeId>,
-        applied: Vec<Vec<Entry>>,
-        chaos: Option<Rng>,
-    }
-
-    fn slot(id: NodeId) -> usize {
-        id.0 as usize - 1
-    }
+    use crate::durable::FileStorage;
+    use crate::sim::{ids, members_of, slot, Pump, SimDisk};
 
     fn payload(i: u32) -> Vec<u8> {
         i.to_be_bytes().to_vec()
@@ -1223,314 +1203,6 @@ mod tests {
 
     fn entry(term: u64, index: u64) -> Entry {
         Entry { term: Term(term), index: Index(index), data: vec![index as u8], kind: EntryKind::Normal }
-    }
-
-    impl Pump<MemStorage> {
-        fn new(n: u64, seed: u64) -> Self {
-            Pump::with_storages((0..n).map(|_| MemStorage::new()).collect(), seed)
-        }
-
-        fn with_members(total: u64, members: u64, seed: u64) -> Self {
-            let storages = (0..total).map(|_| MemStorage::new()).collect();
-            Pump::with_boot(storages, ids(members), seed)
-        }
-    }
-
-    fn encode_state(entries: &[Entry]) -> Vec<u8> {
-        let mut v = Vec::new();
-        for e in entries {
-            v.extend(e.term.0.to_le_bytes());
-            v.extend(e.index.0.to_le_bytes());
-            v.push(u8::from(e.kind == EntryKind::Conf));
-            v.extend((e.data.len() as u32).to_le_bytes());
-            v.extend(&e.data);
-        }
-        v
-    }
-
-    fn decode_state(b: &[u8]) -> Vec<Entry> {
-        let mut out = Vec::new();
-        let mut at = 0;
-        while at < b.len() {
-            let term = u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
-            let index = u64::from_le_bytes(b[at + 8..at + 16].try_into().unwrap());
-            let kind = if b[at + 16] == 1 { EntryKind::Conf } else { EntryKind::Normal };
-            let len = u32::from_le_bytes(b[at + 17..at + 21].try_into().unwrap()) as usize;
-            let data = b[at + 21..at + 21 + len].to_vec();
-            out.push(Entry { term: Term(term), index: Index(index), data, kind });
-            at += 21 + len;
-        }
-        out
-    }
-
-    fn members_of<S: Storage>(r: &Raft<S>) -> Vec<u64> {
-        r.members().iter().map(|m| m.0).collect()
-    }
-
-    impl<S: Storage> Pump<S> {
-        fn with_storages(storages: Vec<S>, seed: u64) -> Self {
-            let boot = ids(storages.len() as u64);
-            Pump::with_boot(storages, boot, seed)
-        }
-
-        fn make(id: NodeId, boot: &[NodeId], storage: S, seed: u64) -> Raft<S> {
-            if boot.contains(&id) {
-                Raft::new(id, boot.to_vec(), storage, seed).unwrap()
-            } else {
-                Raft::joining(id, boot.to_vec(), storage, seed).unwrap()
-            }
-        }
-
-        fn with_boot(storages: Vec<S>, boot: Vec<NodeId>, seed: u64) -> Self {
-            let all = ids(storages.len() as u64);
-            let nodes: Vec<_> = storages
-                .into_iter()
-                .zip(all.iter())
-                .map(|(s, id)| Pump::make(*id, &boot, s, seed))
-                .collect();
-            let n = nodes.len();
-            Pump {
-                nodes,
-                alive: vec![true; n],
-                restarted: vec![false; n],
-                boot,
-                reads: vec![Vec::new(); n],
-                snapshots_sent: 0,
-                isolated: BTreeSet::new(),
-                queue: VecDeque::new(),
-                leaders_by_term: BTreeMap::new(),
-                applied: vec![Vec::new(); n],
-                chaos: None,
-            }
-        }
-
-        fn restart(&mut self, i: usize, storage: S, seed: u64) {
-            self.nodes[i] = Pump::make(NodeId(i as u64 + 1), &self.boot.clone(), storage, seed);
-            self.alive[i] = true;
-            self.restarted[i] = true;
-        }
-
-        fn reachable(&self, a: NodeId, b: NodeId) -> bool {
-            self.alive[slot(a)]
-                && self.alive[slot(b)]
-                && !self.isolated.contains(&a)
-                && !self.isolated.contains(&b)
-        }
-
-        fn observe(&mut self) {
-            for (i, node) in self.nodes.iter().enumerate() {
-                if self.alive[i] && node.role() == Role::Leader {
-                    let first = *self.leaders_by_term.entry(node.term()).or_insert(node.id());
-                    assert_eq!(first, node.id(), "two leaders in term {:?}", node.term());
-                }
-            }
-            self.check_logs();
-        }
-
-        fn check_logs(&self) {
-            let n = self.nodes.len();
-            for i in 0..n {
-                let node = &self.nodes[i];
-                assert!(
-                    node.commit <= node.storage.last_index(),
-                    "node {} commit beyond its log",
-                    i + 1
-                );
-                for j in (i + 1)..n {
-                    let a = &self.nodes[i].storage;
-                    let b = &self.nodes[j].storage;
-                    let shared = a.last_index().min(b.last_index()).0;
-                    let floor = a.first_index().0.max(b.first_index().0) - 1;
-                    if let Some(k) = (floor..=shared)
-                        .rev()
-                        .find(|k| a.term_at(Index(*k)) == b.term_at(Index(*k)))
-                    {
-                        for m in floor..=k {
-                            assert_eq!(
-                                a.term_at(Index(m)),
-                                b.term_at(Index(m)),
-                                "log matching broken between {} and {} at {}",
-                                i + 1,
-                                j + 1,
-                                m
-                            );
-                        }
-                    }
-                    let c = self.applied[i].len().min(self.applied[j].len());
-                    assert_eq!(
-                        self.applied[i][..c],
-                        self.applied[j][..c],
-                        "nodes {} and {} applied different data",
-                        i + 1,
-                        j + 1
-                    );
-                }
-            }
-            let top = self.nodes.iter().map(|n| n.term()).max().unwrap_or_default();
-            let longest = (0..n).max_by_key(|i| self.applied[*i].len()).unwrap_or(0);
-            for (i, node) in self.nodes.iter().enumerate() {
-                if self.alive[i] && node.role() == Role::Leader && node.term() == top {
-                    for e in self.applied[longest]
-                        .iter()
-                        .filter(|e| e.index.0 + 1 >= node.storage.first_index().0)
-                    {
-                        assert_eq!(
-                            node.storage.term_at(e.index),
-                            Some(e.term),
-                            "leader {} lost committed index {}",
-                            i + 1,
-                            e.index.0
-                        );
-                    }
-                }
-            }
-        }
-
-        fn collect(&mut self) {
-            for (i, node) in self.nodes.iter_mut().enumerate() {
-                if !self.alive[i] {
-                    continue;
-                }
-                let ready = node.ready();
-                if node.fault().is_some() {
-                    self.alive[i] = false;
-                    continue;
-                }
-                self.queue.extend(ready.messages.iter().cloned());
-                self.snapshots_sent += ready
-                    .messages
-                    .iter()
-                    .filter(|m| matches!(m.body, Body::Snapshot { .. }))
-                    .count();
-                self.reads[i].extend(ready.read_states.iter().copied());
-                if let Some(snap) = &ready.snapshot {
-                    self.applied[i] = decode_state(&snap.data);
-                    assert_eq!(self.applied[i].len() as u64, snap.meta.index.0, "snapshot state");
-                }
-                for e in &ready.committed_entries {
-                    let have = self.applied[i].len();
-                    if self.restarted[i] && e.index.0 as usize <= have {
-                        assert_eq!(self.applied[i][e.index.0 as usize - 1], *e, "redelivery differs");
-                    } else {
-                        assert_eq!(e.index.0 as usize, have + 1, "gap or repeat in delivery");
-                        self.applied[i].push(e.clone());
-                    }
-                }
-                node.advance(ready);
-            }
-        }
-
-        fn next_message(&mut self) -> Option<Message> {
-            let len = self.queue.len();
-            if len == 0 {
-                return None;
-            }
-            let pick = match self.chaos.as_mut() {
-                Some(r) => {
-                    if r.chance(1, 2) {
-                        r.below(len as u64) as usize
-                    } else {
-                        0
-                    }
-                }
-                None => 0,
-            };
-            let m = self.queue.remove(pick)?;
-            if let Some(r) = self.chaos.as_mut() {
-                if r.chance(1, 10) {
-                    self.queue.push_back(m.clone());
-                }
-            }
-            Some(m)
-        }
-
-        fn compact_node(&mut self, i: usize) {
-            let index = Index(self.applied[i].len() as u64);
-            let data = encode_state(&self.applied[i]);
-            self.nodes[i].compact(index, data).unwrap();
-        }
-
-        fn read_index(&mut self, id: NodeId, ctx: u64) -> Result<(), ReadError> {
-            let r = self.nodes[slot(id)].read_index(ctx);
-            self.drain();
-            r
-        }
-
-        fn propose_conf(&mut self, id: NodeId, change: ConfChange) -> Result<Index, ConfError> {
-            let r = self.nodes[slot(id)].propose_conf_change(change);
-            self.observe();
-            self.drain();
-            r
-        }
-
-        fn propose(&mut self, id: NodeId, data: Vec<u8>) -> Result<Index, NotLeader> {
-            let r = self.nodes[slot(id)].propose(data);
-            self.observe();
-            self.drain();
-            r
-        }
-
-        fn settle(&mut self, ticks: u32) {
-            for _ in 0..ticks {
-                self.tick();
-            }
-        }
-
-        fn applied_data(&self, i: usize) -> Vec<Vec<u8>> {
-            self.applied[i].iter().filter(|e| e.kind == EntryKind::Normal && !e.data.is_empty()).map(|e| e.data.clone()).collect()
-        }
-
-        fn drain(&mut self) {
-            self.collect();
-            let mut steps = 0;
-            while let Some(m) = self.next_message() {
-                steps += 1;
-                assert!(steps < 100_000, "message storm");
-                if self.reachable(m.from, m.to) {
-                    let i = slot(m.to);
-                    self.nodes[i].step(m);
-                    self.observe();
-                }
-                self.collect();
-            }
-        }
-
-        fn tick(&mut self) {
-            for i in 0..self.nodes.len() {
-                if self.alive[i] {
-                    self.nodes[i].tick();
-                }
-            }
-            self.observe();
-            self.drain();
-        }
-
-        fn tick_only(&mut self, id: NodeId) {
-            self.nodes[slot(id)].tick();
-            self.observe();
-            self.drain();
-        }
-
-        fn leader(&self) -> Option<NodeId> {
-            self.nodes
-                .iter()
-                .enumerate()
-                .filter(|(i, n)| {
-                    self.alive[*i] && !self.isolated.contains(&n.id()) && n.role() == Role::Leader
-                })
-                .max_by_key(|(_, n)| n.term())
-                .map(|(_, n)| n.id())
-        }
-
-        fn run_until_leader(&mut self, max_ticks: u32) -> Option<NodeId> {
-            for _ in 0..max_ticks {
-                self.tick();
-                if let Some(l) = self.leader() {
-                    return Some(l);
-                }
-            }
-            None
-        }
     }
 
     fn lone() -> Raft<MemStorage> {
@@ -2151,8 +1823,8 @@ mod tests {
             p.propose(leader, payload(i)).expect("leader accepts");
         }
         p.settle(10);
-        p.compact_node(slot(leader));
-        p.compact_node(slot(other));
+        p.compact_node(slot(leader)).unwrap();
+        p.compact_node(slot(other)).unwrap();
         assert!(p.nodes[slot(leader)].storage.first_index() > Index(250));
         assert_eq!(p.snapshots_sent, 0);
         p.isolated.clear();
@@ -2288,27 +1960,34 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_node_is_refused_a_vote_by_the_members() {
-        let mut p = Pump::new(3, 74);
-        let leader = p.run_until_leader(60).expect("leader");
-        p.settle(5);
-        let gone = ids(3).into_iter().find(|id| *id != leader).unwrap();
-        p.propose_conf(leader, ConfChange::Remove(gone)).expect("change accepted");
-        p.settle(20);
-        let term = p.nodes[slot(leader)].term();
-        let node = &mut p.nodes[slot(leader)];
-        node.step(Message {
-            from: gone,
-            to: leader,
-            term: Term(term.0 + 1),
-            body: Body::Vote { last_index: Index(1 << 20), last_term: Term(1 << 20) },
-        });
-        let ready = node.ready();
-        let answer = ready.messages.iter().find_map(|m| match m.body {
-            Body::VoteResp { granted } => Some(granted),
-            _ => None,
-        });
-        assert_eq!(answer, Some(false));
+    fn a_node_that_does_not_yet_know_it_is_a_member_still_grants_votes_and_prevotes() {
+        let mut r = Raft::joining(NodeId(1), vec![NodeId(2), NodeId(3)], MemStorage::new(), 1).unwrap();
+        assert!(!r.is_voter());
+        assert_eq!(prevote_answer(&mut r, prevote(2, 1)), Some(true));
+        assert_eq!(vote_answer(&mut r, vote(2, 1)), Some(true));
+        for _ in 0..200 {
+            r.tick();
+        }
+        assert_eq!(r.role(), Role::Follower);
+    }
+
+    #[test]
+    fn prevotes_from_outside_the_configuration_are_not_counted_toward_a_candidacy() {
+        let mut r = lone();
+        while r.role() == Role::Follower {
+            r.tick();
+        }
+        assert_eq!(r.role(), Role::PreCandidate);
+        let grant = |from: u64| Message {
+            from: NodeId(from),
+            to: NodeId(1),
+            term: Term(1),
+            body: Body::PreVoteResp { granted: true },
+        };
+        r.step(grant(9));
+        assert_eq!(r.role(), Role::PreCandidate);
+        r.step(grant(2));
+        assert_eq!(r.role(), Role::Candidate);
     }
 
     #[test]
@@ -2359,7 +2038,7 @@ mod tests {
         }
         p.settle(10);
         for i in 0..3 {
-            p.compact_node(i);
+            p.compact_node(i).unwrap();
         }
         assert!(p.nodes[slot(leader)].storage.first_index() > Index(40));
         assert!(!p.nodes[3].is_voter());
