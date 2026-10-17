@@ -9,6 +9,7 @@ mod graph;
 mod index;
 mod integrity;
 mod placed;
+mod readonly;
 mod schema;
 mod tier;
 mod value;

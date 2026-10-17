@@ -170,6 +170,13 @@ impl Engine {
         Ok(Engine::from_graph(Graph::open(path, budget)?))
     }
 
+    pub fn open_read_only(
+        path: impl AsRef<Path>,
+        budget: MemoryBudget,
+    ) -> Result<Engine, QueryError> {
+        Ok(Engine::from_graph(Graph::open_read_only(path, budget)?))
+    }
+
     /// Opens a database that lives only in memory.
     pub fn open_in_memory(budget: MemoryBudget) -> Result<Engine, QueryError> {
         Ok(Engine::from_graph(Graph::open_in_memory(budget)?))

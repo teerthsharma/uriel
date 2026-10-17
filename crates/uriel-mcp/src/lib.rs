@@ -35,6 +35,16 @@ fn persist_dir(cfg: &Config) -> Option<std::path::PathBuf> {
 pub fn build_server(cfg: &Config) -> Result<Server, String> {
     let engine = if cfg.in_memory {
         Engine::open_in_memory(cfg.memory)
+    } else if cfg.read_only {
+        if cfg.db.is_file() {
+            Engine::open_read_only(&cfg.db, cfg.memory)
+        } else {
+            eprintln!(
+                "uriel-mcp: {} does not exist; serving an empty read-only graph",
+                cfg.db.display()
+            );
+            Engine::open_in_memory(cfg.memory)
+        }
     } else {
         if let Some(dir) = cfg.db.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)

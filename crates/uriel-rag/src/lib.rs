@@ -385,7 +385,7 @@ impl Rag {
                 Arc::new(HashEmbedder::new(cfg.embed_dim))
             }
         };
-        if !graph.begin_read()?.has_index("File", "path")? {
+        if !graph.is_read_only() && !graph.begin_read()?.has_index("File", "path")? {
             graph.create_index("File", "path")?;
         }
         let state = Self::load(&graph, embedder.as_ref(), index_cap)?;
@@ -400,7 +400,8 @@ impl Rag {
     }
 
     fn flush_gists(graph: &Graph, pending: &mut Vec<(NodeId, String)>) {
-        if pending.is_empty() {
+        if pending.is_empty() || graph.is_read_only() {
+            pending.clear();
             return;
         }
         if let Ok(mut tx) = graph.begin_write() {
@@ -936,6 +937,9 @@ impl Rag {
         let text = prop_str(node, "text")?;
         let lang = Lang::from_path(prop_str(node, "file")?);
         let derived = derive(text, lang);
+        if self.graph.is_read_only() {
+            return Ok(derived);
+        }
         let _gate = lock(&self.gate);
         if let Ok(mut tx) = self.graph.begin_write() {
             let mut props = Props::new();

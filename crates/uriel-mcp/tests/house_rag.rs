@@ -1173,3 +1173,85 @@ fn bad_argument_shapes_are_tool_errors_not_rpc_errors() {
         assert!(r.get("error").is_none(), "{name}: {r}");
     }
 }
+
+fn sha256_of(path: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(path).expect("read db");
+    Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+fn exercise_every_read_path(s: &mut Session) {
+    let found = s.ok(
+        "rag_search",
+        json!({"query": "exponential backoff retry payment gateway", "expand_hops": 2}),
+    );
+    let id = hits(&found)[0]["chunk_id"].as_u64().expect("id");
+    for level in 0..=3 {
+        s.text("rag_expand", json!({"chunk_id": id, "level": level}));
+    }
+    s.ok("rag_search", json!({"query": "render invoice customer", "ladder": true}));
+    s.ok(
+        "read_neo4j_cypher",
+        json!({"query": "MATCH (n) RETURN count(n) AS c"}),
+    );
+    s.ok("get_neo4j_schema", json!({}));
+    s.ok("read_graph", json!({}));
+    s.ok("session_reset", json!({}));
+    s.ok("house_status", json!({}));
+    s.ok("house_config", json!({}));
+}
+
+#[test]
+fn a_read_only_server_leaves_the_database_file_sha256_unchanged() {
+    let p = Proj::new();
+    {
+        let mut s = p.session(&["--db", &p.db()], &[]);
+        s.ok("rag_index", json!({}));
+        s.ok(
+            "create_entities",
+            json!({"entities":[{"name":"Ada","type":"Person","observations":["first"]}]}),
+        );
+        assert!(s.finish());
+    }
+    let copies = tempfile::tempdir().expect("copies");
+    let readonly_db = copies.path().join("readonly.seal");
+    let writable_db = copies.path().join("writable.seal");
+    std::fs::copy(p.db(), &readonly_db).expect("copy");
+    std::fs::copy(p.db(), &writable_db).expect("copy");
+    let before = sha256_of(&readonly_db);
+    assert_eq!(sha256_of(&writable_db), before);
+
+    {
+        let mut s = p.session(&["--db", &readonly_db.to_string_lossy(), "--read-only"], &[]);
+        exercise_every_read_path(&mut s);
+        assert!(s.finish());
+    }
+    assert_eq!(sha256_of(&readonly_db), before, "read-only changed the file");
+
+    {
+        let mut s = p.session(&["--db", &writable_db.to_string_lossy()], &[]);
+        exercise_every_read_path(&mut s);
+        assert!(s.finish());
+    }
+    assert_ne!(sha256_of(&writable_db), before, "a writable run writes, so the check can fail");
+}
+
+#[test]
+fn a_read_only_server_on_a_missing_database_creates_no_file_and_serves_an_empty_graph() {
+    let p = Proj::new();
+    let missing = p.dir.path().join("nested").join("absent.seal");
+    {
+        let mut s = p.session(&["--db", &missing.to_string_lossy(), "--read-only"], &[]);
+        let r = s.ok(
+            "read_neo4j_cypher",
+            json!({"query": "MATCH (n) RETURN count(n) AS c"}),
+        );
+        assert_eq!(r, json!([{"c": 0}]));
+        assert!(s.finish());
+    }
+    assert!(!missing.exists());
+    assert!(!missing.parent().expect("parent").exists());
+}
