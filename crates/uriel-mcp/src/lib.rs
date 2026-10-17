@@ -48,7 +48,7 @@ pub fn build_server(cfg: &Config) -> Result<Server, String> {
         read_only: cfg.read_only,
         services: Services::from_config(cfg)?,
         format: cfg.format,
-        session: session::Session::new(),
+        session: session::Session::for_budget(cfg.memory),
         placement: placement::PlaceState::new(cfg.placement, persist_dir(cfg)),
     };
     if !cfg.read_only {
