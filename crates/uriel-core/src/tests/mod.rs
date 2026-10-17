@@ -1,5 +1,6 @@
 mod budget;
 mod codec;
+mod command;
 mod constraints;
 mod crash;
 mod degraded;

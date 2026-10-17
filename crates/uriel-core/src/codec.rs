@@ -27,12 +27,12 @@ const T_LIST: u8 = 7;
 const T_MAP: u8 = 8;
 const T_VECTOR: u8 = 9;
 
-fn put_u32(out: &mut Vec<u8>, n: usize) {
+pub(crate) fn put_u32(out: &mut Vec<u8>, n: usize) {
     let n = u32::try_from(n).expect("collection larger than u32::MAX elements");
     out.extend_from_slice(&n.to_le_bytes());
 }
 
-fn put_str(out: &mut Vec<u8>, s: &str) {
+pub(crate) fn put_str(out: &mut Vec<u8>, s: &str) {
     put_u32(out, s.len());
     out.extend_from_slice(s.as_bytes());
 }
@@ -85,7 +85,7 @@ pub(crate) fn encode_value(v: &Value, out: &mut Vec<u8>) {
     }
 }
 
-fn put_props(out: &mut Vec<u8>, props: &Props) {
+pub(crate) fn put_props(out: &mut Vec<u8>, props: &Props) {
     put_u32(out, props.len());
     for (k, v) in props {
         put_str(out, k);
@@ -114,7 +114,7 @@ pub(crate) fn encode_rel(src: NodeId, dst: NodeId, ty: &str, props: &Props) -> V
     out
 }
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     buf: &'a [u8],
 }
 
@@ -123,7 +123,11 @@ fn corrupt(msg: &str) -> Error {
 }
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
+    pub(crate) fn new(buf: &'a [u8]) -> Reader<'a> {
+        Reader { buf }
+    }
+
+    pub(crate) fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if n > self.buf.len() {
             return Err(corrupt("record truncated"));
         }
@@ -132,17 +136,17 @@ impl<'a> Reader<'a> {
         Ok(head)
     }
 
-    fn u8(&mut self) -> Result<u8> {
+    pub(crate) fn u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
     }
 
-    fn u32(&mut self) -> Result<u32> {
+    pub(crate) fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_le_bytes(
             self.take(4)?.try_into().expect("4 bytes"),
         ))
     }
 
-    fn u64(&mut self) -> Result<u64> {
+    pub(crate) fn u64(&mut self) -> Result<u64> {
         Ok(u64::from_le_bytes(
             self.take(8)?.try_into().expect("8 bytes"),
         ))
@@ -150,7 +154,7 @@ impl<'a> Reader<'a> {
 
     /// Reads an element count and checks it against the bytes left, given that every
     /// element needs at least `min_elem` bytes. Stops hostile counts from allocating.
-    fn count(&mut self, min_elem: usize) -> Result<usize> {
+    pub(crate) fn count(&mut self, min_elem: usize) -> Result<usize> {
         let n = self.u32()? as usize;
         if n.saturating_mul(min_elem) > self.buf.len() {
             return Err(corrupt("element count exceeds record size"));
@@ -158,7 +162,7 @@ impl<'a> Reader<'a> {
         Ok(n)
     }
 
-    fn string(&mut self) -> Result<String> {
+    pub(crate) fn string(&mut self) -> Result<String> {
         let n = self.u32()? as usize;
         let bytes = self.take(n)?;
         String::from_utf8(bytes.to_vec()).map_err(|_| corrupt("string is not valid UTF-8"))
@@ -208,7 +212,7 @@ impl<'a> Reader<'a> {
         })
     }
 
-    fn props(&mut self) -> Result<Props> {
+    pub(crate) fn props(&mut self) -> Result<Props> {
         let n = self.count(6)?;
         let mut props = Props::new();
         for _ in 0..n {
@@ -225,7 +229,7 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn finish(&self) -> Result<()> {
+    pub(crate) fn finish(&self) -> Result<()> {
         if self.buf.is_empty() {
             Ok(())
         } else {

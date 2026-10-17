@@ -634,6 +634,10 @@ impl Graph {
     ///
     /// Dropping the returned [`WriteTx`] without [`WriteTx::commit`] rolls everything back.
     pub fn begin_write(&self) -> Result<WriteTx> {
+        self.begin_write_with(false)
+    }
+
+    fn begin_write_with(&self, recording: bool) -> Result<WriteTx> {
         if self.inner.read_only || self.inner.mode() != Mode::Full {
             return Err(Error::ReadOnly);
         }
@@ -641,13 +645,23 @@ impl Graph {
         if self.inner.mode() != Mode::Full {
             return Err(Error::ReadOnly);
         }
-        match WriteTx::begin(self.inner.clone(), gate) {
+        match WriteTx::begin(self.inner.clone(), gate, recording) {
             Err(e) if e.is_io() => {
                 self.inner.write_failed();
                 Err(e)
             }
             other => other,
         }
+    }
+
+    pub fn begin_write_recording(&self) -> Result<WriteTx> {
+        self.begin_write_with(true)
+    }
+
+    pub fn apply_batch(&self, batch: &crate::command::WriteBatch) -> Result<u64> {
+        let mut tx = self.begin_write()?;
+        tx.apply(batch)?;
+        tx.commit()
     }
 
     /// Number of write commits so far; persisted. A commit that changed nothing does not
