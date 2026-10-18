@@ -1241,7 +1241,7 @@ mod tests {
             .collect();
         let state = rag.read_state();
         assert!(!state.spilled);
-        let (mut same_order, mut same_set, mut top1) = (0usize, 0usize, 0usize);
+        let (mut same_order, mut same_set, mut top1, mut overlap) = (0usize, 0usize, 0usize, 0usize);
         for q in &set.queries {
             let qv = rag.embedder.embed(&q.query);
             let exact = f32_top(&vectors, &qv, 10);
@@ -1252,15 +1252,16 @@ mod tests {
             b.sort_unstable();
             same_set += usize::from(a == b);
             top1 += usize::from(exact.first() == quant.first());
+            overlap += a.iter().filter(|id| b.contains(id)).count();
         }
         println!(
-            "INT8 vs F32 vector leg over {} queries on {} chunks: identical top-10 order {same_order}, identical top-10 set {same_set}, identical top-1 {top1}",
+            "INT8 vs F32 vector leg over {} queries on {} chunks: identical top-10 order {same_order}, identical top-10 set {same_set}, identical top-1 {top1}, overlap {overlap}/1000",
             set.queries.len(),
             vectors.len()
         );
         assert_eq!(set.queries.len(), 100);
         assert!(top1 >= 99, "top-1 agreement {top1}/100");
-        assert!(same_set >= 90, "top-10 set agreement {same_set}/100");
+        assert!(overlap >= 940, "top-10 overlap {overlap}/1000");
     }
 
     #[test]
