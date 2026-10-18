@@ -323,6 +323,10 @@ impl ReadTx {
         meta_value(&m, key)
     }
 
+    pub fn next_ids(&self) -> Result<(u64, u64)> {
+        Ok((self.meta(meta::NEXT_NODE)?, self.meta(meta::NEXT_REL)?))
+    }
+
     /// Total number of nodes.
     pub fn node_count(&self) -> Result<u64> {
         self.meta(meta::NODE_COUNT)

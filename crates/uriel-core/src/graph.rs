@@ -664,6 +664,65 @@ impl Graph {
         tx.commit()
     }
 
+    pub fn validate_batch(&self, batch: &crate::command::WriteBatch) -> Result<()> {
+        let mut tx = self.begin_write()?;
+        tx.apply(batch)
+    }
+
+    pub fn export_dump(&self) -> Result<crate::command::GraphDump> {
+        use crate::command::{Command, GraphDump, WriteBatch};
+        let read = self.begin_read()?;
+        let (next_node, next_rel) = read.next_ids()?;
+        let mut commands = Vec::new();
+        for node in read.all_nodes()? {
+            let n = node?;
+            commands.push(Command::CreateNode {
+                id: n.id,
+                labels: n.labels,
+                props: n.props,
+            });
+        }
+        for rel in read.all_rels()? {
+            let r = rel?;
+            commands.push(Command::CreateRel {
+                id: r.id,
+                src: r.src,
+                dst: r.dst,
+                rel_type: r.rel_type,
+                props: r.props,
+            });
+        }
+        for i in read.list_indexes()? {
+            if !i.backs_constraint {
+                commands.push(Command::CreateIndex {
+                    label: i.label,
+                    key: i.key,
+                });
+            }
+        }
+        for c in read.list_constraints()? {
+            commands.push(Command::CreateConstraint {
+                kind: c.kind,
+                label: c.label,
+                key: c.key,
+            });
+        }
+        Ok(GraphDump {
+            next_node,
+            next_rel,
+            batch: WriteBatch {
+                epoch: read.epoch(),
+                commands,
+            },
+        })
+    }
+
+    pub fn restore_dump(&self, dump: &crate::command::GraphDump) -> Result<u64> {
+        let mut tx = self.begin_write()?;
+        tx.restore(dump)?;
+        tx.commit()
+    }
+
     /// Number of write commits so far; persisted. A commit that changed nothing does not
     /// advance it. Strictly increases by one per effective commit.
     pub fn epoch(&self) -> u64 {

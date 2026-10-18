@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::{mem, p};
 use crate::checksum::crc32c;
-use crate::{Command, ConstraintKind, Error, Graph, NodeId, RelId, Value, WriteBatch};
+use crate::{Command, ConstraintKind, Error, Graph, GraphDump, NodeId, RelId, Value, WriteBatch};
 
 struct Rng(u64);
 
@@ -522,4 +522,125 @@ fn an_empty_batch_is_rejected_because_it_cannot_advance_the_epoch() {
     };
     assert!(matches!(g.apply_batch(&batch), Err(Error::InvalidBatch(_))));
     assert_eq!(g.epoch(), 0);
+}
+
+fn state_digest(g: &Graph) -> String {
+    let read = g.begin_read().unwrap();
+    let mut out = String::new();
+    for n in read.all_nodes().unwrap() {
+        out.push_str(&format!("{:?}\n", n.unwrap()));
+    }
+    for r in read.all_rels().unwrap() {
+        out.push_str(&format!("{:?}\n", r.unwrap()));
+    }
+    out.push_str(&format!("{:?}\n", g.list_indexes().unwrap()));
+    out.push_str(&format!("{:?}\n", g.list_constraints().unwrap()));
+    out.push_str(&format!("epoch={} ids={:?}\n", g.epoch(), read.next_ids().unwrap()));
+    out
+}
+
+fn busy_graph() -> Graph {
+    let g = mem();
+    g.create_index("P", "name").unwrap();
+    g.create_unique_constraint("U", "id").unwrap();
+    g.create_exists_constraint("E", "must").unwrap();
+    let mut tx = g.begin_write().unwrap();
+    let a = tx.create_node(&["P", "U"], p(&[("id", Value::Int(1)), ("name", Value::from("a"))])).unwrap();
+    let b = tx.create_node(&["P", "E"], p(&[("must", Value::Bool(true))])).unwrap();
+    let c = tx.create_node(&["Q"], p(&[("f", Value::Float(f64::NAN))])).unwrap();
+    tx.create_rel(a, b, "KNOWS", p(&[("w", Value::Int(3))])).unwrap();
+    let r2 = tx.create_rel(b, c, "OWNS", p(&[])).unwrap();
+    tx.commit().unwrap();
+    let mut tx = g.begin_write().unwrap();
+    tx.delete_rel(r2).unwrap();
+    tx.delete_node(c).unwrap();
+    tx.commit().unwrap();
+    g
+}
+
+#[test]
+fn next_ids_stay_above_every_deleted_id() {
+    let g = busy_graph();
+    assert_eq!(g.begin_read().unwrap().next_ids().unwrap(), (3, 2));
+}
+
+#[test]
+fn validating_a_batch_changes_nothing_and_a_bad_batch_is_refused() {
+    let g = busy_graph();
+    let before = state_digest(&g);
+    let good = WriteBatch {
+        epoch: g.epoch() + 1,
+        commands: vec![Command::CreateNode { id: NodeId(3), labels: labels(&["X"]), props: p(&[]) }],
+    };
+    g.validate_batch(&good).unwrap();
+    assert_eq!(state_digest(&g), before);
+    let missing = WriteBatch {
+        epoch: g.epoch() + 1,
+        commands: vec![Command::SetNodeProps { id: NodeId(99), props: p(&[("k", Value::Int(1))]) }],
+    };
+    assert!(g.validate_batch(&missing).is_err());
+    let stale = WriteBatch { epoch: g.epoch(), commands: good.commands.clone() };
+    assert!(matches!(g.validate_batch(&stale), Err(Error::StaleBatch { .. })));
+    assert_eq!(state_digest(&g), before);
+    assert_eq!(g.apply_batch(&good).unwrap(), good.epoch);
+}
+
+#[test]
+fn a_dump_restored_into_an_empty_graph_reproduces_state_epoch_and_counters() {
+    let g = busy_graph();
+    let dump = g.export_dump().unwrap();
+    let wire = GraphDump::decode(&dump.encode()).unwrap();
+    assert_eq!(wire, dump);
+    let fresh = mem();
+    assert_eq!(fresh.restore_dump(&wire).unwrap(), g.epoch());
+    assert_eq!(state_digest(&fresh), state_digest(&g));
+    assert!(fresh.begin_read().unwrap().check_integrity().unwrap().is_empty());
+    let next = WriteBatch {
+        epoch: g.epoch() + 1,
+        commands: vec![Command::CreateNode { id: NodeId(3), labels: labels(&["X"]), props: p(&[]) }],
+    };
+    g.apply_batch(&next).unwrap();
+    fresh.apply_batch(&next).unwrap();
+    assert_eq!(state_digest(&fresh), state_digest(&g));
+}
+
+#[test]
+fn a_dump_of_a_graph_emptied_after_use_restores_its_epoch_and_counters() {
+    let g = mem();
+    let mut tx = g.begin_write().unwrap();
+    let n = tx.create_node(&["A"], p(&[])).unwrap();
+    tx.commit().unwrap();
+    let mut tx = g.begin_write().unwrap();
+    tx.delete_node(n).unwrap();
+    tx.commit().unwrap();
+    let dump = g.export_dump().unwrap();
+    assert!(dump.batch.commands.is_empty());
+    let fresh = mem();
+    fresh.restore_dump(&GraphDump::decode(&dump.encode()).unwrap()).unwrap();
+    assert_eq!(state_digest(&fresh), state_digest(&g));
+}
+
+#[test]
+fn a_dump_refuses_a_graph_that_is_not_empty_and_changes_nothing() {
+    let g = busy_graph();
+    let dump = g.export_dump().unwrap();
+    let other = busy_graph();
+    let before = state_digest(&other);
+    assert!(other.restore_dump(&dump).is_err());
+    assert_eq!(state_digest(&other), before);
+}
+
+#[test]
+fn a_damaged_or_truncated_dump_is_rejected_and_never_panics() {
+    let bytes = busy_graph().export_dump().unwrap().encode();
+    for cut in 0..bytes.len() {
+        assert!(GraphDump::decode(&bytes[..cut]).is_err(), "cut {cut}");
+    }
+    let mut rng = Rng(5);
+    for _ in 0..300 {
+        let mut b = bytes.clone();
+        let at = rng.below(b.len() as u64) as usize;
+        b[at] ^= 1 << rng.below(8);
+        assert!(GraphDump::decode(&b).is_err());
+    }
 }

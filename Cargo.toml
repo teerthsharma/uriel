@@ -11,6 +11,7 @@ members = [
     "crates/uriel-house",
     "crates/uriel-tier",
     "crates/uriel-kv",
+    "crates/uriel-repl",
     "crates/uriel-topo",
     "crates/uriel-place",
     "crates/uriel-sys",
