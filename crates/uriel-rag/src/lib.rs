@@ -9,6 +9,7 @@ pub mod eval;
 mod index;
 mod ladder;
 mod links;
+mod rerank;
 mod scan;
 mod soul;
 mod tokenize;
@@ -844,18 +845,20 @@ impl Rag {
         let qvec = self.embedder.embed(query);
         let state = self.read_state();
         let read = self.graph.begin_read()?;
-        let direct = if state.spilled {
+        let depth = opts.k.max(rerank::RERANK_DEPTH);
+        let first = if state.spilled {
             scan::direct(
                 &read,
                 self.embedder.as_ref(),
                 query,
                 &qvec,
-                opts.k,
+                depth,
                 opts.use_utility,
             )?
         } else {
-            state.index.direct(query, &qvec, opts.k, opts.use_utility)
+            state.index.direct(query, &qvec, depth, opts.use_utility)
         };
+        let direct = rerank::rerank(&read, query, first, opts.k, opts.use_utility)?;
         let mut hits: Vec<Hit> = Vec::with_capacity(direct.len());
         for (id, score) in &direct {
             hits.extend(Self::hit(&read, *id, *score, HitVia::Direct)?);
