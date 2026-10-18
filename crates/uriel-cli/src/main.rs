@@ -12,7 +12,8 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use uriel_core::MemoryBudget;
 use uriel_mcp::config::{
-    default_db_path, Config, Format, PlacementMode, DEFAULT_MEMORY_MIB, DEFAULT_TOKEN_LIMIT,
+    default_db_path, Config, Format, Mode as ServerMode, PlacementMode, DEFAULT_MEMORY_MIB, DEFAULT_TOKEN_LIMIT,
+    MODE_ENV,
 };
 
 use banner::{mode_from_env, render_banner, Mode};
@@ -56,6 +57,12 @@ enum FormatArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ModeArg {
+    Normal,
+    House,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PlacementArg {
     Local,
     Planned,
@@ -73,6 +80,8 @@ struct McpArgs {
     format: Option<FormatArg>,
     #[arg(long, value_enum)]
     placement: Option<PlacementArg>,
+    #[arg(long, value_enum)]
+    mode: Option<ModeArg>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(16..))]
     memory_mib: Option<u64>,
 }
@@ -117,8 +126,16 @@ struct RecallArgs {
 }
 
 impl McpArgs {
-    fn to_config(&self) -> Config {
-        Config {
+    fn to_config(&self) -> Result<Config, String> {
+        self.to_config_env(std::env::var(MODE_ENV).ok().as_deref())
+    }
+
+    fn to_config_env(&self, mode_env: Option<&str>) -> Result<Config, String> {
+        let mode_flag = self.mode.map(|m| match m {
+            ModeArg::Normal => ServerMode::Normal,
+            ModeArg::House => ServerMode::House,
+        });
+        Ok(Config {
             db: self.db.clone().unwrap_or_else(default_db_path),
             read_only: self.read_only,
             in_memory: false,
@@ -141,7 +158,8 @@ impl McpArgs {
                 self.memory_mib
                     .map_or(DEFAULT_MEMORY_MIB, |m| usize::try_from(m).unwrap_or(DEFAULT_MEMORY_MIB)),
             ),
-        }
+            mode: ServerMode::resolve(mode_flag, mode_env)?,
+        })
     }
 }
 
@@ -152,7 +170,7 @@ fn dispatch<R: BufRead, W: Write>(
     out: &mut W,
 ) -> Result<(), String> {
     if let Some(Command::Mcp(args)) = &cli.command {
-        return uriel_mcp::run(&args.to_config(), input, &mut *out);
+        return uriel_mcp::run(&args.to_config()?, input, &mut *out);
     }
     if cli.version {
         commands::say(out, render_banner(mode))?;
@@ -317,6 +335,7 @@ mod tests {
                 read_only: true,
                 format: Some(FormatArg::Json),
                 placement: Some(PlacementArg::Planned),
+                mode: None,
                 memory_mib: Some(64),
             }))
         );
@@ -327,7 +346,7 @@ mod tests {
         let Some(Command::Mcp(args)) = command(&["mcp"]) else {
             panic!("expected mcp");
         };
-        let cfg = args.to_config();
+        let cfg = args.to_config_env(None).expect("config");
         assert_eq!(cfg.db, default_db_path());
         assert!(!cfg.read_only && !cfg.in_memory);
         assert_eq!(cfg.format, Format::Compact);
@@ -337,11 +356,30 @@ mod tests {
     }
 
     #[test]
+    fn mcp_mode_flag_maps_into_the_server_config_and_the_default_is_normal() {
+        let cfg_of = |argv: &[&str], env: Option<&str>| {
+            let Some(Command::Mcp(args)) = command(argv) else {
+                panic!("expected mcp");
+            };
+            args.to_config_env(env)
+        };
+        assert_eq!(cfg_of(&["mcp"], None).expect("config").mode, ServerMode::Normal);
+        assert_eq!(cfg_of(&["mcp", "--mode", "house"], None).expect("config").mode, ServerMode::House);
+        assert_eq!(cfg_of(&["mcp"], Some("house")).expect("config").mode, ServerMode::House);
+        assert_eq!(
+            cfg_of(&["mcp", "--mode", "normal"], Some("house")).expect("config").mode,
+            ServerMode::Normal
+        );
+        assert!(cfg_of(&["mcp"], Some("warp")).expect_err("bad env").contains(MODE_ENV));
+        assert!(parse(&["mcp", "--mode", "warp"]).is_err());
+    }
+
+    #[test]
     fn mcp_memory_flag_maps_into_the_budget_and_rejects_less_than_the_floor() {
         let Some(Command::Mcp(args)) = command(&["mcp", "--memory-mib", "96"]) else {
             panic!("expected mcp");
         };
-        assert_eq!(args.to_config().memory, MemoryBudget::mib(96));
+        assert_eq!(args.to_config_env(None).expect("config").memory, MemoryBudget::mib(96));
         assert!(parse(&["mcp", "--memory-mib", "15"]).is_err());
         assert!(parse(&["mcp", "--memory-mib", "0"]).is_err());
     }
@@ -353,7 +391,7 @@ mod tests {
         else {
             panic!("expected mcp");
         };
-        let cfg = args.to_config();
+        let cfg = args.to_config_env(None).expect("config");
         assert_eq!(cfg.db, PathBuf::from("g.seal"));
         assert!(cfg.read_only);
         assert_eq!(cfg.format, Format::Json);
@@ -486,6 +524,7 @@ mod tests {
                     read_only: false,
                     format: None,
                     placement: None,
+                    mode: None,
                     memory_mib: None,
                 })),
             };
@@ -507,6 +546,7 @@ mod tests {
                 read_only: true,
                 format: None,
                 placement: None,
+                mode: None,
                 memory_mib: None,
             })),
         };

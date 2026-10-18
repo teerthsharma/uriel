@@ -271,7 +271,7 @@ fn no_claim_means_no_violation_but_the_floors_are_still_reported() {
 fn the_admissible_set_exposes_what_t1_cannot_see() {
     let answers = ["a", "b", "c", "d"];
     let gold = ["a", "b", "c", "e"];
-    let a = audit_orbits(&answers, Some(&gold), &errors(0)).expect("audit");
+    let a = audit_orbits(&answers, Some(&gold[..]), &errors(0)).expect("audit");
     assert!(a.violated());
     assert_eq!(a.bound(), "T1*");
     assert_eq!(a.inadmissible, vec![3]);
@@ -285,7 +285,7 @@ fn the_admissible_set_exposes_what_t1_cannot_see() {
 fn an_admissible_set_smaller_than_n_voids_the_star_bounds() {
     let answers = ["a", "b", "c", "d"];
     let gold = ["a", "b"];
-    let a = audit_orbits(&answers, Some(&gold), &errors(0)).expect("audit");
+    let a = audit_orbits(&answers, Some(&gold[..]), &errors(0)).expect("audit");
     assert!(!a.violated());
     assert_eq!(a.m_star, None);
     let voided: Vec<&str> = a.inapplicable.iter().map(|(b, _)| *b).collect();
@@ -298,7 +298,7 @@ fn an_admissible_set_smaller_than_n_voids_the_star_bounds() {
 fn a_superset_admissible_set_still_applies() {
     let answers = ["a", "b", "z"];
     let gold = ["a", "b", "c", "d"];
-    let a = audit_orbits(&answers, Some(&gold), &errors(0)).expect("audit");
+    let a = audit_orbits(&answers, Some(&gold[..]), &errors(0)).expect("audit");
     assert!(a.violated());
     assert_eq!(a.m_star, Some(2));
 }
@@ -320,7 +320,7 @@ fn a_precision_claim_is_judged_against_t6_star_when_the_set_applies() {
     let answers = ["t", "t", "t", "t", "u"];
     let gold = ["a", "b", "c", "d", "e"];
     let claims = Claims { errors: None, precision: Some(0.9), recall: None };
-    let a = audit_orbits(&answers, Some(&gold), &claims).expect("audit");
+    let a = audit_orbits(&answers, Some(&gold[..]), &claims).expect("audit");
     assert!(a.violated());
     assert_eq!(a.bound(), "T6*");
     let star = a.checks.iter().find(|c| c.bound == "T6*").expect("t6*");
@@ -335,7 +335,7 @@ fn a_recall_claim_below_the_t8_floor_is_a_violation() {
     let answers = ["t", "t", "t", "t"];
     let gold = ["a", "b", "c", "d"];
     let claims = Claims { errors: None, precision: None, recall: Some(0.5) };
-    let a = audit_orbits(&answers, Some(&gold), &claims).expect("audit");
+    let a = audit_orbits(&answers, Some(&gold[..]), &claims).expect("audit");
     assert!(a.violated());
     assert_eq!(a.bound(), "T8");
     let t8 = a.checks.iter().find(|c| c.bound == "T8").expect("t8");
@@ -349,7 +349,7 @@ fn the_shuffle_adversary_is_never_reported_as_a_violation() {
     let gold: Vec<String> = (0..12).map(|i| format!("a{i}")).collect();
     let grefs: Vec<&str> = gold.iter().map(String::as_str).collect();
     let claims = Claims { errors: Some(0), precision: Some(0.0), recall: Some(0.0) };
-    let a = audit_orbits(&refs, Some(&grefs), &claims).expect("audit");
+    let a = audit_orbits(&refs, Some(&grefs[..]), &claims).expect("audit");
     assert!(!a.violated());
     assert_eq!(a.m_star, Some(12));
     let t8 = a.checks.iter().find(|c| c.bound == "T8").expect("t8");
@@ -394,9 +394,9 @@ fn the_audit_is_deterministic() {
     let answers = ["q", "w", "q", "e", "w", "r", "q"];
     let gold = ["q", "w", "e", "r", "t", "y", "u"];
     let claims = Claims { errors: Some(1), precision: Some(0.7), recall: Some(0.2) };
-    let first = audit_orbits(&answers, Some(&gold), &claims).expect("audit");
+    let first = audit_orbits(&answers, Some(&gold[..]), &claims).expect("audit");
     for _ in 0..50 {
-        assert_eq!(audit_orbits(&answers, Some(&gold), &claims).expect("audit"), first);
+        assert_eq!(audit_orbits(&answers, Some(&gold[..]), &claims).expect("audit"), first);
     }
 }
 

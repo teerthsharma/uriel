@@ -50,6 +50,7 @@ impl Session {
             .env("USERPROFILE", home.path())
             .env("HOME", home.path())
             .env_remove("SEAL_DR_HOUSE_MODEL")
+            .env_remove("URIEL_MODE")
             .env_remove("SEAL_MCP_FAKE_PROBE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -215,6 +216,9 @@ impl Proj {
         let mut args = vec!["--root".to_string(), self.root()];
         if !extra.contains(&"--db") {
             args.push("--in-memory".into());
+        }
+        if !extra.iter().any(|a| a.starts_with("--mode")) {
+            args.extend(["--mode".to_string(), "house".to_string()]);
         }
         args.extend(extra.iter().map(|s| s.to_string()));
         Session::start(&args, envs)

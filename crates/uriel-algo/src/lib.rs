@@ -1,6 +1,7 @@
 //! uriel-algo: graph-data-science style algorithms on CSR projections.
 
 mod centrality;
+pub mod caustic;
 pub mod certify;
 mod community;
 mod components;

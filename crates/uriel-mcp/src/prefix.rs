@@ -19,12 +19,18 @@ fn field(hasher: &mut Sha256, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-pub fn fingerprint_of(tool_schemas: &str, contract: u32, soul_digest: &str) -> String {
+pub fn fingerprint_of(
+    tool_schemas: &str,
+    contract: u32,
+    soul_digest: &str,
+    mode: &str,
+) -> String {
     let mut hasher = Sha256::new();
     field(&mut hasher, DOMAIN.as_bytes());
     field(&mut hasher, tool_schemas.as_bytes());
     field(&mut hasher, &contract.to_le_bytes());
     field(&mut hasher, soul_digest.as_bytes());
+    field(&mut hasher, mode.as_bytes());
     hasher
         .finalize()
         .iter()
@@ -41,10 +47,11 @@ fn compute(ctx: &Context) -> Result<Scaffold, String> {
     let guide = rag
         .soul(&SoulOptions::default())
         .map_err(|e| e.to_string())?;
-    let tools = tools::list_json(ctx.read_only).to_string();
-    let id = fingerprint_of(&tools, OUTPUT_CONTRACT_VERSION, &guide.digest);
+    let tools = tools::list_json(ctx.read_only, ctx.mode).to_string();
+    let mode = ctx.mode.name();
+    let id = fingerprint_of(&tools, OUTPUT_CONTRACT_VERSION, &guide.digest, mode);
     let preamble = format!(
-        "uriel scaffold {id} contract {OUTPUT_CONTRACT_VERSION} soul {}",
+        "uriel scaffold {id} mode {mode} contract {OUTPUT_CONTRACT_VERSION} soul {}",
         guide.digest
     );
     Ok(Scaffold { id, preamble })
