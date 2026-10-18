@@ -32,7 +32,7 @@ use crate::tokenize::token_estimate;
 pub use crate::embed::{Embedder, HashEmbedder};
 pub use crate::error::RagError;
 pub use crate::ladder::Level;
-pub use crate::soul::{Soul, SoulOptions, SoulSection};
+pub use crate::soul::{Soul, SoulCache, SoulCacheStats, SoulOptions, SoulSection};
 
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules"];
 const UTILITY_ALPHA: f32 = 0.3;

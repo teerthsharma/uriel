@@ -208,3 +208,132 @@ fn a_planted_hub_enters_a_tight_guide_only_through_propagation() {
     assert!(ids(&diffused).contains(&hub_id), "{}", diffused.text);
     assert_eq!(diffused.sections[0].chunk_id, hub_id);
 }
+
+fn chunk_total(rag: &Rag) -> usize {
+    rag.stats().expect("stats").chunks
+}
+
+#[test]
+fn a_second_identical_call_is_a_cache_hit_with_no_recomputation() {
+    let (_dir, rag) = fixture(40);
+    let first = soul_at(&rag, 400);
+    assert!(!first.cache.hit);
+    assert!(first.cache.rounds_run >= 1);
+    assert_eq!(first.cache.features_computed, chunk_total(&rag));
+    assert_eq!(first.cache.features_reused, 0);
+    let second = soul_at(&rag, 400);
+    assert!(second.cache.hit);
+    assert_eq!(second.cache.rounds_run, 0);
+    assert_eq!(second.cache.features_computed, 0);
+    assert_eq!(second.text, first.text);
+    assert_eq!(second.digest, first.digest);
+    assert_eq!(second.sections, first.sections);
+    assert_eq!(second.rounds, first.rounds);
+    assert_eq!(second.seed, first.seed);
+    assert_eq!(second.tokens, first.tokens);
+    assert_eq!(second.omitted, first.omitted);
+}
+
+#[test]
+fn a_different_budget_or_focus_is_a_different_cache_entry() {
+    let (_dir, rag) = fixture(40);
+    let a = soul_at(&rag, 400);
+    let b = soul_at(&rag, 800);
+    assert!(!b.cache.hit);
+    assert_ne!(a.text, b.text);
+    let focused = rag
+        .soul(&SoulOptions {
+            budget_tokens: 400,
+            focus: Some("stage_1".into()),
+            ..SoulOptions::default()
+        })
+        .expect("soul");
+    assert!(!focused.cache.hit);
+    assert!(focused.sections.iter().all(|s| s.file.starts_with("stage_1")));
+    assert!(soul_at(&rag, 400).cache.hit);
+    assert!(soul_at(&rag, 800).cache.hit);
+    assert_eq!(rag.soul_cache_stats().expect("stats").guides, 3);
+}
+
+#[test]
+fn editing_one_file_recomputes_only_its_chunks_and_supersedes_the_old_guide() {
+    let (dir, rag) = fixture(40);
+    let before = soul_at(&rag, 400);
+    assert!(!before.cache.hit);
+    fs::write(
+        dir.path().join("stage_3.rs"),
+        "/// Rewritten stage three now audits ledger digests and emits a summary per frame.\npub fn handle_stage_3(input: &[u8]) -> usize {\n    input.len()\n}\n",
+    )
+    .expect("edit");
+    let report = rag.index_dir(dir.path(), &IndexOptions::default()).expect("reindex");
+    assert_eq!(report.files_indexed, 1);
+    let after = soul_at(&rag, 400);
+    assert!(!after.cache.hit);
+    assert!(after.cache.rounds_run >= 1);
+    assert_eq!(after.cache.features_computed, report.chunks_added);
+    assert_eq!(after.cache.features_reused, chunk_total(&rag) - report.chunks_added);
+    let stats = rag.soul_cache_stats().expect("stats");
+    assert_eq!(stats.guides, 1);
+    assert_eq!(stats.features, chunk_total(&rag));
+    assert_eq!(stats.sections, after.sections.len());
+    assert!(soul_at(&rag, 400).cache.hit);
+}
+
+#[test]
+fn cached_sections_are_persisted_one_node_per_section() {
+    let (_dir, rag) = fixture(40);
+    let soul = soul_at(&rag, 400);
+    let stats = rag.soul_cache_stats().expect("stats");
+    assert_eq!(stats.guides, 1);
+    assert_eq!(stats.sections, soul.sections.len());
+    assert!(stats.sections >= 5);
+    assert!(stats.bytes > 0 && stats.bytes <= stats.cap, "{stats:?}");
+}
+
+fn sha256(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(fs::read(path).expect("read db"))
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[test]
+fn a_read_only_graph_computes_in_memory_and_leaves_the_database_file_unchanged() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let corpus = dir.path().join("corpus");
+    fs::create_dir(&corpus).expect("mkdir");
+    write_corpus(&corpus, 40);
+    let db = dir.path().join("g.uriel");
+    {
+        let graph = Graph::open(&db, MemoryBudget::mib(128)).expect("graph");
+        let rag = Rag::open(graph, RagConfig::default()).expect("rag");
+        rag.index_dir(&corpus, &IndexOptions::default()).expect("index");
+    }
+    let copy = dir.path().join("w.uriel");
+    fs::copy(&db, &copy).expect("copy");
+    let before = sha256(&db);
+    let read_only = {
+        let graph = Graph::open_read_only(&db, MemoryBudget::mib(128)).expect("ro");
+        let rag = Rag::open(graph, RagConfig::default()).expect("ro rag");
+        let first = soul_at(&rag, 400);
+        let second = soul_at(&rag, 400);
+        assert!(!first.cache.hit && !second.cache.hit);
+        assert!(!first.sections.is_empty());
+        assert_eq!(first.text, second.text);
+        assert_eq!(rag.soul_cache_stats().expect("stats").guides, 0);
+        first
+    };
+    assert_eq!(sha256(&db), before);
+    let writable = {
+        let graph = Graph::open(&copy, MemoryBudget::mib(128)).expect("graph");
+        let rag = Rag::open(graph, RagConfig::default()).expect("rag");
+        soul_at(&rag, 400)
+    };
+    assert_ne!(sha256(&copy), before, "a writable run must populate the cache");
+    let reopened = Graph::open_read_only(&copy, MemoryBudget::mib(128)).expect("ro");
+    let rag = Rag::open(reopened, RagConfig::default()).expect("ro rag");
+    assert_eq!(rag.soul_cache_stats().expect("stats").guides, 1);
+    assert!(soul_at(&rag, 400).cache.hit, "a read-only graph reads a cache a writer left");
+    assert_eq!(writable.text, read_only.text);
+}
