@@ -49,6 +49,8 @@ pub enum Mutation {
     ApplyOnAppend,
     FatalRedelivery,
     AckBeforeCommit,
+    LocalRead,
+    IgnoreSnapshot,
 }
 
 struct Inflight {
@@ -64,6 +66,10 @@ pub struct Staged {
 impl Staged {
     pub fn messages(&self) -> &[Message] {
         &self.ready.messages
+    }
+
+    pub fn entries(&self) -> usize {
+        self.ready.committed_entries.len()
     }
 }
 
@@ -155,6 +161,11 @@ impl<S: Storage> Replica<S> {
     pub fn read_index(&mut self, ctx: u64) -> Result<(), ReadError> {
         if self.fault.is_some() {
             return Err(ReadError::NotLeader(None));
+        }
+        #[cfg(feature = "mutations")]
+        if self.mutation == Some(Mutation::LocalRead) && self.raft.role() == Role::Leader {
+            self.ready_reads.push(ctx);
+            return Ok(());
         }
         self.raft.read_index(ctx)
     }
@@ -268,6 +279,10 @@ impl<S: Storage> Replica<S> {
     }
 
     fn install(&mut self, snap: &Snapshot) -> Result<(), Fault> {
+        #[cfg(feature = "mutations")]
+        if self.mutation == Some(Mutation::IgnoreSnapshot) {
+            return Ok(());
+        }
         let index = snap.meta.index.0;
         let fail = |reason: String| Fault::Snapshot { index, reason };
         let dump = GraphDump::decode(&snap.data).map_err(|e| fail(e.to_string()))?;
@@ -330,9 +345,9 @@ impl<S: Storage> Replica<S> {
             return Ok(());
         }
         let entries = self.raft.storage().entries(from, to).unwrap_or_default();
-        for entry in &entries {
-            self.apply_entry(entry)?;
-        }
-        Ok(())
+        let held = self.inflight.take();
+        let applied = entries.iter().try_for_each(|entry| self.apply_entry(entry));
+        self.inflight = held;
+        applied
     }
 }

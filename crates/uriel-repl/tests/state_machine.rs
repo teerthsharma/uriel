@@ -189,3 +189,36 @@ fn a_batch_from_the_future_latches_a_fault_and_changes_nothing() {
     assert_eq!(digest(r.graph()), before);
     assert_eq!(r.graph().epoch(), 0);
 }
+
+#[test]
+fn a_replica_that_missed_compacted_entries_catches_up_from_a_snapshot_to_an_equal_graph() {
+    let mut c = Mini::new(3, 9);
+    let l = c.elect();
+    let lag = (l + 1) % 3;
+    c.isolated.insert(lag);
+    for k in 0..6 {
+        c.nodes[l]
+            .rep
+            .write(|b| {
+                let n = b.create_node(&["A"], props(&[("k", Value::Int(k))]));
+                b.create_rel(n, n, "SELF", props(&[]));
+            })
+            .unwrap();
+        c.pump();
+        c.nodes[l].rep.drain_acks();
+    }
+    assert!(c.nodes[l].rep.compact().unwrap());
+    assert_eq!(c.nodes[lag].rep.graph().epoch(), 0);
+    c.isolated.clear();
+    c.tick(30);
+    assert_eq!(c.nodes[lag].rep.snapshots_installed(), 1);
+    assert_eq!(digest(c.nodes[lag].rep.graph()), digest(c.nodes[l].rep.graph()));
+    assert_eq!(c.nodes[lag].rep.graph().epoch(), 6);
+    c.nodes[l].rep.write(|b| {
+        b.create_node(&["After"], props(&[]));
+    })
+    .unwrap();
+    c.tick(6);
+    assert_eq!(digest(c.nodes[lag].rep.graph()), digest(c.nodes[l].rep.graph()));
+    assert!(c.nodes[lag].rep.fault().is_none());
+}

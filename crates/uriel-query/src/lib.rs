@@ -182,7 +182,7 @@ impl Engine {
         Ok(Engine::from_graph(Graph::open_in_memory(budget)?))
     }
 
-    fn from_graph(graph: Graph) -> Engine {
+    pub fn from_graph(graph: Graph) -> Engine {
         let shared = Arc::new(Shared {
             cache: Arc::new(LocalCache::new(graph.budget().query_cache())),
             pending: Mutex::new(Vec::new()),
