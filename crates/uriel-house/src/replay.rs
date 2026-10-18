@@ -43,15 +43,24 @@ pub enum HouseCall {
         fellow: Fellow,
         chart: Chart,
     },
-    Merge,
-    AddFact(Fact),
-    Next,
+    Merge {
+        need: Option<GoalId>,
+    },
+    AddFact {
+        fact: Fact,
+        need: Option<GoalId>,
+    },
+    Next {
+        need: Option<GoalId>,
+    },
     Report {
         goal: GoalId,
         status: GoalStatus,
         evidence: TestEvidence,
+        need: Option<GoalId>,
     },
     RecordTestRun {
+        need: Option<GoalId>,
         test: String,
         status: TestStatus,
         secs: f64,

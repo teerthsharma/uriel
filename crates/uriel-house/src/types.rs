@@ -25,8 +25,27 @@ impl GoalId {
         &self.0
     }
 
+    fn split_need(&self) -> (usize, &str) {
+        if let Some((ordinal, tail)) = self
+            .0
+            .strip_prefix('N')
+            .and_then(|rest| rest.split_once('.'))
+            .and_then(|(n, tail)| Some((n.parse::<usize>().ok()?, tail)))
+            .filter(|(n, _)| *n >= 2)
+        {
+            return (ordinal, tail);
+        }
+        (1, &self.0)
+    }
+
+    #[allow(missing_docs)]
+    pub fn need_ordinal(&self) -> usize {
+        self.split_need().0
+    }
+
     fn segments(&self) -> impl Iterator<Item = &str> {
-        self.0
+        self.split_need()
+            .1
             .trim_start_matches(|c: char| c.is_ascii_alphabetic())
             .split('.')
     }
@@ -58,9 +77,13 @@ impl PartialOrd for GoalId {
 
 impl Ord for GoalId {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.segments()
-            .map(segment_key)
-            .cmp(other.segments().map(segment_key))
+        self.need_ordinal()
+            .cmp(&other.need_ordinal())
+            .then_with(|| {
+                self.segments()
+                    .map(segment_key)
+                    .cmp(other.segments().map(segment_key))
+            })
             .then_with(|| self.0.cmp(&other.0))
     }
 }

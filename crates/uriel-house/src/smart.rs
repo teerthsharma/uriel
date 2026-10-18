@@ -55,16 +55,22 @@ pub(crate) fn flips(runs: &[RunRec], key: &str, status: TestStatus) -> bool {
     runs.iter().any(|r| r.key == key && r.status != status)
 }
 
-pub(crate) fn select(state: &State, touched: &[String], cfg: &HouseConfig) -> Vec<TestPick> {
+pub(crate) fn select(
+    state: &State,
+    touched: &[String],
+    cfg: &HouseConfig,
+    scope: Option<usize>,
+) -> Vec<TestPick> {
     let touched: BTreeSet<&str> = touched.iter().map(String::as_str).collect();
     let mut chosen: BTreeSet<String> = BTreeSet::new();
+    let in_scope = |id: &GoalId| scope.is_none_or(|n| id.need_ordinal() == n);
     for (name, t) in &state.tests {
-        if t.covers.iter().any(|c| touched.contains(c.as_str())) {
+        if in_scope(&t.goal) && t.covers.iter().any(|c| touched.contains(c.as_str())) {
             chosen.insert(name.clone());
         }
     }
     for rec in state.goals.values() {
-        if rec.status == GoalStatus::Retired {
+        if rec.status == GoalStatus::Retired || !in_scope(&rec.goal.id) {
             continue;
         }
         let g = &rec.goal;

@@ -484,8 +484,8 @@ impl Store {
         }
 
         // project / meta
-        if state.dirty.meta || (ids.project.is_none() && state.need.is_some()) {
-            if let Some(need) = &state.need {
+        if state.dirty.meta || (ids.project.is_none() && !state.needs.is_empty()) {
+            if let Some(need) = state.needs.first().map(|n| &n.rec) {
                 let p = props([
                     ("name", Value::String(need.project.clone())),
                     ("goal", Value::String(need.goal.clone())),

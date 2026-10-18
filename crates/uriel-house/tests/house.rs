@@ -11,20 +11,19 @@ use std::sync::Arc;
 // ---------------------------------------------------------------- need, chart, merge
 
 #[test]
-fn need_creates_g0_once() {
+fn the_first_need_is_g0_and_a_second_need_is_a_new_root() {
     let e = env();
     let id = e
         .house
         .need("proj", "build x", &["it works".into()])
         .expect("need");
     assert_eq!(id.as_str(), "G0");
-    assert!(matches!(
-        e.house.need("proj", "again", &[]),
-        Err(HouseError::NeedExists(_))
-    ));
     let s = e.house.status().expect("status");
     assert_eq!(s["need"]["id"], "G0");
     assert_eq!(s["need"]["acceptance"][0], "it works");
+    let second = e.house.need("proj", "again", &[]).expect("second need");
+    assert_eq!(second.as_str(), "N2.G0");
+    assert_eq!(e.house.status().expect("status")["need"]["id"], "N2.G0");
 }
 
 #[test]

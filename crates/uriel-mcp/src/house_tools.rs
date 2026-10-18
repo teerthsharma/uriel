@@ -12,6 +12,14 @@ fn fellow_schema() -> Json {
         "description": "The charting fellow."})
 }
 
+fn need_prop() -> Json {
+    str_prop("Id of the Need this call targets (G0, N2.G0, ...). Default: the newest Need that is not complete.")
+}
+
+fn need_only_schema() -> Json {
+    object(json!({"need": need_prop()}), &[])
+}
+
 fn need_schema() -> Json {
     object(
         json!({
@@ -27,9 +35,10 @@ fn chart_schema() -> Json {
     object(
         json!({
             "fellow": fellow_schema(),
+            "need": need_prop(),
             "chart": {
                 "type": "object",
-                "description": "The fellow's chart: {need: \"G0\", fellow, goals: [{id, parent, text, leaf, tier, class, needs, writes, reads, creates, test: {name, cmd, class}, est: {ram_mb, secs, tokens}, guards, alt_of}]}. `need` and `fellow` default from the arguments.",
+                "description": "The fellow's chart: {need: \"G0\" (or the Need id, e.g. \"N2.G0\"; goal ids then carry its prefix), fellow, goals: [{id, parent, text, leaf, tier, class, needs, writes, reads, creates, test: {name, cmd, class}, est: {ram_mb, secs, tokens}, guards, alt_of}]}. `need` and `fellow` default from the arguments.",
                 "properties": {"goals": {"type": "array", "items": {"type": "object"}}},
                 "required": ["goals"],
                 "additionalProperties": true
@@ -41,7 +50,7 @@ fn chart_schema() -> Json {
 
 fn fact_schema() -> Json {
     object(
-        json!({"fact": {
+        json!({"need": need_prop(), "fact": {
             "type": "object",
             "description": "A verified fact. An `id` is assigned when absent; a fact that `refutes` a goal kills it and its subtree.",
             "properties": {
@@ -62,6 +71,7 @@ fn report_schema() -> Json {
     object(
         json!({
             "goal": str_prop("Goal id."),
+            "need": need_prop(),
             "status": {"type": "string", "enum": ["reached", "blocked", "pending"],
                 "description": "`reached` is accepted only if the bound test's first recorded run was RED."},
             "evidence": {
@@ -84,6 +94,7 @@ fn test_run_schema() -> Json {
     object(
         json!({
             "test": str_prop("Name of a bound test."),
+            "need": need_prop(),
             "status": {"type": "string", "enum": ["red", "green"]},
             "secs": {"type": "number", "minimum": 0, "description": "Wall-clock seconds."},
             "peak_ram_mb": {"type": "integer", "minimum": 0, "description": "Measured peak RSS in MB; feeds the cost model."},
@@ -97,6 +108,7 @@ fn leap_schema() -> Json {
     object(
         json!({
             "goal": str_prop("A leap-candidate goal id (see house_status.leap_candidates)."),
+            "need": need_prop(),
             "cause": str_prop("Cause of death of the theory.")
         }),
         &["goal", "cause"],
@@ -105,7 +117,7 @@ fn leap_schema() -> Json {
 
 fn select_schema() -> Json {
     object(
-        json!({"files": str_list("Files that changed.")}),
+        json!({"need": need_prop(), "files": str_list("Files that changed.")}),
         &["files"],
     )
 }
@@ -114,7 +126,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "house_need",
         title: "State the Need",
-        description: "Create the Need G0: what the patient (project) requires, with acceptance criteria. One Need per database.",
+        description: "Create a Need: what the patient (project) requires, with acceptance criteria. The first Need is G0; a later Need is N2.G0, N3.G0 and so on, and every goal id of that Need carries the same prefix (N2.G1, N2.G1.1). Several Needs share one database and one resource governor.",
         writes: true,
         schema: need_schema,
     },
@@ -130,7 +142,7 @@ pub const TOOLS: &[ToolDef] = &[
         title: "Merge the charts",
         description: "Merge the stored charts into the one goal tree (backbone, guards, ALT groups, refutations) and validate it.",
         writes: true,
-        schema: no_args,
+        schema: need_only_schema,
     },
     ToolDef {
         name: "house_fact",
@@ -144,7 +156,7 @@ pub const TOOLS: &[ToolDef] = &[
         title: "Next batch",
         description: "The next batch of leaves to dispatch: ready, within the resource governor and free of file conflicts. Dispatched goals become active. Each entry carries its model, prompt pack, test and limits.",
         writes: true,
-        schema: no_args,
+        schema: need_only_schema,
     },
     ToolDef {
         name: "house_report",
@@ -170,9 +182,9 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "house_status",
         title: "House status",
-        description: "A JSON snapshot: the Need, goal counts and list, retirements, pending re-charts, leap candidates, facts.",
+        description: "A JSON snapshot: the Need, goal counts and list, retirements, pending re-charts, leap candidates, facts. Describes one Need (the `need` argument, else the newest open one) and lists every Need under `needs` with its goal counts by status; `current` names the newest open Need.",
         writes: false,
-        schema: no_args,
+        schema: need_only_schema,
     },
     ToolDef {
         name: "house_select_tests",
@@ -229,6 +241,14 @@ fn object_arg(args: &Json, key: &str) -> Result<serde_json::Map<String, Json>, S
     }
 }
 
+fn need_arg(args: &Json) -> Result<Option<GoalId>, String> {
+    match args.get("need") {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::String(s)) if !s.trim().is_empty() => Ok(Some(GoalId::new(s.trim()))),
+        Some(_) => Err("'need' must be a non-empty string".into()),
+    }
+}
+
 fn goal_arg(args: &Json) -> Result<GoalId, String> {
     req_str(args, "goal").map(|s| GoalId::new(s.trim()))
 }
@@ -238,14 +258,14 @@ pub fn call(ctx: &Context, name: &str, args: &Json) -> ToolResult {
         "house_config" => config(ctx),
         "house_need" => need(ctx, args),
         "house_chart" => chart(ctx, args),
-        "house_merge" => merge(ctx),
+        "house_merge" => merge(ctx, args),
         "house_fact" => fact(ctx, args),
-        "house_next" => next(ctx),
+        "house_next" => next(ctx, args),
         "house_report" => report(ctx, args),
         "house_test_run" => test_run(ctx, args),
         "house_leap" => leap(ctx, args),
         "house_status" => house(ctx)?
-            .status()
+            .status_in(need_arg(args)?.as_ref())
             .map(|v| v.to_string())
             .map_err(|e| e.to_string()),
         "house_select_tests" => select_tests(ctx, args),
@@ -297,7 +317,17 @@ fn need(ctx: &Context, args: &Json) -> ToolResult {
 fn chart(ctx: &Context, args: &Json) -> ToolResult {
     let fellow = parse_fellow(req_str(args, "fellow")?)?;
     let mut obj = object_arg(args, "chart")?;
-    obj.entry("need").or_insert_with(|| json!("G0"));
+    let house = house(ctx)?;
+    let need = need_arg(args)?;
+    let target = match (&need, obj.get("need").and_then(Json::as_str)) {
+        (Some(n), Some(c)) if n.as_str() != c => {
+            return Err(format!("chart need '{c}' conflicts with the need argument '{n}'"))
+        }
+        (Some(n), _) => n.clone(),
+        (None, Some(c)) => GoalId::new(c),
+        (None, None) => house.resolve_need(None).unwrap_or_else(|_| GoalId::new("G0")),
+    };
+    obj.insert("need".into(), json!(target.as_str()));
     let signed = obj
         .get("fellow")
         .and_then(Json::as_str)
@@ -307,19 +337,23 @@ fn chart(ctx: &Context, args: &Json) -> ToolResult {
     let chart: Chart =
         serde_json::from_value(Json::Object(obj)).map_err(|e| format!("invalid chart: {e}"))?;
     let goals = chart.goals.len();
-    house(ctx)?
+    house
         .submit_chart(fellow, chart)
         .map_err(|vs| violations_error(&vs))?;
     Ok(json!({"accepted": true, "fellow": fellow.name(), "goals": goals}).to_string())
 }
 
-fn merge(ctx: &Context) -> ToolResult {
-    let report = house(ctx)?.merge().map_err(|vs| violations_error(&vs))?;
+fn merge(ctx: &Context, args: &Json) -> ToolResult {
+    let need = need_arg(args)?;
+    let report = house(ctx)?
+        .merge_in(need.as_ref())
+        .map_err(|vs| violations_error(&vs))?;
     Ok(to_json(&report)?.to_string())
 }
 
 fn fact(ctx: &Context, args: &Json) -> ToolResult {
     let mut obj = object_arg(args, "fact")?;
+    let need = need_arg(args)?;
     let house = house(ctx)?;
     if !obj.contains_key("id") {
         let known = house
@@ -334,12 +368,17 @@ fn fact(ctx: &Context, args: &Json) -> ToolResult {
     let fact: Fact =
         serde_json::from_value(Json::Object(obj)).map_err(|e| format!("invalid fact: {e}"))?;
     let id = fact.id.clone();
-    house.add_fact(fact).map_err(|e| e.to_string())?;
+    house
+        .add_fact_in(need.as_ref(), fact)
+        .map_err(|e| e.to_string())?;
     Ok(json!({"recorded": true, "id": id}).to_string())
 }
 
-fn next(ctx: &Context) -> ToolResult {
-    let batch = house(ctx)?.next().map_err(|e| e.to_string())?;
+fn next(ctx: &Context, args: &Json) -> ToolResult {
+    let need = need_arg(args)?;
+    let batch = house(ctx)?
+        .next_in(need.as_ref())
+        .map_err(|e| e.to_string())?;
     Ok(to_json(&batch)?.to_string())
 }
 
@@ -372,7 +411,7 @@ fn report(ctx: &Context, args: &Json) -> ToolResult {
         }
     };
     let out = house(ctx)?
-        .report(&goal, status, evidence)
+        .report_in(need_arg(args)?.as_ref(), &goal, status, evidence)
         .map_err(|e| e.to_string())?;
     let body = to_json(&out)?.to_string();
     match out.outcome {
@@ -399,7 +438,7 @@ fn test_run(ctx: &Context, args: &Json) -> ToolResult {
     };
     let covered = opt_strings(args, "covered_files")?;
     house(ctx)?
-        .record_test_run(test, status, secs, ram, &covered)
+        .record_test_run_in(need_arg(args)?.as_ref(), test, status, secs, ram, &covered)
         .map_err(|e| e.to_string())?;
     Ok(json!({"recorded": true, "test": test, "status": status.name()}).to_string())
 }
@@ -407,7 +446,11 @@ fn test_run(ctx: &Context, args: &Json) -> ToolResult {
 fn leap(ctx: &Context, args: &Json) -> ToolResult {
     let goal = goal_arg(args)?;
     let cause = req_str(args, "cause")?;
-    match house(ctx)?.leap(&goal, cause).map_err(|e| e.to_string())? {
+    let need = need_arg(args)?;
+    match house(ctx)?
+        .leap_in(need.as_ref(), &goal, cause)
+        .map_err(|e| e.to_string())?
+    {
         Some(dispatch) => Ok(to_json(&dispatch)?.to_string()),
         None => Ok(json!({
             "leap": false,
@@ -424,7 +467,7 @@ fn select_tests(ctx: &Context, args: &Json) -> ToolResult {
         return Err("'files' must name at least one file".into());
     }
     let picks = house(ctx)?
-        .select_tests(&files)
+        .select_tests_in(need_arg(args)?.as_ref(), &files)
         .map_err(|e| e.to_string())?;
     Ok(to_json(&picks)?.to_string())
 }
