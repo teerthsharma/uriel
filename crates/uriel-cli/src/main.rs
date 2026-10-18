@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 mod banner;
+mod capture;
 mod commands;
+mod recall;
 
 use std::io::{BufRead, BufWriter, IsTerminal, Write};
 use std::path::PathBuf;
@@ -15,8 +17,19 @@ use uriel_mcp::config::{
 
 use banner::{mode_from_env, render_banner, Mode};
 
+const HOOKS_HELP: &str = "Claude Code hooks (never block a session, always exit 0):
+  uriel capture --db <path>
+      PreCompact and SessionEnd: reads the hook payload on stdin, streams the
+      transcript and stores it in the graph as ~600-token fractions
+      (ctx/<session>/<n>.md), so it stays searchable after compaction.
+  uriel recall-context --db <path> [--budget 1200] [--capture]
+      SessionStart (matcher compact): prints the hook JSON with the gists most
+      relevant to the session; --capture also stores the compaction summary
+      first, under one database open.
+Settings block: docs/claude-code-hooks.md";
+
 #[derive(Debug, Parser, PartialEq)]
-#[command(name = "uriel", disable_version_flag = true, about = "uriel: fewest tokens in, same information out")]
+#[command(name = "uriel", disable_version_flag = true, about = "uriel: fewest tokens in, same information out", after_help = HOOKS_HELP)]
 struct Cli {
     #[arg(short = 'V', long = "version")]
     version: bool,
@@ -32,6 +45,8 @@ enum Command {
     Calibrate(CalibrateArgs),
     Doctor(DoctorArgs),
     Install,
+    Capture(CaptureArgs),
+    RecallContext(RecallArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -81,6 +96,26 @@ struct DoctorArgs {
     db: Option<PathBuf>,
 }
 
+#[derive(Debug, Args, PartialEq)]
+struct CaptureArgs {
+    #[arg(long)]
+    db: Option<PathBuf>,
+    #[arg(long)]
+    session: Option<String>,
+    #[arg(long)]
+    transcript: Option<PathBuf>,
+}
+
+#[derive(Debug, Args, PartialEq)]
+struct RecallArgs {
+    #[arg(long)]
+    db: Option<PathBuf>,
+    #[arg(long, default_value_t = recall::DEFAULT_BUDGET)]
+    budget: usize,
+    #[arg(long)]
+    capture: bool,
+}
+
 impl McpArgs {
     fn to_config(&self) -> Config {
         Config {
@@ -127,6 +162,16 @@ fn dispatch<R: BufRead, W: Write>(
         None | Some(Command::Banner) | Some(Command::Mcp(_)) => {
             commands::say(out, render_banner(mode))
         }
+        Some(Command::Capture(args)) => {
+            let db = args.db.unwrap_or_else(default_db_path);
+            capture::run(&db, args.session, args.transcript, input);
+            Ok(())
+        }
+        Some(Command::RecallContext(args)) => {
+            let db = args.db.unwrap_or_else(default_db_path);
+            recall::run(&db, args.budget, args.capture, input, out);
+            Ok(())
+        }
         Some(Command::Index(args)) => {
             let db = args.db.unwrap_or_else(default_db_path);
             commands::index(out, &args.path, &db)
@@ -160,8 +205,25 @@ fn effective_colorterm(colorterm: String, wt_session: bool) -> String {
     }
 }
 
+fn is_hook_invocation(args: &[std::ffi::OsString]) -> bool {
+    args.get(1)
+        .is_some_and(|a| a == "capture" || a == "recall-context")
+}
+
+fn parse_cli() -> Cli {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(e) if e.use_stderr() && is_hook_invocation(&args) => {
+            eprintln!("uriel: {}", e.to_string().lines().next().unwrap_or("bad arguments"));
+            std::process::exit(0)
+        }
+        Err(e) => e.exit(),
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let stdout = std::io::stdout();
     let tty = stdout.is_terminal();
     let forced = color_forced(std::env::var_os("FORCE_COLOR").as_deref());
@@ -176,7 +238,13 @@ fn main() -> ExitCode {
     }
     let stdin = std::io::stdin();
     let mut out = BufWriter::new(stdout.lock());
-    let result = dispatch(cli, mode, stdin.lock(), &mut out);
+    let hook = matches!(cli.command, Some(Command::Capture(_) | Command::RecallContext(_)));
+    let input: Box<dyn BufRead> = if hook && stdin.is_terminal() {
+        Box::new(std::io::empty())
+    } else {
+        Box::new(stdin.lock())
+    };
+    let result = dispatch(cli, mode, input, &mut out);
     let flushed = out.flush().map_err(|e| e.to_string());
     match result.and(flushed) {
         Ok(()) => ExitCode::SUCCESS,
@@ -323,6 +391,47 @@ mod tests {
     }
 
     #[test]
+    fn capture_parses_its_flags_and_defaults() {
+        assert_eq!(
+            command(&["capture"]),
+            Some(Command::Capture(CaptureArgs { db: None, session: None, transcript: None }))
+        );
+        assert_eq!(
+            command(&["capture", "--db", "g.uriel", "--session", "s", "--transcript", "t.jsonl"]),
+            Some(Command::Capture(CaptureArgs {
+                db: Some(PathBuf::from("g.uriel")),
+                session: Some("s".into()),
+                transcript: Some(PathBuf::from("t.jsonl")),
+            }))
+        );
+    }
+
+    #[test]
+    fn recall_context_parses_its_flags_and_defaults() {
+        assert_eq!(
+            command(&["recall-context"]),
+            Some(Command::RecallContext(RecallArgs { db: None, budget: 1200, capture: false }))
+        );
+        assert_eq!(
+            command(&["recall-context", "--db", "g", "--budget", "300", "--capture"]),
+            Some(Command::RecallContext(RecallArgs {
+                db: Some(PathBuf::from("g")),
+                budget: 300,
+                capture: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn hook_invocations_are_recognised_by_their_first_argument() {
+        let args = |a: &[&str]| -> Vec<std::ffi::OsString> { a.iter().map(Into::into).collect() };
+        assert!(is_hook_invocation(&args(&["uriel", "capture", "--bogus"])));
+        assert!(is_hook_invocation(&args(&["uriel", "recall-context"])));
+        assert!(!is_hook_invocation(&args(&["uriel", "index"])));
+        assert!(!is_hook_invocation(&args(&["uriel"])));
+    }
+
+    #[test]
     fn unknown_flags_and_subcommands_are_rejected() {
         for bad in [
             &["--bogus"][..],
@@ -335,6 +444,9 @@ mod tests {
             &["calibrate", "--bogus"],
             &["doctor", "--bogus"],
             &["install", "--bogus"],
+            &["capture", "--bogus"],
+            &["recall-context", "--bogus"],
+            &["recall-context", "--budget", "many"],
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }

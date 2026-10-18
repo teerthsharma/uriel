@@ -18,7 +18,7 @@ uriel-mcp = { path = "../uriel-mcp" }
 uriel-rag = { path = "../uriel-rag" }
 uriel-core = { path = "../uriel-core" }
 uriel-place = { path = "../uriel-place" }
+serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
-serde_json = "1"
