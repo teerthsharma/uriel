@@ -395,8 +395,7 @@ fn filler_project() -> tempfile::TempDir {
 fn section<'a>(guide: &'a str, file: &str) -> &'a str {
     let start = guide.find(&format!("// {file}:")).unwrap_or_else(|| panic!("no {file} in {guide}"));
     let rest = &guide[start..];
-    let end = rest[3..].find("
-// ").map_or(rest.len(), |i| i + 3);
+    let end = rest[3..].find("\n// ").map_or(rest.len(), |i| i + 3);
     &rest[..end]
 }
 
