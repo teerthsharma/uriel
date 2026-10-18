@@ -60,7 +60,7 @@ pub(crate) fn rerank(
             idf(n, df as f64)
         })
         .collect();
-    let mut scored: Vec<(usize, f64)> = pool
+    let scored: Vec<(usize, f64)> = pool
         .iter()
         .enumerate()
         .map(|(rank, p)| {
