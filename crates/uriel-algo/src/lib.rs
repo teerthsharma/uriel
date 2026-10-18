@@ -12,6 +12,7 @@ mod projection;
 mod rng;
 mod similarity;
 mod spanning;
+mod stable;
 mod traversal;
 mod triangles;
 mod walk;
@@ -42,6 +43,7 @@ pub use similarity::{
     SimilarityPair,
 };
 pub use spanning::{kruskal_mst, prim_mst, SpanningForest};
+pub use stable::{Stable, Stop};
 pub use traversal::{bfs, dfs, Traversal};
 pub use triangles::{
     k_core_decomposition, local_clustering_coefficient, triangle_count, Clustering, TriangleCount,
