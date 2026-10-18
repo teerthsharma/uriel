@@ -1,6 +1,6 @@
 const PER_MILLE: u128 = 1000;
-const RESERVE: u128 = 200;
-const REDB_CACHE: u128 = 300;
+const RESERVE: u128 = 250;
+const REDB_CACHE: u128 = 250;
 const HOT: u128 = 80;
 const WARM: u128 = 80;
 const QUERY_CACHE: u128 = 80;

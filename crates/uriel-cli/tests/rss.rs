@@ -13,6 +13,23 @@ use uriel_core::{Graph, MemoryBudget, NodeId, Props, Value};
 use uriel_rag::{Embedder, HashEmbedder};
 
 const BUDGET_MIB: u64 = 50;
+const PEAK_LIMIT_MIB: f64 = 60.0;
+const PEAK_TARGET_MIB: f64 = 56.0;
+const SEARCHES: usize = 100;
+const VIEWS: usize = 20;
+const SOULS: usize = 20;
+const QUERIES: [&str; 10] = [
+    "memory budget cache capacity",
+    "transaction commit write batch",
+    "tier promotion eviction policy",
+    "hash embedding vector dimension",
+    "path walk directory skip",
+    "error type conversion display",
+    "iterator over adjacency list",
+    "lock poisoned mutex guard",
+    "epoch counter increments",
+    "cache admission frequency sketch",
+];
 const CHUNKS_PER_FILE: usize = 50;
 const COMMIT_EVERY_FILES: usize = 40;
 const SETTLE: Duration = Duration::from_millis(600);
@@ -263,6 +280,12 @@ impl Server {
         self.rpc("tools/list", json!({}));
     }
 
+    fn call(&mut self, name: &str, arguments: Json) -> Json {
+        let resp = self.rpc("tools/call", json!({"name":name,"arguments":arguments}));
+        assert!(resp["result"]["isError"] != json!(true), "{name} failed: {resp}");
+        resp
+    }
+
     fn search(&mut self) -> Json {
         self.rpc(
             "tools/call",
@@ -414,4 +437,84 @@ fn rss_at_idle_and_after_one_rag_search_on_10k_chunks_is_within_budget() {
 #[test]
 fn rss_at_idle_and_after_one_rag_search_on_100k_chunks_is_within_budget() {
     gate(100_000);
+}
+
+#[cfg(windows)]
+fn os_peak_working_set(pid: u32) -> u64 {
+    let script = format!("(Get-Process -Id {pid}).PeakWorkingSet64");
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .expect("run powershell");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .expect("PeakWorkingSet64 is a number")
+}
+
+#[cfg(windows)]
+fn full_server_peaks(bin: &Path, tree: &Path) -> Vec<(&'static str, f64)> {
+    let dir = db_dir().join(format!("full-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("full dir");
+    let db = dir.join("full.uriel");
+    let memory = std::env::var("URIEL_RSS_MEMORY_MIB").ok();
+    let extra: Vec<&str> = match &memory {
+        Some(m) => vec!["--memory-mib", m],
+        None => Vec::new(),
+    };
+    let mut server = Server::spawn(bin, &db, tree, &extra);
+    let pid = server.pid();
+    let mut peaks = Vec::new();
+    server.init();
+    thread::sleep(SETTLE);
+    peaks.push(("idle", mib(os_peak_working_set(pid))));
+    let path = tree.to_string_lossy().to_string();
+    server.call("rag_index", json!({ "path": path }));
+    peaks.push(("rag_index", mib(os_peak_working_set(pid))));
+    for i in 0..SEARCHES {
+        server.call(
+            "rag_search",
+            json!({"query": QUERIES[i % QUERIES.len()], "k": 8, "budget_tokens": 1500, "fresh": true}),
+        );
+    }
+    peaks.push(("rag_search_x100", mib(os_peak_working_set(pid))));
+    for i in 0..VIEWS {
+        server.call(
+            "view",
+            json!({"question": QUERIES[i % QUERIES.len()], "budget_tokens": 3000}),
+        );
+    }
+    peaks.push(("view_x20", mib(os_peak_working_set(pid))));
+    for i in 0..SOULS {
+        server.call("soul", json!({"budget_tokens": 300 + 100 * i}));
+    }
+    peaks.push(("soul_x20", mib(os_peak_working_set(pid))));
+    drop(server);
+    let _ = std::fs::remove_dir_all(&dir);
+    peaks
+}
+
+#[cfg(windows)]
+fn print_peaks(label: &str, peaks: &[(&str, f64)]) {
+    let cells: Vec<String> = peaks.iter().map(|(n, p)| format!("{n}={p:.1}")).collect();
+    println!("FULLRSS {label} profile={} peak_mib {}", if cfg!(debug_assertions) { "debug" } else { "release" }, cells.join(" "));
+}
+
+#[cfg(windows)]
+#[test]
+fn full_server_peak_working_set_over_the_workspace_tree_stays_under_60_mib_in_release() {
+    let tree = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").canonicalize().expect("crates dir");
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_uriel"));
+    let peaks = full_server_peaks(&bin, &tree);
+    print_peaks("candidate", &peaks);
+    if let Some(control) = std::env::var_os("URIEL_CONTROL_BIN") {
+        let c = full_server_peaks(Path::new(&control), &tree);
+        print_peaks("control", &c);
+    }
+    if !cfg!(debug_assertions) {
+        for (stage, peak) in &peaks {
+            assert!(*peak <= PEAK_LIMIT_MIB, "peak after {stage} {peak:.1} MiB over {PEAK_LIMIT_MIB} MiB");
+            assert!(*peak <= PEAK_TARGET_MIB, "peak after {stage} {peak:.1} MiB eats the 4 MiB margin under {PEAK_LIMIT_MIB} MiB");
+        }
+    }
 }

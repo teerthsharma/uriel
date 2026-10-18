@@ -45,6 +45,7 @@ const LADDER_L2_HITS: usize = 3;
 const FILE_REC_BYTES: usize = 96;
 const CAP_CHECK_EVERY: usize = 256;
 const GIST_FLUSH_BYTES: usize = 1 << 20;
+const BATCH_CHUNKS: usize = 512;
 
 fn default_level(rank: usize) -> Level {
     if rank < LADDER_L1_HITS {
@@ -323,13 +324,17 @@ impl fmt::Debug for Rag {
     }
 }
 
-fn sha_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut s = String::with_capacity(64);
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    let digest = digest.as_ref();
+    let mut s = String::with_capacity(digest.len() * 2);
     for b in digest {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+fn sha_hex(bytes: &[u8]) -> String {
+    hex_digest(Sha256::digest(bytes))
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -514,32 +519,15 @@ impl Rag {
         let mut report = IndexReport::default();
         let mut corpus = Corpus::new();
         let mut seen: HashSet<String> = HashSet::new();
-        let mut pending: Vec<(String, String, Lang, Vec<RawChunk>)> = Vec::new();
+        let mut pending: Vec<(String, PathBuf, String, Lang)> = Vec::new();
         for (rel, abs) in files {
             report.files_scanned += 1;
-            let Ok(meta) = fs::metadata(&abs) else {
-                report.files_skipped += 1;
-                continue;
-            };
-            if meta.len() > self.cfg.max_file_bytes {
-                report.files_skipped += 1;
-                continue;
-            }
-            let Ok(bytes) = fs::read(&abs) else {
-                report.files_skipped += 1;
-                continue;
-            };
-            if bytes.iter().take(8000).any(|b| *b == 0) {
-                report.files_skipped += 1;
-                continue;
-            }
-            let Ok(text) = String::from_utf8(bytes) else {
+            let Some(text) = self.read_text(&abs) else {
                 report.files_skipped += 1;
                 continue;
             };
             let lang = Lang::from_path(&rel);
-            let chunks = chunk_text(&text, lang, &self.cfg.chunking);
-            for c in &chunks {
+            for c in chunk_text(&text, lang, &self.cfg.chunking) {
                 corpus.add(&c.text);
             }
             let hash = sha_hex(text.as_bytes());
@@ -552,13 +540,9 @@ impl Rag {
             if unchanged {
                 report.files_unchanged += 1;
             } else {
-                pending.push((rel, hash, lang, chunks));
+                pending.push((rel, abs, hash, lang));
             }
         }
-        let prepared: Vec<Prepared> = pending
-            .into_iter()
-            .map(|(path, hash, lang, chunks)| self.prepare(path, hash, true, lang, chunks, &corpus))
-            .collect();
         let removals: Vec<String> = if opts.prune {
             self.read_state()
                 .files
@@ -569,8 +553,37 @@ impl Rag {
         } else {
             Vec::new()
         };
-        self.apply(prepared, removals, &mut report)?;
+        let mut batch: Vec<Prepared> = Vec::new();
+        let mut batch_chunks = 0usize;
+        for (rel, abs, hash, lang) in pending {
+            let text = self.read_text(&abs).filter(|t| sha_hex(t.as_bytes()) == hash);
+            let Some(text) = text else {
+                report.files_skipped += 1;
+                continue;
+            };
+            let chunks = chunk_text(&text, lang, &self.cfg.chunking);
+            drop(text);
+            batch_chunks += chunks.len();
+            batch.push(self.prepare(rel, hash, true, lang, chunks, &corpus));
+            if batch_chunks >= BATCH_CHUNKS {
+                self.apply(std::mem::take(&mut batch), Vec::new(), &mut report)?;
+                batch_chunks = 0;
+            }
+        }
+        self.apply(batch, removals, &mut report)?;
         Ok(report)
+    }
+
+    fn read_text(&self, abs: &Path) -> Option<String> {
+        let meta = fs::metadata(abs).ok()?;
+        if meta.len() > self.cfg.max_file_bytes {
+            return None;
+        }
+        let bytes = fs::read(abs).ok()?;
+        if bytes.iter().take(8000).any(|b| *b == 0) {
+            return None;
+        }
+        String::from_utf8(bytes).ok()
     }
 
     pub fn index_text(&self, source_id: &str, text: &str) -> Result<IndexReport, RagError> {
