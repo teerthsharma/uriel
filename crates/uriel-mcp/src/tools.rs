@@ -7,7 +7,7 @@ use crate::config::Format;
 use crate::services::Services;
 use crate::session::Session;
 use crate::placement::PlaceState;
-use crate::{house_tools, memory, place_tools, rag_tools, view};
+use crate::{house_tools, memory, place_tools, rag_tools, soul, view};
 use uriel_query::{AccessMode, Engine, QueryStats};
 
 pub type ToolResult = Result<String, String>;
@@ -258,6 +258,7 @@ pub fn all() -> impl Iterator<Item = &'static ToolDef> {
         .chain(house_tools::TOOLS.iter())
         .chain(place_tools::TOOLS.iter())
         .chain(view::TOOLS.iter())
+        .chain(soul::TOOLS.iter())
 }
 
 pub fn visible(read_only: bool) -> impl Iterator<Item = &'static ToolDef> {
@@ -304,6 +305,7 @@ pub fn call(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
         }
         n if n.starts_with("house_") => house_tools::call(ctx, n, args),
         "view" => view::call(ctx, name, args),
+        "soul" => soul::call(ctx, name, args),
         "calibrate" | "why_hot" | "pin" | "unpin" | "replay" | "tier_stats" => {
             place_tools::call(ctx, name, args)
         }

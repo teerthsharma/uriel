@@ -16,6 +16,7 @@ const FORMAT_TOOLS: &[&str] = &[
     "seal_recall",
     "read_neo4j_cypher",
     "view",
+    "soul",
     "why_hot",
     "calibrate",
     "replay",
