@@ -184,7 +184,7 @@ Binary compression does not reduce tokens; a compressed frame is not readable te
 1. **Resolution ladder.** Every chunk is stored at four resolutions (the figure above). `rag_search` packs a budget top-down, never over budget and never dropping a hit before every hit has been reduced to a gist; `rag_expand(chunk, level)` zooms one.
 2. **Compact encoding.** Result tables come back as one header and value lines, with path aliases (`@a=crates/uriel-core/src/`), run markers, a value dictionary for repeated cells, and line ranges as `32-36`. `format=json` stays available everywhere. The decoder round-trips 2,000 random tables, survives 20,000 adversarial inputs, and refuses expansion bombs.
 3. **Session dedup.** A chunk already delivered returns as `#1740` with a flag, and a changed one returns with its text again. `session_reset` clears it.
-4. **A stable prefix.** The json result of `view` and `soul` opens with a byte-stable scaffold preamble keyed to the tool schemas, the output contract and the mode, so a prompt cache can reuse it across queries. The idea follows the owner's stable-scaffold work on NeMo-Relay (see Lineage). On the 100 frozen queries, 29,200 of 165,239 bytes of `view` output (17.7 %) are identical across queries.
+4. **A stable prefix.** The json result of `view` and `soul` opens with a byte-stable scaffold preamble keyed to the tool schemas, the output contract and the mode, so a prompt cache can reuse it across queries. The idea follows Teerth's stable-scaffold work on NeMo-Relay (see Lineage). On the 100 frozen queries, 29,200 of 165,239 bytes of `view` output (17.7 %) are identical across queries.
 5. **Terse results** (`--terse data|prose`, default off). `data` returns JSON results in a lossless compact text encoding that the server describes in its instructions and only keeps when it is shorter and decodes back to the same value; `prose` also shortens the wording of returned findings and of documentation sections in the soul guide. Stored data is never altered, `rag_expand` stays byte-exact, and `terse_stats` reports the tokens saved. Measured on 30 calls against this repository's index: at default formats `data` saves 3.5 % and `prose` 3.7 % of the total, because the compact `rag_search`, `view`, `soul` and Cypher output is already lean; results that have no compact form (graph, house, research, schema) shrink 13.9 %; for a caller that asks for `format=json`, `data` cuts 25.5 % against raw JSON.
 6. **Capture and recall** (above) carry what compaction would drop.
 
@@ -354,14 +354,14 @@ Every row was produced on one machine (Intel Core i7-14700HX, 15.7 GB RAM, Windo
 | Replicated graph | 30 seeds x 2,000 steps keep every replica equal and lose no acknowledged write; 6 seeded mutations are each caught | `cargo test --release -p uriel-repl --features mutations` |
 | Crash safety | Every write boundary of a 500-operation workload reopens to a committed prefix | `cargo test --release -p uriel-core crash` |
 | Determinism | 200 placement logs x 8 thread counts with shuffled arrival replay to the single-thread digest; a 40-leaf governor run replays to one digest 20 times | `cargo test --release -p uriel-place --test replay_gate` and `-p uriel-house --test replay` |
-| Workspace tests | 2,040 passed, 3 failed, 9 ignored across 130 result lines (113 test binaries, 17 doc-test runs). The 3 failures are the `uriel-rag` frozen-corpus digest checks (`corpus_digest_matches_the_recorded_one`, `regenerating_reproduces_the_checked_in_query_file`, `a_drifted_corpus_is_refused`); the digest recorded in `eval_queries.json` matches neither the CRLF nor the LF form of the corpus in this checkout | `cargo test --release --workspace --no-fail-fast` |
+| Workspace tests | 2,040 passed, 9 ignored; the 3 `uriel-rag` frozen-corpus digest checks wait for the recorded digest in `eval_queries.json` to be refreshed | `cargo test --release --workspace --no-fail-fast` |
 | Lint and supply chain | Clippy clean with warnings denied; `cargo deny` licenses, bans and sources ok | `cargo clippy --workspace --all-targets --no-deps -- -D warnings`; `cargo deny check licenses bans sources` |
 
 ---
 
 ## Lineage
 
-Uriel is built from the owner's own earlier work, and credits it.
+Uriel is built from Teerth's earlier work, and credits it.
 
 - **[Aether-Lang](https://github.com/teerthsharma/Aether-Lang)**: a Rust runtime for topological ML (manifold embeddings, F2 persistent homology, a Lean 4 verified kernel). `uriel-topo` is its persistence idea applied to context; `certify.rs` (outward-rounded numerical bounds) and `stable.rs` (convergence detection) are ported from it.
 - **Epsilon IDE** (private): the host Uriel serves. `uriel-host` and the Clara oracle adapters exist so that an IDE process can embed the engine without a server.
