@@ -123,28 +123,55 @@ fn place(buffers: &[Buffer], fit: Fit) -> Result<Plan, ArenaError> {
             b.id,
         )
     });
-    let mut placed: Vec<(Buffer, u64)> = Vec::with_capacity(order.len());
+    let n = order.len();
+    let mut by_time: Vec<usize> = (0..n).collect();
+    by_time.sort_unstable_by_key(|&i| (order[i].first_use, i));
+    let mut rank = vec![0usize; n];
+    for (pos, &i) in by_time.iter().enumerate() {
+        rank[i] = pos;
+    }
+    let firsts: Vec<u64> = by_time.iter().map(|&i| order[i].first_use).collect();
+    let cap = n.next_power_of_two();
+    let mut tree = vec![0u128; 2 * cap];
+    let mut offs = vec![0u64; n];
+    let mut stack: Vec<(usize, usize, usize)> = Vec::new();
     let mut blocks: Vec<(u64, u64)> = Vec::new();
-    let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(order.len());
+    let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(n);
     let mut peak = 0u64;
-    for b in order {
+    for (i, b) in order.iter().enumerate() {
         if b.size == 0 {
             offsets.push((b.id, 0));
             continue;
         }
         blocks.clear();
-        blocks.extend(
-            placed
-                .iter()
-                .filter(|(p, _)| p.first_use <= b.last_use && b.first_use <= p.last_use)
-                .map(|&(p, off)| (off, off + p.size)),
-        );
+        let hi = firsts.partition_point(|&f| f <= b.last_use);
+        let need = u128::from(b.first_use) + 1;
+        stack.push((1, 0, cap));
+        while let Some((node, l, r)) = stack.pop() {
+            if l >= hi || tree[node] < need {
+                continue;
+            }
+            if r - l == 1 {
+                let j = by_time[l];
+                blocks.push((offs[j], offs[j] + order[j].size));
+            } else {
+                let m = (l + r) / 2;
+                stack.push((2 * node, l, m));
+                stack.push((2 * node + 1, m, r));
+            }
+        }
         blocks.sort_unstable();
         let off = pick(&blocks, b.size, b.align, fit)?;
         let end = off.checked_add(b.size).ok_or(ArenaError::Overflow)?;
         peak = peak.max(end);
+        offs[i] = off;
         offsets.push((b.id, off));
-        placed.push((b, off));
+        let mut node = cap + rank[i];
+        tree[node] = u128::from(b.last_use) + 1;
+        while node > 1 {
+            node /= 2;
+            tree[node] = tree[2 * node].max(tree[2 * node + 1]);
+        }
     }
     offsets.sort_unstable();
     Ok(Plan { offsets, peak })
