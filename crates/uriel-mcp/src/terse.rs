@@ -174,7 +174,7 @@ mod tests {
     fn gen(seed: &mut u64, depth: usize) -> Json {
         match (lcg(seed) % 7, depth) {
             (0, _) => Json::Null,
-            (1, _) => Json::Bool(lcg(seed) % 2 == 0),
+            (1, _) => Json::Bool(lcg(seed).is_multiple_of(2)),
             (2, _) => json!(lcg(seed) as i64 - 1000),
             (3, _) => Json::String(word(seed)),
             (4 | 5, 0..=3) => Json::Array((0..lcg(seed) % 5).map(|_| gen(seed, depth + 1)).collect()),

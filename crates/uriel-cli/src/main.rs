@@ -142,6 +142,7 @@ impl McpArgs {
         )
     }
 
+    #[cfg(test)]
     fn to_config_env(&self, mode_env: Option<&str>) -> Result<Config, String> {
         self.to_config_envs(mode_env, None)
     }
