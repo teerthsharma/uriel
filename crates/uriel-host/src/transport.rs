@@ -1,13 +1,16 @@
 use std::io::{ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::codec::{body_len_from_prefix, LENGTH_PREFIX};
 use crate::error::HostError;
 
 pub const FRAME_DEADLINE: Duration = Duration::from_secs(10);
+const DRAIN_DEADLINE: Duration = Duration::from_millis(250);
+const DRAIN_MAX_BYTES: usize = 64 * 1024;
+const DRAIN_CHUNK: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recv {
@@ -18,6 +21,7 @@ pub enum Recv {
 pub trait Transport: Send {
     fn send(&mut self, frame: &[u8]) -> Result<(), HostError>;
     fn recv(&mut self, into: &mut Vec<u8>, timeout: Duration) -> Result<Recv, HostError>;
+    fn finish(&mut self) {}
 }
 
 pub struct ChannelTransport {
@@ -126,6 +130,25 @@ impl Transport for TcpTransport {
     fn send(&mut self, frame: &[u8]) -> Result<(), HostError> {
         self.stream.write_all(frame).map_err(map_io)?;
         self.stream.flush().map_err(map_io)
+    }
+
+    fn finish(&mut self) {
+        if self.stream.shutdown(Shutdown::Write).is_err() {
+            return;
+        }
+        let deadline = Instant::now() + DRAIN_DEADLINE;
+        let mut chunk = [0u8; DRAIN_CHUNK];
+        let mut drained = 0usize;
+        while drained < DRAIN_MAX_BYTES {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() || self.stream.set_read_timeout(Some(remaining)).is_err() {
+                break;
+            }
+            match self.stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => drained += n,
+            }
+        }
     }
 
     fn recv(&mut self, into: &mut Vec<u8>, timeout: Duration) -> Result<Recv, HostError> {

@@ -231,7 +231,9 @@ fn run_connection(
             Err(HostError::Codec(e)) => {
                 Response::error(error_code_for(&e), e.to_string())
                     .encode_or_error(&mut outbound, max_frame);
-                let _ = transport.send(&outbound);
+                if transport.send(&outbound).is_ok() {
+                    transport.finish();
+                }
                 break;
             }
             Err(_) => break,
