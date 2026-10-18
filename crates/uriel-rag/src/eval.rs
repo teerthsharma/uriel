@@ -642,7 +642,7 @@ fn run_soul_on(root: &Path, queries: &[EvalQuery]) -> Result<SoulEvalReport, Rag
         .map(|q| {
             scan.rows
                 .iter()
-                .find(|r| r.file == q.file && r.start <= q.signature_line && q.signature_line <= r.end)
+                .find(|r| *r.file == *q.file && r.start <= q.signature_line && q.signature_line <= r.end)
                 .map(|r| r.id)
         })
         .collect();

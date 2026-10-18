@@ -1,4 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
+
+use sha2::{Digest, Sha256};
 
 use uriel_core::{Node, NodeId, Props, Value};
 
@@ -6,7 +9,7 @@ use crate::bm25::idf;
 use crate::chunk::{is_doc_line, is_signature, Lang};
 use crate::index::{rust_defs, HOP_DECAY};
 use crate::tokenize::terms;
-use crate::{lock, prop_line, prop_str, sha_hex, Hit, HitVia, LadderPack, Level, Rag, RagError};
+use crate::{hex_digest, lock, prop_line, prop_str, sha_hex, Hit, HitVia, LadderPack, Level, Rag, RagError};
 
 const POOL_MAX: usize = 2048;
 const NOISE_START: f64 = 0.2;
@@ -130,7 +133,7 @@ pub struct Soul {
 #[derive(Debug, Clone)]
 pub(crate) struct Row {
     pub id: u64,
-    pub file: String,
+    pub file: Arc<str>,
     pub start: u32,
     pub end: u32,
     pub salience: f64,
@@ -141,7 +144,8 @@ pub(crate) struct Scan {
     pub fingerprint: String,
     computed: usize,
     reused: usize,
-    fresh: Vec<(String, Feature)>,
+    fresh: Vec<(Arc<str>, Feature)>,
+    words: Vec<Arc<str>>,
     seen: HashSet<String>,
     existing: HashMap<String, (NodeId, u64)>,
     hashes: HashMap<u64, String>,
@@ -157,7 +161,26 @@ impl Scan {
 struct Feature {
     doc: f64,
     defs: f64,
-    terms: Vec<String>,
+    terms: Arc<[u32]>,
+}
+
+#[derive(Default)]
+struct Interner {
+    ids: HashMap<Arc<str>, u32>,
+    words: Vec<Arc<str>>,
+}
+
+impl Interner {
+    fn id(&mut self, word: &str) -> u32 {
+        if let Some(&id) = self.ids.get(word) {
+            return id;
+        }
+        let shared: Arc<str> = Arc::from(word);
+        let id = u32::try_from(self.words.len()).unwrap_or(u32::MAX);
+        self.words.push(shared.clone());
+        self.ids.insert(shared, id);
+        id
+    }
 }
 
 fn props_bytes(props: &Props) -> u64 {
@@ -174,16 +197,17 @@ fn props_bytes(props: &Props) -> u64 {
             .sum::<u64>()
 }
 
-fn feature_props(key: &str, f: &Feature) -> Props {
+fn feature_props(key: &str, f: &Feature, words: &[Arc<str>]) -> Props {
     let mut p = Props::new();
     p.insert("key".into(), Value::from(key));
     p.insert("doc".into(), Value::Float(f.doc));
     p.insert("defs".into(), Value::Float(f.defs));
-    p.insert("terms".into(), Value::from(f.terms.join(" ").as_str()));
+    let joined: Vec<&str> = f.terms.iter().filter_map(|&t| words.get(t as usize).map(|w| &**w)).collect();
+    p.insert("terms".into(), Value::from(joined.join(" ").as_str()));
     p
 }
 
-fn feature_of(node: &Node) -> Option<(String, Feature)> {
+fn feature_of(node: &Node, interner: &mut Interner) -> Option<(String, Feature)> {
     let (Some(Value::String(key)), Some(Value::Float(doc)), Some(Value::Float(defs)), Some(Value::String(t))) = (
         node.props.get("key"),
         node.props.get("doc"),
@@ -197,7 +221,7 @@ fn feature_of(node: &Node) -> Option<(String, Feature)> {
         Feature {
             doc: *doc,
             defs: *defs,
-            terms: t.split(' ').filter(|w| !w.is_empty()).map(str::to_string).collect(),
+            terms: t.split(' ').filter(|w| !w.is_empty()).map(|w| interner.id(w)).collect::<Vec<u32>>().into(),
         },
     ))
 }
@@ -230,7 +254,7 @@ fn params_key(opts: &SoulOptions) -> String {
 
 struct Raw {
     id: u64,
-    file: String,
+    file: Arc<str>,
     start: u32,
     end: u32,
     hash: String,
@@ -298,7 +322,7 @@ impl Diffusion<'_> {
             .into_iter()
             .map(|i| Hit {
                 chunk_id: self.pool[i].id,
-                file: self.pool[i].file.clone(),
+                file: self.pool[i].file.to_string(),
                 start_line: self.pool[i].start,
                 end_line: self.pool[i].end,
                 memory: self.memories[i].clone(),
@@ -452,7 +476,7 @@ impl Rag {
             used += guide_bytes;
         }
         for (key, feat) in &scan.fresh {
-            let props = feature_props(key, feat);
+            let props = feature_props(key, feat, &scan.words);
             let bytes = props_bytes(&props);
             if used + bytes <= cap {
                 tx.create_node(&[FEATURE], props)?;
@@ -465,22 +489,32 @@ impl Rag {
 
     pub(crate) fn salience_scan(&self) -> Result<Scan, RagError> {
         let read = self.graph.begin_read()?;
+        let mut interner = Interner::default();
         let mut stored: HashMap<String, (NodeId, u64, Feature)> = HashMap::new();
         for node in read.nodes_by_label(FEATURE)? {
             let node = node?;
-            if let Some((key, feat)) = feature_of(&node) {
+            if let Some((key, feat)) = feature_of(&node, &mut interner) {
                 stored.insert(key, (node.id, props_bytes(&node.props), feat));
             }
         }
         let mut raws: Vec<Raw> = Vec::new();
-        let mut df: HashMap<String, u32> = HashMap::new();
+        let mut df: Vec<u32> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
-        let mut local: HashMap<String, Feature> = HashMap::new();
-        let mut fresh: Vec<(String, Feature)> = Vec::new();
+        let mut local: HashMap<Arc<str>, Feature> = HashMap::new();
+        let mut fresh: Vec<(Arc<str>, Feature)> = Vec::new();
+        let mut files: HashMap<String, Arc<str>> = HashMap::new();
         let (mut computed, mut reused) = (0usize, 0usize);
         for node in read.nodes_by_label("Chunk")? {
             let node = node?;
-            let file = prop_str(&node, "file")?.to_string();
+            let file_name = prop_str(&node, "file")?;
+            let file = match files.get(file_name) {
+                Some(f) => f.clone(),
+                None => {
+                    let f: Arc<str> = Arc::from(file_name);
+                    files.insert(file_name.to_string(), f.clone());
+                    f
+                }
+            };
             let text = prop_str(&node, "text")?;
             let mem = prop_str(&node, "mem")?;
             let lang = Lang::from_path(&file);
@@ -492,7 +526,7 @@ impl Rag {
             let feat = if let Some((_, _, f)) = stored.get(&key) {
                 reused += 1;
                 f.clone()
-            } else if let Some(f) = local.get(&key) {
+            } else if let Some(f) = local.get(key.as_str()) {
                 reused += 1;
                 f.clone()
             } else {
@@ -501,16 +535,23 @@ impl Rag {
                 let f = Feature {
                     doc: doc_density(text, lang),
                     defs: definition_weight(text, lang),
-                    terms: unique.into_iter().collect(),
+                    terms: unique.iter().map(|t| interner.id(t)).collect(),
                 };
-                local.insert(key.clone(), f.clone());
-                fresh.push((key.clone(), f.clone()));
+                let shared: Arc<str> = Arc::from(key.as_str());
+                local.insert(shared.clone(), f.clone());
+                fresh.push((shared, f.clone()));
                 f
             };
-            for t in &feat.terms {
-                *df.entry(t.clone()).or_insert(0) += 1;
+            for &t in feat.terms.iter() {
+                let t = t as usize;
+                if df.len() <= t {
+                    df.resize(t + 1, 0);
+                }
+                df[t] += 1;
             }
-            seen.insert(key);
+            if stored.contains_key(&key) {
+                seen.insert(key);
+            }
             raws.push(Raw {
                 id: node.id.0,
                 start: prop_line(&node, "start")?,
@@ -531,7 +572,7 @@ impl Rag {
                     .feat
                     .terms
                     .iter()
-                    .map(|t| idf(n, f64::from(df.get(t).copied().unwrap_or(1))))
+                    .map(|&t| idf(n, f64::from(df.get(t as usize).copied().unwrap_or(1))))
                     .sum();
                 (1.0 + sum).ln()
             })
@@ -540,31 +581,30 @@ impl Rag {
         let defs = normalised(&raws.iter().map(|r| r.feat.defs).collect::<Vec<_>>());
         let mass = normalised(&mass);
         let total = W_DOC + W_DEF + W_IDF;
-        let mut fingerprint_input = String::new();
-        let rows: Vec<Row> = raws
-            .iter()
-            .enumerate()
-            .map(|(i, r)| {
-                fingerprint_input.push_str(&format!(
-                    "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\n",
-                    r.file, r.start, r.end, r.id, r.hash
-                ));
-                Row {
-                    id: r.id,
-                    file: r.file.clone(),
-                    start: r.start,
-                    end: r.end,
-                    salience: (W_DOC * docs[i] + W_DEF * defs[i] + W_IDF * mass[i]) / total,
-                }
-            })
-            .collect();
-        let hashes: HashMap<u64, String> = raws.iter().map(|r| (r.id, r.hash.clone())).collect();
+        let mut hasher = Sha256::new();
+        let mut hashes: HashMap<u64, String> = HashMap::with_capacity(raws.len());
+        let mut rows: Vec<Row> = Vec::with_capacity(raws.len());
+        for (i, r) in raws.into_iter().enumerate() {
+            hasher.update(
+                format!("{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\n", r.file, r.start, r.end, r.id, r.hash)
+                    .as_bytes(),
+            );
+            rows.push(Row {
+                id: r.id,
+                file: r.file,
+                start: r.start,
+                end: r.end,
+                salience: (W_DOC * docs[i] + W_DEF * defs[i] + W_IDF * mass[i]) / total,
+            });
+            hashes.insert(r.id, r.hash);
+        }
         Ok(Scan {
             rows,
-            fingerprint: sha_hex(fingerprint_input.as_bytes()),
+            fingerprint: hex_digest(hasher.finalize()),
             computed,
             reused,
             fresh,
+            words: interner.words,
             seen,
             existing,
             hashes,

@@ -324,13 +324,17 @@ impl fmt::Debug for Rag {
     }
 }
 
-fn sha_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut s = String::with_capacity(64);
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    let digest = digest.as_ref();
+    let mut s = String::with_capacity(digest.len() * 2);
     for b in digest {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+fn sha_hex(bytes: &[u8]) -> String {
+    hex_digest(Sha256::digest(bytes))
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {

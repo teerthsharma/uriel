@@ -30,7 +30,10 @@ fn corpus() -> PathBuf {
     if let Some(dir) = std::env::var_os("URIEL_BUDGET_CORPUS") {
         return PathBuf::from(dir);
     }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").canonicalize().expect("crates dir")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()
+        .expect("crates dir")
 }
 
 fn chunk_digest(graph: &Graph) -> (String, usize) {
@@ -46,7 +49,13 @@ fn chunk_digest(graph: &Graph) -> (String, usize) {
             Some(Value::Int(i)) => *i,
             _ => -1,
         };
-        rows.push(format!("{}:{}:{}:{}", text("file"), line("start"), line("end"), text("hash")));
+        rows.push(format!(
+            "{}:{}:{}:{}",
+            text("file"),
+            line("start"),
+            line("end"),
+            text("hash")
+        ));
     }
     rows.sort();
     let mut h = Sha256::new();
@@ -64,7 +73,8 @@ fn run(mib: usize) -> Outcome {
     let graph = Graph::open(&db, MemoryBudget::mib(mib)).expect("graph");
     let rag = Rag::open(graph.clone(), RagConfig::default()).expect("rag");
     let started = Instant::now();
-    rag.index_dir(&corpus(), &IndexOptions::default()).expect("index");
+    rag.index_dir(&corpus(), &IndexOptions::default())
+        .expect("index");
     let millis = started.elapsed().as_millis();
     let (digest, chunks) = chunk_digest(&graph);
     let spilled = rag.stats().expect("stats").spilled;
