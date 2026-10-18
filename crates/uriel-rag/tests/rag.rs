@@ -118,7 +118,8 @@ fn search_finds_semantically_related_chunk() {
         .expect("search");
     assert!(!hits.is_empty());
     assert_eq!(hits[0].file, "a.rs");
-    assert!(hits[0].memory.contains("checksum"), "{:?}", hits[0].memory);
+    let full = rag.expand(hits[0].chunk_id).expect("expand");
+    assert!(full.contains("compute_checksum"), "{full}");
     let hits = rag
         .search("when to prune roses", &SearchOptions::default())
         .expect("search");
