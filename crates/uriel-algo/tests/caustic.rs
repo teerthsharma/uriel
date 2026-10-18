@@ -68,7 +68,7 @@ fn t6_floor_is_at_least_one_half_on_any_consistent_partition() {
                     continue;
                 }
                 let v = certified_precision_bound(n, m, flagged).expect("t6");
-                assert!(v >= 0.5 - EPS && v <= 1.0, "n={n} m={m} S={flagged} v={v}");
+                assert!((0.5 - EPS..=1.0).contains(&v), "n={n} m={m} S={flagged} v={v}");
             }
         }
     }
