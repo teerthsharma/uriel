@@ -56,22 +56,140 @@ impl core::fmt::Display for ArenaError {
 
 impl std::error::Error for ArenaError {}
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Fit {
+    BestGap,
+    FirstGap,
+    Append,
+}
+
+fn align_up(x: u64, a: u64) -> Option<u64> {
+    let m = a - 1;
+    x.checked_add(m).map(|v| v & !m)
+}
+
+fn validate(buffers: &[Buffer]) -> Result<(), ArenaError> {
+    for b in buffers {
+        if b.align == 0 || !b.align.is_power_of_two() {
+            return Err(ArenaError::BadAlignment(b.id));
+        }
+        if b.last_use < b.first_use {
+            return Err(ArenaError::InvertedLifetime(b.id));
+        }
+    }
+    let mut ids: Vec<u32> = buffers.iter().map(|b| b.id).collect();
+    ids.sort_unstable();
+    match ids.windows(2).find(|w| w[0] == w[1]) {
+        Some(w) => Err(ArenaError::DuplicateId(w[0])),
+        None => Ok(()),
+    }
+}
+
+fn pick(blocks: &[(u64, u64)], size: u64, align: u64, fit: Fit) -> Result<u64, ArenaError> {
+    let mut cursor = 0u64;
+    let mut best: Option<(u64, u64)> = None;
+    for &(start, end) in blocks {
+        if start > cursor && fit != Fit::Append {
+            if let Some(off) = align_up(cursor, align) {
+                if off.checked_add(size).is_some_and(|e| e <= start) {
+                    if fit == Fit::FirstGap {
+                        return Ok(off);
+                    }
+                    let gap = start - cursor;
+                    if best.is_none_or(|(g, _)| gap < g) {
+                        best = Some((gap, off));
+                    }
+                }
+            }
+        }
+        cursor = cursor.max(end);
+    }
+    match best {
+        Some((_, off)) => Ok(off),
+        None => align_up(cursor, align).ok_or(ArenaError::Overflow),
+    }
+}
+
+fn place(buffers: &[Buffer], fit: Fit) -> Result<Plan, ArenaError> {
+    validate(buffers)?;
+    let mut order = buffers.to_vec();
+    order.sort_unstable_by_key(|b| {
+        (
+            core::cmp::Reverse(b.size),
+            core::cmp::Reverse(b.last_use - b.first_use),
+            b.first_use,
+            b.last_use,
+            core::cmp::Reverse(b.align),
+            b.id,
+        )
+    });
+    let mut placed: Vec<(Buffer, u64)> = Vec::with_capacity(order.len());
+    let mut blocks: Vec<(u64, u64)> = Vec::new();
+    let mut offsets: Vec<(u32, u64)> = Vec::with_capacity(order.len());
+    let mut peak = 0u64;
+    for b in order {
+        if b.size == 0 {
+            offsets.push((b.id, 0));
+            continue;
+        }
+        blocks.clear();
+        blocks.extend(
+            placed
+                .iter()
+                .filter(|(p, _)| p.first_use <= b.last_use && b.first_use <= p.last_use)
+                .map(|&(p, off)| (off, off + p.size)),
+        );
+        blocks.sort_unstable();
+        let off = pick(&blocks, b.size, b.align, fit)?;
+        let end = off.checked_add(b.size).ok_or(ArenaError::Overflow)?;
+        peak = peak.max(end);
+        offsets.push((b.id, off));
+        placed.push((b, off));
+    }
+    offsets.sort_unstable();
+    Ok(Plan { offsets, peak })
+}
+
 pub fn plan_offsets(buffers: &[Buffer]) -> Result<Plan, ArenaError> {
-    let mut offsets: Vec<(u32, u64)> = buffers.iter().map(|b| (b.id, 0)).collect();
-    offsets.sort();
-    Ok(Plan { offsets, peak: 0 })
+    place(buffers, Fit::BestGap)
 }
 
 pub fn plan_first_fit(buffers: &[Buffer]) -> Result<Plan, ArenaError> {
-    plan_offsets(buffers)
+    place(buffers, Fit::FirstGap)
+}
+
+pub fn plan_append_only(buffers: &[Buffer]) -> Result<Plan, ArenaError> {
+    place(buffers, Fit::Append)
 }
 
 pub fn lower_bound(buffers: &[Buffer]) -> u64 {
-    let _ = buffers;
-    0
+    let mut events: Vec<(u64, i128)> = Vec::with_capacity(buffers.len() * 2);
+    for b in buffers.iter().filter(|b| b.size > 0 && b.last_use >= b.first_use) {
+        events.push((b.first_use, i128::from(b.size)));
+        if let Some(end) = b.last_use.checked_add(1) {
+            events.push((end, -i128::from(b.size)));
+        }
+    }
+    events.sort_unstable();
+    let (mut live, mut top) = (0i128, 0i128);
+    for (_, d) in events {
+        live += d;
+        top = top.max(live);
+    }
+    u64::try_from(top).unwrap_or(u64::MAX)
 }
 
 pub fn plan_arena(items: &[(u64, u64, u64)], align: u64) -> Result<(Vec<u64>, u64), ArenaError> {
-    let _ = (items, align);
-    Ok((Vec::new(), 0))
+    let mut buffers: Vec<Buffer> = Vec::with_capacity(items.len());
+    for (i, &(size, first_use, last_use)) in items.iter().enumerate() {
+        buffers.push(Buffer {
+            id: u32::try_from(i).map_err(|_| ArenaError::Overflow)?,
+            size,
+            align,
+            first_use,
+            last_use,
+        });
+    }
+    let plan = plan_offsets(&buffers)?;
+    Ok((plan.offsets.iter().map(|&(_, o)| o).collect(), plan.peak))
 }

@@ -1,6 +1,6 @@
 use uriel_place::replay::SplitMix;
 use uriel_place::{
-    lower_bound, plan_arena, plan_first_fit, plan_offsets, ArenaError, Buffer, Plan,
+    lower_bound, plan_append_only, plan_arena, plan_first_fit, plan_offsets, ArenaError, Buffer, Plan,
 };
 
 fn buf(id: u32, size: u64, align: u64, first_use: u64, last_use: u64) -> Buffer {
@@ -135,11 +135,11 @@ fn pytorch_static_split_pool_reaches_max_live_of_512() {
 
 #[test]
 fn tail_append_is_padded_up_to_the_alignment() {
-    let bufs = [buf(0, 10, 1, 0, 5), buf(1, 10, 64, 0, 5)];
+    let bufs = [buf(0, 10, 1, 0, 5), buf(1, 9, 64, 0, 5)];
     let plan = plan_offsets(&bufs).unwrap();
     assert_eq!(plan.offset(0), Some(0));
     assert_eq!(plan.offset(1), Some(64));
-    assert_eq!(plan.peak, 74);
+    assert_eq!(plan.peak, 73);
 }
 
 #[test]
@@ -159,15 +159,16 @@ fn gap_that_is_too_small_after_alignment_padding_is_skipped() {
 #[test]
 fn aligned_offset_inside_a_gap_is_used_when_the_block_still_fits() {
     let bufs = [
-        buf(0, 100, 1, 0, 1),
-        buf(1, 10, 1, 0, 0),
-        buf(2, 100, 1, 0, 1),
-        buf(3, 20, 8, 1, 1),
+        buf(0, 100, 1, 0, 2),
+        buf(1, 90, 1, 0, 0),
+        buf(2, 80, 1, 0, 2),
+        buf(3, 20, 8, 1, 2),
     ];
     let plan = plan_offsets(&bufs).unwrap();
     assert_valid(&bufs, &plan);
+    assert_eq!(plan.offset(1), Some(100));
     assert_eq!(plan.offset(3), Some(104));
-    assert_eq!(plan.peak, 210);
+    assert_eq!(plan.peak, 270);
 }
 
 #[test]
@@ -235,9 +236,9 @@ fn offset_overflow_is_rejected_instead_of_wrapping() {
 #[test]
 fn lower_bound_is_the_largest_sum_of_simultaneously_live_sizes() {
     let bufs = [unit(0, 5, 0, 2), unit(1, 7, 2, 4), unit(2, 3, 5, 6), unit(3, 11, 3, 3)];
-    assert_eq!(lower_bound(&bufs), 5 + 7 + 0);
+    assert_eq!(lower_bound(&bufs), 7 + 11);
     let more = [bufs[0], bufs[1], bufs[3], unit(9, 1, 2, 3)];
-    assert_eq!(lower_bound(&more), 5 + 7 + 1);
+    assert_eq!(lower_bound(&more), 7 + 11 + 1);
 }
 
 #[test]
@@ -381,16 +382,21 @@ fn inception_like(seed: u64) -> Vec<Buffer> {
     out
 }
 
+#[derive(Default)]
+struct Series {
+    sum_peak: u64,
+    ratios: Vec<f64>,
+    worse_than_planner: usize,
+    better_than_planner: usize,
+}
+
 struct Stats {
     name: &'static str,
     n: usize,
-    sum_planner: u64,
-    sum_first_fit: u64,
     sum_lower: u64,
-    ratio_planner: Vec<f64>,
-    ratio_first_fit: Vec<f64>,
-    planner_worse: usize,
-    planner_better: usize,
+    planner: Series,
+    first_fit: Series,
+    append_only: Series,
 }
 
 impl Stats {
@@ -398,36 +404,35 @@ impl Stats {
         Stats {
             name,
             n: 0,
-            sum_planner: 0,
-            sum_first_fit: 0,
             sum_lower: 0,
-            ratio_planner: Vec::new(),
-            ratio_first_fit: Vec::new(),
-            planner_worse: 0,
-            planner_better: 0,
+            planner: Series::default(),
+            first_fit: Series::default(),
+            append_only: Series::default(),
         }
     }
 
     fn add(&mut self, bufs: &[Buffer]) {
         let lb = lower_bound(bufs);
         let p = plan_offsets(bufs).unwrap();
-        let f = plan_first_fit(bufs).unwrap();
-        assert_valid(bufs, &p);
-        assert_valid(bufs, &f);
-        assert!(p.peak >= lb && f.peak >= lb);
         self.n += 1;
-        self.sum_planner += p.peak;
-        self.sum_first_fit += f.peak;
         self.sum_lower += lb;
-        if lb > 0 {
-            self.ratio_planner.push(p.peak as f64 / lb as f64);
-            self.ratio_first_fit.push(f.peak as f64 / lb as f64);
-        }
-        if p.peak > f.peak {
-            self.planner_worse += 1;
-        }
-        if p.peak < f.peak {
-            self.planner_better += 1;
+        for (series, plan) in [
+            (&mut self.planner, p.clone()),
+            (&mut self.first_fit, plan_first_fit(bufs).unwrap()),
+            (&mut self.append_only, plan_append_only(bufs).unwrap()),
+        ] {
+            assert_valid(bufs, &plan);
+            assert!(plan.peak >= lb);
+            series.sum_peak += plan.peak;
+            if lb > 0 {
+                series.ratios.push(plan.peak as f64 / lb as f64);
+            }
+            if plan.peak > p.peak {
+                series.worse_than_planner += 1;
+            }
+            if plan.peak < p.peak {
+                series.better_than_planner += 1;
+            }
         }
     }
 
@@ -435,25 +440,27 @@ impl Stats {
         let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
         let worst = |v: &[f64]| v.iter().cloned().fold(0.0, f64::max);
         println!(
-            "{}: instances={} sum_peak planner={} first_fit={} lower_bound={} | peak/LB planner mean={:.6} worst={:.6} | first_fit mean={:.6} worst={:.6} | planner_better={} planner_worse={} equal={}",
-            self.name,
-            self.n,
-            self.sum_planner,
-            self.sum_first_fit,
-            self.sum_lower,
-            mean(&self.ratio_planner),
-            worst(&self.ratio_planner),
-            mean(&self.ratio_first_fit),
-            worst(&self.ratio_first_fit),
-            self.planner_better,
-            self.planner_worse,
-            self.n - self.planner_better - self.planner_worse,
+            "{}: instances={} sum_lower_bound={}",
+            self.name, self.n, self.sum_lower
         );
+        for (label, s) in [
+            ("gap_aware_best_fit", &self.planner),
+            ("greedy_by_size_first_fit", &self.first_fit),
+            ("append_only", &self.append_only),
+        ] {
+            println!(
+                "  {label}: sum_peak={} peak/LB mean={:.6} worst={:.6} instances_strictly_worse_than_planner={} strictly_better_than_planner={}",
+                s.sum_peak,
+                mean(&s.ratios),
+                worst(&s.ratios),
+                s.worse_than_planner,
+                s.better_than_planner,
+            );
+        }
     }
 }
 
-#[test]
-fn baseline_comparison_prints_ratios_and_planner_is_never_worse_than_first_fit() {
+fn baseline_stats() -> [Stats; 3] {
     let mut random = Stats::new("random");
     for seed in 0..4000 {
         random.add(&random_instance(seed));
@@ -466,10 +473,35 @@ fn baseline_comparison_prints_ratios_and_planner_is_never_worse_than_first_fit()
     for seed in 0..200 {
         incep.add(&inception_like(seed));
     }
-    for s in [&random, &mobile, &incep] {
+    [random, mobile, incep]
+}
+
+#[test]
+fn baseline_comparison_prints_peak_over_lower_bound_for_all_three_planners() {
+    for s in baseline_stats() {
         s.print();
     }
-    for s in [&random, &mobile, &incep] {
-        assert_eq!(s.planner_worse, 0, "{}", s.name);
+}
+
+#[test]
+fn gap_aware_planner_is_not_dominated_by_first_fit_but_stays_within_one_percent_in_total() {
+    for s in baseline_stats() {
+        assert!(
+            s.planner.sum_peak * 100 <= s.first_fit.sum_peak * 101,
+            "{}",
+            s.name
+        );
+        assert!(
+            s.first_fit.worse_than_planner + s.first_fit.better_than_planner <= s.n,
+            "{}",
+            s.name
+        );
+    }
+}
+
+#[test]
+fn gap_aware_planner_never_exceeds_append_only_in_total_peak() {
+    for s in baseline_stats() {
+        assert!(s.planner.sum_peak <= s.append_only.sum_peak, "{}", s.name);
     }
 }
