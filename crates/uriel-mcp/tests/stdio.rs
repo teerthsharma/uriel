@@ -340,6 +340,7 @@ const MODE_TOOLS: &[&str] = &[
     "unpin",
     "replay",
     "view",
+    "soul",
     "tier_stats",
 ];
 
