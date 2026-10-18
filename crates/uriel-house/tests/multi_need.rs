@@ -464,7 +464,14 @@ fn merging_another_need_leaves_the_first_needs_status_identical() {
         .expect("chart one");
     e.house.merge().expect("merge one");
     e.house.next().expect("dispatch one");
-    let before = e.house.status_in(Some(&gid("G0"))).expect("before");
+    let of_need = |e: &Env| {
+        let mut v = e.house.status_in(Some(&gid("G0"))).expect("status");
+        let obj = v.as_object_mut().expect("object");
+        obj.remove("needs");
+        obj.remove("current");
+        v
+    };
+    let before = of_need(&e);
     e.house.need("p", "two", &[]).expect("need two");
     e.house
         .submit_chart(
@@ -474,7 +481,7 @@ fn merging_another_need_leaves_the_first_needs_status_identical() {
         .expect("chart two");
     e.house.merge().expect("merge two");
     e.house.next().expect("dispatch two");
-    assert_eq!(e.house.status_in(Some(&gid("G0"))).expect("after"), before);
+    assert_eq!(of_need(&e), before);
 }
 
 #[test]
@@ -594,4 +601,47 @@ fn the_heavy_cap_counts_active_goals_of_every_need() {
         .deferrals
         .iter()
         .any(|d| d.reason == DeferReason::HeavyCap));
+}
+
+#[test]
+fn status_lists_every_need_with_goal_counts_by_status_and_marks_the_current_one() {
+    let e = env();
+    assert_eq!(e.house.status().expect("empty")["needs"], serde_json::json!([]));
+    two_open_needs(&e);
+    e.house.next_in(Some(&gid("G0"))).expect("dispatch one");
+    prove_in(&e, "G0", "G1");
+    let s = e.house.status().expect("status");
+    assert_eq!(s["current"], "N2.G0");
+    let needs = s["needs"].as_array().expect("needs");
+    assert_eq!(needs.len(), 2);
+    assert_eq!(needs[0]["id"], "G0");
+    assert_eq!(needs[0]["goal"], "one");
+    assert_eq!(needs[0]["current"], false);
+    assert_eq!(needs[0]["complete"], false);
+    assert_eq!(needs[0]["merged"], true);
+    assert_eq!(needs[0]["goals"]["total"], 2);
+    assert_eq!(needs[0]["goals"]["reached"], 1);
+    assert_eq!(needs[0]["goals"]["active"], 1);
+    assert_eq!(needs[1]["id"], "N2.G0");
+    assert_eq!(needs[1]["current"], true);
+    assert_eq!(needs[1]["goals"]["pending"], 2);
+    let named = e.house.status_in(Some(&gid("G0"))).expect("named");
+    assert_eq!(named["need"]["id"], "G0");
+    assert_eq!(named["current"], "N2.G0");
+    assert_eq!(named["needs"].as_array().expect("needs").len(), 2);
+}
+
+#[test]
+fn a_complete_need_is_flagged_and_stops_being_current() {
+    let e = env();
+    two_open_needs(&e);
+    e.house.next_in(Some(&gid("N2.G0"))).expect("dispatch two");
+    prove_in(&e, "N2.G0", "N2.G1");
+    prove_in(&e, "N2.G0", "N2.G2");
+    let s = e.house.status().expect("status");
+    assert_eq!(s["current"], "G0");
+    let needs = s["needs"].as_array().expect("needs");
+    assert_eq!(needs[1]["complete"], true);
+    assert_eq!(needs[1]["current"], false);
+    assert_eq!(needs[0]["current"], true);
 }

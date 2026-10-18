@@ -182,7 +182,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "house_status",
         title: "House status",
-        description: "A JSON snapshot: the Need, goal counts and list, retirements, pending re-charts, leap candidates, facts. Describes one Need (the `need` argument, else the newest open one).",
+        description: "A JSON snapshot: the Need, goal counts and list, retirements, pending re-charts, leap candidates, facts. Describes one Need (the `need` argument, else the newest open one) and lists every Need under `needs` with its goal counts by status; `current` names the newest open Need.",
         writes: false,
         schema: need_only_schema,
     },

@@ -81,6 +81,31 @@ fn goal_event_with(id: &GoalId, rec: &GoalRec, status: &str, test: Option<String
     })
 }
 
+fn goal_counts(st: &State, ns: usize) -> Value {
+    let mut counts = BTreeMap::from([
+        ("pending", 0u64),
+        ("active", 0),
+        ("reached", 0),
+        ("blocked", 0),
+        ("retired", 0),
+    ]);
+    let root = State::need_id(ns);
+    let mut total = 0u64;
+    for (_, r) in st
+        .goals
+        .iter()
+        .filter(|(id, _)| id.need_ordinal() == ns && **id != root)
+    {
+        total += 1;
+        *counts.entry(sched::status_name(r.status)).or_default() += 1;
+    }
+    json!({
+        "total": total,
+        "pending": counts["pending"], "active": counts["active"], "reached": counts["reached"],
+        "blocked": counts["blocked"], "retired": counts["retired"],
+    })
+}
+
 impl House {
     /// Opens a House over `graph`, loading whatever an earlier House stored there.
     pub fn open(
@@ -1076,20 +1101,8 @@ impl House {
         let ns = idx.map_or(0, |i| i + 1);
         let root = need.map_or_else(|| State::need_id(1), |n| n.id.clone());
         let mine = |id: &GoalId| id.need_ordinal() == ns;
-        let mut counts = BTreeMap::from([
-            ("pending", 0u64),
-            ("active", 0),
-            ("reached", 0),
-            ("blocked", 0),
-            ("retired", 0),
-        ]);
-        let mut total = 0u64;
         let mut list = Vec::new();
         for (id, r) in st.goals.iter().filter(|(id, _)| mine(id)) {
-            if *id != root {
-                total += 1;
-                *counts.entry(sched::status_name(r.status)).or_default() += 1;
-            }
             list.push(json!({
                 "id": id.as_str(),
                 "status": sched::status_name(r.status),
@@ -1162,11 +1175,15 @@ impl House {
             "merged": need.is_some_and(|n| n.merged),
             "merge_stale": need.is_some_and(|n| n.merge_stale),
             "complete": st.goals.get(&root).is_some_and(|r| r.status == GoalStatus::Reached),
-            "goals": {
-                "total": total,
-                "pending": counts["pending"], "active": counts["active"], "reached": counts["reached"],
-                "blocked": counts["blocked"], "retired": counts["retired"],
-            },
+            "goals": goal_counts(st, ns),
+            "current": st.target(None).ok().map(|i| st.needs[i].id.as_str()),
+            "needs": st.needs.iter().enumerate().map(|(i, n)| json!({
+                "id": n.id.as_str(), "project": n.rec.project, "goal": n.rec.goal,
+                "current": st.target(None).ok() == Some(i),
+                "complete": st.is_complete(i),
+                "merged": n.merged,
+                "goals": goal_counts(st, i + 1),
+            })).collect::<Vec<_>>(),
             "goal_list": list,
             "active": active,
             "retired": retired,

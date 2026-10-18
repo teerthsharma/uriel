@@ -1428,3 +1428,28 @@ fn house_fact_refuting_a_goal_of_another_need_is_a_tool_error() {
     assert!(e.contains("does not belong"), "{e}");
     s.ok("house_fact", json!({"fact": fact, "need": "G0"}));
 }
+
+#[test]
+fn house_status_lists_every_need_with_counts_and_survives_a_restart() {
+    let p = Proj::new();
+    let db = p.db();
+    {
+        let mut s = p.session(&["--db", &db], &[]);
+        two_needs_merged(&mut s);
+        s.ok("house_next", json!({"need": "G0"}));
+        assert!(s.finish());
+    }
+    let mut s = p.session(&["--db", &db], &[]);
+    let st = s.ok("house_status", json!({}));
+    assert_eq!(st["current"], "N2.G0", "{st}");
+    let needs = st["needs"].as_array().expect("needs");
+    assert_eq!(needs.len(), 2, "{st}");
+    assert_eq!(needs[0]["id"], "G0");
+    assert_eq!(needs[0]["current"], false);
+    assert_eq!(needs[0]["goals"]["active"], 2, "{st}");
+    assert_eq!(needs[1]["id"], "N2.G0");
+    assert_eq!(needs[1]["current"], true);
+    assert_eq!(needs[1]["goals"]["pending"], 2, "{st}");
+    let third = second_need(&mut s);
+    assert_eq!(third["goal"], "N3.G0", "{third}");
+}
