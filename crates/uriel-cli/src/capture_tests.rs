@@ -547,3 +547,11 @@ fn the_summary_is_indexed_under_its_own_source() {
     let again = capture_into(&rag, "s1", &sc, MAX_WRITES).expect("again");
     assert_eq!(again.written, 0);
 }
+
+#[test]
+fn the_window_is_six_hundred_tokens_at_four_chars_each() {
+    assert_eq!(FRACTION_TOKENS * CHARS_PER_TOKEN, 2400);
+    let sc = scan_str(&jsonl(&conversation(80)));
+    assert!(sc.fractions.iter().all(|f| body(f).chars().count() <= 2400));
+    assert!(sc.fractions.iter().any(|f| body(f).chars().count() > 1800));
+}
