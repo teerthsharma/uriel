@@ -39,6 +39,7 @@ const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules"];
 const UTILITY_ALPHA: f32 = 0.3;
 const MAX_HOPS: usize = 2;
 const L1_RATIO: usize = 4;
+pub const MEMORY_PREFIX: &str = "memory/";
 const LADDER_L1_HITS: usize = 1;
 const LADDER_L2_HITS: usize = 3;
 const FILE_REC_BYTES: usize = 96;
@@ -283,6 +284,7 @@ struct PreparedChunk {
     l1: String,
     hash: String,
     vector: Vec<f32>,
+    counts: Vec<u8>,
     mentions: Vec<String>,
 }
 
@@ -608,15 +610,22 @@ impl Rag {
         chunks: Vec<RawChunk>,
         corpus: &Corpus,
     ) -> Prepared {
+        let remembered = path.starts_with(MEMORY_PREFIX);
+        let (mem_ratio, l1_ratio) = if remembered {
+            (1, 1)
+        } else {
+            (self.cfg.compression_ratio, self.l1_ratio())
+        };
         let chunks = chunks
             .into_iter()
             .map(|c| {
-                let mem = compress(&c.text, lang, self.cfg.compression_ratio, corpus);
-                let l1 = compress(&c.text, lang, self.l1_ratio(), corpus);
+                let mem = compress(&c.text, lang, mem_ratio, corpus);
+                let l1 = compress(&c.text, lang, l1_ratio, corpus);
                 let mut vector = self.embedder.embed(&c.text);
                 vector.resize(self.embedder.dim(), 0.0);
                 PreparedChunk {
                     gist: gist(&c.text, lang),
+                    counts: rerank::encode_counts(&c.text),
                     l1,
                     start: c.start_line,
                     end: c.end_line,
@@ -701,6 +710,7 @@ impl Rag {
                     props.insert("hash".into(), Value::from(c.hash.as_str()));
                     props.insert("utility".into(), Value::Float(0.0));
                     props.insert("vec".into(), Value::from(c.vector.clone()));
+                    props.insert("tc".into(), Value::Bytes(c.counts.clone()));
                     let id = tx.create_node(&["Chunk"], props)?;
                     tx.create_rel(id, node, "IN_FILE", Props::new())?;
                     if let Some(prev) = prev {

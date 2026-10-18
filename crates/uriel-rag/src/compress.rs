@@ -6,6 +6,10 @@ use crate::tokenize::terms;
 const MIN_BUDGET: usize = 12;
 const HEAD_MIN: usize = 16;
 const MAX_LINE_CHARS: usize = 160;
+const LEAD_WORDS: usize = 4;
+const DEFINITION_KEYWORDS: &[&str] = &[
+    "fn", "def", "class", "struct", "enum", "trait", "impl", "mod", "function", "interface", "type",
+];
 
 #[derive(Debug, Default)]
 pub(crate) struct Corpus {
@@ -62,7 +66,7 @@ fn token_weight(token: &str, corpus: &Corpus) -> f64 {
     unique.iter().map(|t| f64::from(corpus.idf(t))).sum()
 }
 
-fn fit(line: &str, max: usize, corpus: &Corpus) -> String {
+fn fit(line: &str, max: usize, corpus: &Corpus, signature: bool) -> String {
     let s = squeeze(line);
     if s.chars().count() <= max {
         return s;
@@ -82,7 +86,14 @@ fn fit(line: &str, max: usize, corpus: &Corpus) -> String {
         return joined(&tokens);
     }
     let weights: Vec<f64> = tokens.iter().map(|t| token_weight(t.1, corpus)).collect();
-    let marker = |k: usize| tokens[k].0 == 0 && weights[k] == 0.0;
+    let keyword = if signature {
+        tokens
+            .iter()
+            .position(|t| t.0 < LEAD_WORDS && DEFINITION_KEYWORDS.contains(&t.1))
+    } else {
+        None
+    };
+    let marker = |k: usize| (tokens[k].0 == 0 && weights[k] == 0.0) || keyword == Some(k);
     let mut order: Vec<usize> = (0..tokens.len()).collect();
     order.sort_by(|&a, &b| {
         marker(b)
@@ -117,7 +128,12 @@ pub(crate) fn compress(text: &str, lang: Lang, ratio: usize, corpus: &Corpus) ->
     let mut chosen: Vec<Option<String>> = vec![None; lines.len()];
     let mut used = 0usize;
 
-    let head = fit(lines[first], budget.clamp(HEAD_MIN, MAX_LINE_CHARS), corpus);
+    let head = fit(
+        lines[first],
+        budget.clamp(HEAD_MIN, MAX_LINE_CHARS),
+        corpus,
+        is_signature(lines[first], lang),
+    );
     used += head.chars().count() + 1;
     chosen[first] = Some(head);
 
@@ -356,5 +372,26 @@ mod tests {
         let m = compress(text, Lang::Rust, 64, &Corpus::new());
         assert!(!m.is_empty());
         assert!(m.starts_with("///"), "{m}");
+    }
+
+    #[test]
+    fn a_cut_signature_head_keeps_its_definition_keyword() {
+        let text = "def parse_config(path):
+    import json
+    with open(path) as handle:
+        return json.load(handle)
+";
+        let mut corpus = Corpus::new();
+        corpus.add(text);
+        let m = compress(text, Lang::Python, 16, &corpus);
+        assert_eq!(m, "def parse_config(path):");
+        let rust = "pub async fn handle_request(stream: Stream) -> Reply {
+    todo!()
+}
+";
+        let mut corpus = Corpus::new();
+        corpus.add(rust);
+        let m = compress(rust, Lang::Rust, 16, &corpus);
+        assert!(m.starts_with("fn ") || m.contains(" fn "), "{m}");
     }
 }
