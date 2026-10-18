@@ -16,6 +16,7 @@ name = "uriel-mcp"
 path = "src/main.rs"
 
 [dependencies]
+uriel-algo = { path = "../uriel-algo" }
 uriel-core = { path = "../uriel-core" }
 uriel-query = { path = "../uriel-query" }
 uriel-rag = { path = "../uriel-rag" }
@@ -28,4 +29,5 @@ thiserror = "2.0.21"
 
 [dev-dependencies]
 tempfile = "3"
+rayon = "1"
 sha2 = "0.10.9"

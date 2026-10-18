@@ -1,4 +1,7 @@
-use uriel_rag::{Embedder, HashEmbedder, Hit, HitVia, Rag, SearchOptions};
+use std::collections::BTreeMap;
+
+use uriel_algo::{bucket_islands, island_labels, Projection};
+use uriel_rag::{Embedder, HashEmbedder, Hit, HitVia, LadderPack, Rag, SearchOptions};
 use uriel_topo::persistence::Metric;
 use uriel_topo::schedule::{schedule_row, select_row, Blocks, ScheduleParams};
 use serde_json::{json, Value as Json};
@@ -6,7 +9,7 @@ use serde_json::{json, Value as Json};
 use crate::compact::{encode_pack, proxy_tokens, Pack, PackHit};
 use crate::config::Format;
 use crate::tools::{
-    format_arg, format_prop, object, req_str, str_prop, Context, ToolDef, ToolResult,
+    format_arg, format_prop, object, opt_bool, req_str, str_prop, Context, ToolDef, ToolResult,
 };
 
 const MEMORY_PREFIX: &str = "memory/";
@@ -16,6 +19,10 @@ const SINK_BLOCKS: usize = 1;
 const LOCAL_WINDOW: usize = 2;
 const MIN_RELEVANT: usize = 2;
 const EMBED_DIM: usize = 256;
+const ISLANDS_DEFAULT: bool = true;
+const RESIDUAL_MAX_ISLAND: usize = 1;
+const ISLAND_BOUNDS: [usize; 1] = [RESIDUAL_MAX_ISLAND];
+const WEIGHT_SCALE: f32 = 1_000_000.0;
 
 fn view_schema() -> Json {
     object(
@@ -28,6 +35,8 @@ fn view_schema() -> Json {
                 "description": "Candidate chunks fetched for the question. Default 12."},
             "salient_k": {"type": "integer", "minimum": 0, "maximum": 256,
                 "description": "Extra topologically salient blocks. Default 0: the salient term lost to top-k in the C3 evaluation."},
+            "islands": {"type": "boolean",
+                "description": "Group the candidates into islands (connected through next/previous chunk and Rust definition-to-mention links) and render one budgeted section per island, ordered by the island holding the best hit. A single island renders exactly as without. Default off."},
             "format": format_prop()
         }),
         &["question", "budget_tokens"],
@@ -37,7 +46,7 @@ fn view_schema() -> Json {
 pub const TOOLS: &[ToolDef] = &[ToolDef {
     name: "view",
     title: "Build a budgeted context view",
-    description: "Build a context view for a question under a hard token budget: RAG candidates are ordered into blocks, selected by the uriel-topo schedule (the first block as sink, the last two as local window, the blocks nearest to focus as relevant), rendered through the resolution ladder (top hit L1, next three L2, the rest one-line L3 gists) and never over budget. Compact by default with a citation per hit (`>file:start-end#chunk_id`, same encoding as rag_search); format=json returns text, hits and counts. Deterministic and independent of the session: the same arguments return the same bytes.",
+    description: "Build a context view for a question under a hard token budget: RAG candidates are ordered into blocks, selected by the uriel-topo schedule (the first block as sink, the last two as local window, the blocks nearest to focus as relevant), rendered through the resolution ladder (top hit L1, next three L2, the rest one-line L3 gists) and never over budget. Compact by default with a citation per hit (`>file:start-end#chunk_id`, same encoding as rag_search); format=json returns text, hits and counts. With islands=true the candidates are partitioned into connected islands and rendered as one section per island. Deterministic and independent of the session: the same arguments return the same bytes.",
     writes: false,
     schema: view_schema,
 }];
@@ -190,12 +199,8 @@ fn compact(rag: &Rag, hits: &[Hit], budget: usize, candidates: usize) -> Result<
     }
 }
 
-fn json_view(rag: &Rag, hits: &[Hit], budget: usize, candidates: usize) -> Result<String, String> {
-    let pack = rag
-        .ladder_pack(hits.to_vec(), budget)
-        .map_err(|e| e.to_string())?;
-    let listed: Vec<Json> = pack
-        .hits
+fn listed(pack: &LadderPack) -> Vec<Json> {
+    pack.hits
         .iter()
         .map(|h| {
             json!({
@@ -207,10 +212,16 @@ fn json_view(rag: &Rag, hits: &[Hit], budget: usize, candidates: usize) -> Resul
                 "level": h.level.number(),
             })
         })
-        .collect();
+        .collect()
+}
+
+fn json_view(rag: &Rag, hits: &[Hit], budget: usize, candidates: usize) -> Result<String, String> {
+    let pack = rag
+        .ladder_pack(hits.to_vec(), budget)
+        .map_err(|e| e.to_string())?;
     Ok(json!({
         "text": pack.text,
-        "hits": listed,
+        "hits": listed(&pack),
         "tokens": pack.tokens,
         "budget_tokens": budget,
         "omitted": candidates - pack.hits.len(),
@@ -220,11 +231,228 @@ fn json_view(rag: &Rag, hits: &[Hit], budget: usize, candidates: usize) -> Resul
     .to_string())
 }
 
+struct Island {
+    label: u32,
+    hits: Vec<Hit>,
+}
+
+fn ranked(hits: &[Hit]) -> Vec<Hit> {
+    let mut v = hits.to_vec();
+    v.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then(a.chunk_id.cmp(&b.chunk_id))
+    });
+    v
+}
+
+fn partition(rag: &Rag, ranked: &[Hit]) -> Result<Vec<Island>, String> {
+    let ids: Vec<u64> = ranked.iter().map(|h| h.chunk_id).collect();
+    let edges = rag.edges_among(&ids).map_err(|e| e.to_string())?;
+    let node_of: BTreeMap<u64, u32> = ids
+        .iter()
+        .enumerate()
+        .filter_map(|(i, id)| Some((*id, u32::try_from(i).ok()?)))
+        .collect();
+    let pairs: Vec<(u32, u32)> = edges
+        .iter()
+        .filter_map(|(a, b)| Some((*node_of.get(a)?, *node_of.get(b)?)))
+        .collect();
+    let projection =
+        Projection::from_edges(ranked.len(), &pairs, false).map_err(|e| e.to_string())?;
+    let labels = island_labels(&projection);
+    let buckets = bucket_islands(&labels, &ISLAND_BOUNDS);
+    let mut members: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    for (node, label) in labels.iter().enumerate() {
+        members.entry(*label).or_default().push(node);
+    }
+    let take = |nodes: &[usize]| -> Vec<Hit> { nodes.iter().map(|&n| ranked[n].clone()).collect() };
+    let mut islands: Vec<Island> = buckets[1..]
+        .iter()
+        .flatten()
+        .map(|label| Island {
+            label: *label,
+            hits: take(&members[label]),
+        })
+        .collect();
+    if let Some(&first) = buckets[0].first() {
+        let nodes: Vec<usize> = buckets[0].iter().map(|&l| l as usize).collect();
+        islands.push(Island {
+            label: first,
+            hits: take(&nodes),
+        });
+    }
+    islands.sort_by_key(|i| i.label);
+    Ok(islands)
+}
+
+fn weight(island: &Island) -> u64 {
+    island
+        .hits
+        .iter()
+        .map(|h| ((h.score.max(0.0) * WEIGHT_SCALE) as u64).max(1))
+        .sum()
+}
+
+pub(crate) fn split_budget(budget: usize, weights: &[u64]) -> Vec<usize> {
+    let total: u128 = weights.iter().map(|&w| u128::from(w)).sum();
+    if total == 0 {
+        return vec![0; weights.len()];
+    }
+    let mut shares: Vec<usize> = Vec::with_capacity(weights.len());
+    let mut remainders: Vec<(u128, usize)> = Vec::with_capacity(weights.len());
+    for (i, &w) in weights.iter().enumerate() {
+        let scaled = budget as u128 * u128::from(w);
+        shares.push((scaled / total) as usize);
+        remainders.push((scaled % total, i));
+    }
+    let leftover = budget - shares.iter().sum::<usize>();
+    remainders.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    for &(_, i) in remainders.iter().take(leftover) {
+        shares[i] += 1;
+    }
+    shares
+}
+
+fn render_islands(
+    rag: &Rag,
+    islands: &[Island],
+    req: &ViewRequest,
+    total: usize,
+) -> Result<String, String> {
+    let weights: Vec<u64> = islands.iter().map(weight).collect();
+    let shares = split_budget(req.budget, &weights);
+    let mut chosen: Vec<Vec<Hit>> = Vec::with_capacity(islands.len());
+    for (island, share) in islands.iter().zip(&shares) {
+        chosen.push(select(
+            &island.hits,
+            req.question,
+            req.focus,
+            req.k,
+            req.salient,
+            *share,
+        )?);
+    }
+    match req.format {
+        Format::Compact => {
+            let mut out = String::new();
+            for ((island, hits), share) in islands.iter().zip(&chosen).zip(&shares) {
+                let section = compact(rag, hits, *share, island.hits.len())?;
+                if section != "#0" {
+                    out.push_str(&section);
+                }
+            }
+            if out.is_empty() {
+                out.push_str("#0");
+            }
+            Ok(out)
+        }
+        Format::Json => {
+            let (mut text, mut hits_json) = (String::new(), Vec::new());
+            let (mut tokens, mut kept, mut selected) = (0usize, 0usize, 0usize);
+            let mut sections: Vec<Json> = Vec::with_capacity(islands.len());
+            for ((island, hits), share) in islands.iter().zip(&chosen).zip(&shares) {
+                let pack = rag
+                    .ladder_pack(hits.clone(), *share)
+                    .map_err(|e| e.to_string())?;
+                sections.push(json!({
+                    "label": island.label,
+                    "candidates": island.hits.len(),
+                    "budget_tokens": share,
+                    "selected": hits.len(),
+                    "kept": pack.hits.len(),
+                    "tokens": pack.tokens,
+                }));
+                text.push_str(&pack.text);
+                hits_json.extend(listed(&pack));
+                tokens += pack.tokens;
+                kept += pack.hits.len();
+                selected += hits.len();
+            }
+            Ok(json!({
+                "text": text,
+                "hits": hits_json,
+                "tokens": tokens,
+                "budget_tokens": req.budget,
+                "omitted": total - kept,
+                "candidates": total,
+                "selected": selected,
+                "islands": sections,
+            })
+            .to_string())
+        }
+    }
+}
+
 pub fn call(ctx: &Context, name: &str, args: &Json) -> ToolResult {
     match name {
         "view" => view(ctx, args),
         other => Err(format!("unknown tool '{other}'")),
     }
+}
+
+pub struct ViewRequest<'a> {
+    pub question: &'a str,
+    pub focus: Option<&'a str>,
+    pub k: usize,
+    pub salient: usize,
+    pub budget: usize,
+    pub format: Format,
+    pub islands: bool,
+}
+
+pub fn render_view(rag: &Rag, candidates: &[Hit], req: &ViewRequest) -> Result<String, String> {
+    let total = candidates.len();
+    if total == 0 {
+        return Ok(match req.format {
+            Format::Compact => "#0".to_string(),
+            Format::Json => json_view(rag, &[], req.budget, 0)?,
+        });
+    }
+    if req.islands {
+        let ranked = ranked(candidates);
+        let islands = partition(rag, &ranked)?;
+        if islands.len() > 1 {
+            return render_islands(rag, &islands, req, total);
+        }
+        return render_single(rag, &ranked, req, total);
+    }
+    render_single(rag, candidates, req, total)
+}
+
+fn render_single(
+    rag: &Rag,
+    candidates: &[Hit],
+    req: &ViewRequest,
+    total: usize,
+) -> Result<String, String> {
+    let chosen = select(
+        candidates,
+        req.question,
+        req.focus,
+        req.k,
+        req.salient,
+        req.budget,
+    )?;
+    match req.format {
+        Format::Compact => compact(rag, &chosen, req.budget, total),
+        Format::Json => json_view(rag, &chosen, req.budget, total),
+    }
+}
+
+pub fn run_view(rag: &Rag, req: &ViewRequest) -> Result<String, String> {
+    let candidates = rag
+        .search(
+            req.question,
+            &SearchOptions {
+                k: req.k,
+                budget_tokens: req.budget,
+                expand_hops: 0,
+                use_utility: true,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    render_view(rag, &candidates, req)
 }
 
 fn view(ctx: &Context, args: &Json) -> ToolResult {
@@ -234,30 +462,20 @@ fn view(ctx: &Context, args: &Json) -> ToolResult {
     let focus = focus_arg(args)?;
     let k = bounded(args, "k", DEFAULT_K, 1, MAX_K)?;
     let salient = bounded(args, "salient_k", 0, 0, MAX_K)?;
+    let islands = opt_bool(args, "islands")?.unwrap_or(ISLANDS_DEFAULT);
     let rag = ctx.services.rag(ctx.engine.graph())?;
-    let candidates = rag
-        .search(
+    run_view(
+        rag,
+        &ViewRequest {
             question,
-            &SearchOptions {
-                k,
-                budget_tokens: budget,
-                expand_hops: 0,
-                use_utility: true,
-            },
-        )
-        .map_err(|e| e.to_string())?;
-    let total = candidates.len();
-    if total == 0 {
-        return Ok(match format {
-            Format::Compact => "#0".to_string(),
-            Format::Json => json_view(rag, &[], budget, 0)?,
-        });
-    }
-    let chosen = select(&candidates, question, focus, k, salient, budget)?;
-    match format {
-        Format::Compact => compact(rag, &chosen, budget, total),
-        Format::Json => json_view(rag, &chosen, budget, total),
-    }
+            focus,
+            k,
+            salient,
+            budget,
+            format,
+            islands,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -360,6 +578,32 @@ mod tests {
         assert_eq!(bounded(&json!({}), "k", 12, 1, 256), Ok(12));
         assert!(bounded(&json!({"k": 0}), "k", 12, 1, 256).is_err());
         assert!(bounded(&json!({"k": 257}), "k", 12, 1, 256).is_err());
+    }
+
+    #[test]
+    fn budget_shares_sum_to_the_budget_for_any_weights() {
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next = || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state >> 33
+        };
+        for _ in 0..500 {
+            let n = 1 + (next() % 9) as usize;
+            let weights: Vec<u64> = (0..n).map(|_| 1 + next() % 50_000).collect();
+            let budget = (next() % 5_000) as usize;
+            let shares = split_budget(budget, &weights);
+            assert_eq!(shares.iter().sum::<usize>(), budget, "{weights:?} {budget}");
+        }
+    }
+
+    #[test]
+    fn budget_shares_follow_the_weights_and_break_ties_towards_the_lower_island() {
+        assert_eq!(split_budget(10, &[1, 1, 1]), vec![4, 3, 3]);
+        assert_eq!(split_budget(100, &[1, 3]), vec![25, 75]);
+        assert_eq!(split_budget(7, &[2, 2]), vec![4, 3]);
+        assert_eq!(split_budget(5, &[0, 0]), vec![0, 0]);
+        assert_eq!(split_budget(0, &[3, 4]), vec![0, 0]);
+        assert_eq!(split_budget(usize::MAX, &[1, 1]).iter().sum::<usize>(), usize::MAX);
     }
 
     #[test]

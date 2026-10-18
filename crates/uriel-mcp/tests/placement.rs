@@ -892,10 +892,28 @@ fn view_rejects_bad_arguments_as_tool_errors() {
         json!({"question": MIXED, "budget_tokens": 100, "salient_k": 257}),
         json!({"question": MIXED, "budget_tokens": 100, "focus": 5}),
         json!({"question": MIXED, "budget_tokens": 100, "format": "xml"}),
+        json!({"question": MIXED, "budget_tokens": 100, "islands": "yes"}),
+        json!({"question": MIXED, "budget_tokens": 100, "islands": 1}),
     ] {
         s.err("view", bad.clone());
     }
     s.ok("view", ok);
+}
+
+#[test]
+fn view_islands_defaults_on_and_false_restores_the_single_selection() {
+    let p = Proj::new();
+    let mut s = indexed(&p, &[]);
+    let base = json!({"question": MIXED, "budget_tokens": 900});
+    let mut on = base.clone();
+    on["islands"] = json!(true);
+    let mut off = base.clone();
+    off["islands"] = json!(false);
+    let default = s.text("view", base);
+    assert_eq!(default, s.text("view", on));
+    let off = s.text("view", off);
+    assert!(decode_pack(&off).is_ok(), "{off}");
+    assert!(proxy(&default) <= 900 && proxy(&off) <= 900);
 }
 
 #[test]
