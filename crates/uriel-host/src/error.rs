@@ -32,6 +32,7 @@ pub enum ErrorCode {
     ShuttingDown = 4,
     TooLarge = 5,
     Internal = 6,
+    Index = 7,
 }
 
 impl ErrorCode {
@@ -43,6 +44,7 @@ impl ErrorCode {
             4 => Ok(ErrorCode::ShuttingDown),
             5 => Ok(ErrorCode::TooLarge),
             6 => Ok(ErrorCode::Internal),
+            7 => Ok(ErrorCode::Index),
             other => Err(CodecError::UnknownTag(other)),
         }
     }
@@ -60,6 +62,8 @@ pub enum HostError {
     Query(#[from] uriel_query::QueryError),
     #[error("search error: {0}")]
     Search(#[from] uriel_rag::RagError),
+    #[error("invalid index request: {0}")]
+    InvalidIndex(String),
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
     #[error("connection closed")]

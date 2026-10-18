@@ -111,6 +111,7 @@ fn query_and_search_round_trip_through_channel_transport() {
     let stats = client.stats().expect("stats");
     assert!(stats.chunks > 0);
     assert!(stats.files >= 2);
+    assert_eq!(stats.embed_dim, 256);
     assert_eq!(stats.connections, 1);
     assert!(stats.requests_served >= 4);
     assert_eq!(stats.arena_cap, 1 << 20);
@@ -568,4 +569,156 @@ fn a_failed_index_pass_is_retried_by_the_next_search() {
     host.search("rolling sum", &SearchOptions::default())
         .expect("search after restore");
     assert_eq!(host.index_passes(), 1);
+}
+
+fn root_text(dir: &tempfile::TempDir) -> String {
+    dir.path().join("src").to_string_lossy().into_owned()
+}
+
+#[test]
+fn index_over_a_channel_returns_the_report_counts_of_host_index() {
+    let (dir, host) = open_host("idx-channel");
+    let mut client = channel_client(&host);
+    let report = client.index(&root_text(&dir)).expect("index");
+    assert_eq!(report.files_scanned, 2);
+    assert_eq!(report.files_indexed, 2);
+    assert_eq!(report.files_unchanged, 0);
+    assert_eq!(report.files_skipped, 0);
+    assert!(report.chunks_added >= 2);
+    assert_eq!(host.index_passes(), 1);
+    let again = client.index("").expect("empty root means the host root");
+    assert_eq!(again.files_unchanged, 2);
+    assert_eq!(again.files_indexed, 0);
+    assert_eq!(again.chunks_added, 0);
+    assert_eq!(host.index_passes(), 2);
+    assert_eq!(client.stats().expect("stats").files, 2);
+}
+
+#[test]
+fn index_picks_up_a_file_written_after_the_first_pass() {
+    let (dir, host) = open_host("idx-new-file");
+    let mut client = channel_client(&host);
+    client.index("").expect("first");
+    std::fs::write(dir.path().join("src").join("b.rs"), "pub fn zebra_crossing() {}\n")
+        .expect("write");
+    let report = client.index("").expect("second");
+    assert_eq!(report.files_indexed, 1);
+    assert_eq!(report.files_unchanged, 2);
+    let pack = client
+        .search("zebra_crossing", &SearchOptions::default())
+        .expect("search");
+    assert_eq!(pack.hits[0].file, "b.rs");
+}
+
+#[test]
+fn index_refuses_a_root_that_is_not_the_host_root() {
+    let (dir, host) = open_host("idx-foreign");
+    let mut client = channel_client(&host);
+    let outside = dir.path().to_string_lossy().into_owned();
+    for bad in [outside, "nowhere/at/all".to_owned(), "..".to_owned(), "a\0b".to_owned()] {
+        match client.index(&bad) {
+            Err(HostError::Remote {
+                code: ErrorCode::Index,
+                ..
+            }) => {}
+            other => panic!("root {bad:?} was not refused: {other:?}"),
+        }
+    }
+    assert_eq!(host.index_passes(), 0);
+    client.ping().expect("connection still usable");
+}
+
+#[test]
+fn index_file_over_tcp_makes_the_content_searchable() {
+    let (_dir, host) = open_host("idxf-tcp");
+    let addr = host.listen_tcp().expect("listen");
+    let mut client =
+        Client::connect(TcpTransport::connect(addr, DEFAULT_MAX_FRAME).expect("dial")).expect("client");
+    let report = client
+        .index_file("buffer/live.rs", "pub fn quokka_pelican_shuffle() -> u32 { 41 }\n")
+        .expect("index_file");
+    assert_eq!(report.files_scanned, 1);
+    assert_eq!(report.files_indexed, 1);
+    assert!(report.chunks_added >= 1);
+    assert_eq!(host.index_passes(), 0);
+    let pack = client
+        .search("quokka_pelican_shuffle", &SearchOptions::default())
+        .expect("search");
+    assert_eq!(pack.hits[0].file, "buffer/live.rs");
+    let same = client
+        .index_file("buffer/live.rs", "pub fn quokka_pelican_shuffle() -> u32 { 41 }\n")
+        .expect("repeat");
+    assert_eq!(same.files_unchanged, 1);
+    assert_eq!(same.files_indexed, 0);
+    let changed = client
+        .index_file("buffer/live.rs", "pub fn quokka_pelican_shuffle() -> u32 { 42 }\n")
+        .expect("edit");
+    assert_eq!(changed.files_indexed, 1);
+}
+
+#[test]
+fn index_file_distrusts_its_content_and_its_path() {
+    let (_dir, host) = open_host("idxf-distrust");
+    host.serve(ServeConfig {
+        max_frame: 4 << 20,
+        ..ServeConfig::default()
+    })
+    .expect("serve");
+    let (client_end, server_end) = ChannelTransport::pair();
+    host.attach(server_end).expect("attach");
+    let mut client =
+        Client::connect_with(client_end, 4 << 20, Duration::from_secs(10)).expect("connect");
+    let binary = client.index_file("blob.bin", "abc\0def").expect("binary");
+    assert_eq!(binary.files_skipped, 1);
+    assert_eq!(binary.files_indexed, 0);
+    let big = "x ".repeat(600_000);
+    let huge = client.index_file("huge.txt", &big).expect("huge");
+    assert_eq!(huge.files_skipped, 1);
+    assert_eq!(huge.files_indexed, 0);
+    let empty = client.index_file("empty.txt", "").expect("empty content");
+    assert_eq!(
+        empty.files_indexed + empty.files_skipped + empty.files_unchanged,
+        1
+    );
+    for bad in ["", "a\0b", "line\nbreak", &"p".repeat(5_000)] {
+        match client.index_file(bad, "fn x() {}") {
+            Err(HostError::Remote {
+                code: ErrorCode::Index,
+                ..
+            }) => {}
+            other => panic!("path {bad:?} was not refused: {other:?}"),
+        }
+    }
+    assert_eq!(client.stats().expect("stats").files, 1);
+    client.ping().expect("connection still usable");
+    drop(host);
+}
+
+#[test]
+fn index_file_over_the_serve_frame_cap_is_refused_and_the_connection_survives() {
+    let (_dir, host) = open_host("idxf-cap");
+    host.serve(ServeConfig {
+        queue_depth: 8,
+        workers: 2,
+        max_frame: 4_096,
+    })
+    .expect("serve");
+    let (client_end, server_end) = ChannelTransport::pair();
+    host.attach(server_end).expect("attach");
+    let mut client =
+        Client::connect_with(client_end, 1 << 20, Duration::from_secs(10)).expect("connect");
+    let within_cap = "a ".repeat(1_000);
+    assert_eq!(
+        client.index_file("ok.txt", &within_cap).expect("fits").files_indexed,
+        1
+    );
+    let over_cap = "a ".repeat(3_000);
+    match client.index_file("over.txt", &over_cap) {
+        Err(HostError::Remote {
+            code: ErrorCode::TooLarge,
+            ..
+        }) => {}
+        other => panic!("an index_file above the serve cap was not refused: {other:?}"),
+    }
+    assert_eq!(client.stats().expect("stats").files, 1);
 }

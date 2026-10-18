@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use uriel_core::Value;
 use uriel_query::{AccessMode, QueryResult, QueryStats};
-use uriel_rag::{ContextPack, Hit, HitVia, SearchOptions};
+use uriel_rag::{ContextPack, Hit, HitVia, IndexReport, SearchOptions};
 
 use crate::codec::{
     begin_frame, finish_frame, parse_frame, put_len, put_str, put_u32, put_u64, put_u8,
@@ -15,10 +15,13 @@ pub const MSG_QUERY: u8 = 0x01;
 pub const MSG_SEARCH: u8 = 0x02;
 pub const MSG_STATS: u8 = 0x03;
 pub const MSG_PING: u8 = 0x04;
+pub const MSG_INDEX: u8 = 0x05;
+pub const MSG_INDEX_FILE: u8 = 0x06;
 pub const MSG_QUERY_OK: u8 = 0x81;
 pub const MSG_SEARCH_OK: u8 = 0x82;
 pub const MSG_STATS_OK: u8 = 0x83;
 pub const MSG_PONG: u8 = 0x84;
+pub const MSG_INDEX_OK: u8 = 0x85;
 pub const MSG_ERROR: u8 = 0xE0;
 pub const MSG_BUSY: u8 = 0xE1;
 
@@ -36,6 +39,13 @@ pub enum Request {
     Stats,
     Ping {
         nonce: u64,
+    },
+    Index {
+        root: String,
+    },
+    IndexFile {
+        path: String,
+        content: String,
     },
 }
 
@@ -67,6 +77,17 @@ impl PartialEq for Request {
             ) => q1 == q2 && same_options(o1, o2),
             (Request::Stats, Request::Stats) => true,
             (Request::Ping { nonce: a }, Request::Ping { nonce: b }) => a == b,
+            (Request::Index { root: a }, Request::Index { root: b }) => a == b,
+            (
+                Request::IndexFile {
+                    path: p1,
+                    content: c1,
+                },
+                Request::IndexFile {
+                    path: p2,
+                    content: c2,
+                },
+            ) => p1 == p2 && c1 == c2,
             _ => false,
         }
     }
@@ -118,6 +139,24 @@ pub fn encode_stats_request(buf: &mut Vec<u8>, max_frame: usize) -> Result<(), C
     finish_frame(buf, max_frame)
 }
 
+pub fn encode_index(buf: &mut Vec<u8>, root: &str, max_frame: usize) -> Result<(), CodecError> {
+    begin_frame(buf, MSG_INDEX);
+    put_str(buf, root);
+    finish_frame(buf, max_frame)
+}
+
+pub fn encode_index_file(
+    buf: &mut Vec<u8>,
+    path: &str,
+    content: &str,
+    max_frame: usize,
+) -> Result<(), CodecError> {
+    begin_frame(buf, MSG_INDEX_FILE);
+    put_str(buf, path);
+    put_str(buf, content);
+    finish_frame(buf, max_frame)
+}
+
 impl Request {
     pub fn encode(&self, buf: &mut Vec<u8>, max_frame: usize) -> Result<(), CodecError> {
         match self {
@@ -129,6 +168,10 @@ impl Request {
             Request::Search { query, opts } => encode_search(buf, query, opts, max_frame),
             Request::Stats => encode_stats_request(buf, max_frame),
             Request::Ping { nonce } => encode_ping(buf, *nonce, max_frame),
+            Request::Index { root } => encode_index(buf, root, max_frame),
+            Request::IndexFile { path, content } => {
+                encode_index_file(buf, path, content, max_frame)
+            }
         }
     }
 
@@ -168,6 +211,12 @@ impl Request {
             }
             MSG_STATS => Request::Stats,
             MSG_PING => Request::Ping { nonce: c.u64()? },
+            MSG_INDEX => Request::Index { root: c.string()? },
+            MSG_INDEX_FILE => {
+                let path = c.string()?;
+                let content = c.string()?;
+                Request::IndexFile { path, content }
+            }
             other => return Err(CodecError::UnknownMessage(other)),
         };
         c.finish()?;
@@ -181,6 +230,7 @@ pub enum Response {
     Search(ContextPack),
     Stats(HostStats),
     Pong { nonce: u64 },
+    Indexed(IndexReport),
     Error { code: ErrorCode, message: String },
     Busy,
 }
@@ -200,6 +250,7 @@ impl PartialEq for Response {
             (Response::Search(a), Response::Search(b)) => same_pack(a, b),
             (Response::Stats(a), Response::Stats(b)) => a == b,
             (Response::Pong { nonce: a }, Response::Pong { nonce: b }) => a == b,
+            (Response::Indexed(a), Response::Indexed(b)) => a == b,
             (
                 Response::Error {
                     code: c1,
@@ -354,6 +405,32 @@ fn get_pack(c: &mut Cursor<'_>) -> Result<ContextPack, CodecError> {
     })
 }
 
+fn put_report(buf: &mut Vec<u8>, r: &IndexReport) {
+    for v in [
+        r.files_scanned,
+        r.files_indexed,
+        r.files_unchanged,
+        r.files_skipped,
+        r.files_removed,
+        r.chunks_added,
+        r.chunks_removed,
+    ] {
+        put_usize(buf, v);
+    }
+}
+
+fn get_report(c: &mut Cursor<'_>) -> Result<IndexReport, CodecError> {
+    Ok(IndexReport {
+        files_scanned: c.usize()?,
+        files_indexed: c.usize()?,
+        files_unchanged: c.usize()?,
+        files_skipped: c.usize()?,
+        files_removed: c.usize()?,
+        chunks_added: c.usize()?,
+        chunks_removed: c.usize()?,
+    })
+}
+
 fn put_host_stats(buf: &mut Vec<u8>, s: &HostStats) {
     for v in [
         s.arena_cap,
@@ -367,6 +444,7 @@ fn put_host_stats(buf: &mut Vec<u8>, s: &HostStats) {
         s.connections,
         s.chunks,
         s.files,
+        s.embed_dim,
     ] {
         put_u64(buf, v);
     }
@@ -385,6 +463,7 @@ fn get_host_stats(c: &mut Cursor<'_>) -> Result<HostStats, CodecError> {
         connections: c.u64()?,
         chunks: c.u64()?,
         files: c.u64()?,
+        embed_dim: c.u64()?,
     })
 }
 
@@ -413,6 +492,10 @@ impl Response {
             Response::Pong { nonce } => {
                 begin_frame(buf, MSG_PONG);
                 put_u64(buf, *nonce);
+            }
+            Response::Indexed(report) => {
+                begin_frame(buf, MSG_INDEX_OK);
+                put_report(buf, report);
             }
             Response::Error { code, message } => {
                 begin_frame(buf, MSG_ERROR);
@@ -449,6 +532,7 @@ impl Response {
             MSG_SEARCH_OK => Response::Search(get_pack(&mut c)?),
             MSG_STATS_OK => Response::Stats(get_host_stats(&mut c)?),
             MSG_PONG => Response::Pong { nonce: c.u64()? },
+            MSG_INDEX_OK => Response::Indexed(get_report(&mut c)?),
             MSG_ERROR => {
                 let code = ErrorCode::from_wire(c.u8()?)?;
                 let message = c.string()?;

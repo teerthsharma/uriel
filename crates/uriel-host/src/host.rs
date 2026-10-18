@@ -17,6 +17,9 @@ use crate::server::{accept_loop, spawn_connection, Dispatcher};
 use crate::stats::{BufferGauge, HostStats};
 use crate::transport::Transport;
 
+const MAX_INDEX_PATH_BYTES: usize = 4096;
+const BINARY_SNIFF_BYTES: usize = 8000;
+
 pub type HandlerHook = Arc<dyn Fn(&Request) + Send + Sync>;
 
 #[derive(Debug, Clone)]
@@ -81,6 +84,8 @@ pub(crate) struct HostInner {
     engine: Engine,
     rag: Rag,
     root: PathBuf,
+    max_file_bytes: u64,
+    embed_dim: usize,
     indexed: Mutex<bool>,
     index_passes: AtomicU64,
     arena: Mutex<Arena>,
@@ -177,7 +182,52 @@ impl HostInner {
                 Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
             },
             Request::Ping { nonce } => Response::Pong { nonce: *nonce },
+            Request::Index { root } => match self.index_root(root) {
+                Ok(report) => Response::Indexed(report),
+                Err(e) => Response::error(ErrorCode::Index, e.to_string()),
+            },
+            Request::IndexFile { path, content } => match self.index_file(path, content) {
+                Ok(report) => Response::Indexed(report),
+                Err(e) => Response::error(ErrorCode::Index, e.to_string()),
+            },
         }
+    }
+
+    fn index_root(&self, root: &str) -> Result<IndexReport, HostError> {
+        if !root.is_empty() {
+            let asked = std::fs::canonicalize(root)
+                .map_err(|e| HostError::InvalidIndex(format!("root {root:?}: {e}")))?;
+            let own = std::fs::canonicalize(&self.root)?;
+            if asked != own {
+                return Err(HostError::InvalidIndex(format!(
+                    "root {root:?} is not the host root"
+                )));
+            }
+        }
+        match self.index_pass(false)? {
+            Some(report) => Ok(report),
+            None => Err(HostError::Unexpected("index pass skipped")),
+        }
+    }
+
+    fn index_file(&self, path: &str, content: &str) -> Result<IndexReport, HostError> {
+        if path.is_empty()
+            || path.len() > MAX_INDEX_PATH_BYTES
+            || path.chars().any(char::is_control)
+        {
+            return Err(HostError::InvalidIndex(
+                "path must be 1..=4096 bytes without control characters".into(),
+            ));
+        }
+        let binary = content.bytes().take(BINARY_SNIFF_BYTES).any(|b| b == 0);
+        if binary || content.len() as u64 > self.max_file_bytes {
+            return Ok(IndexReport {
+                files_scanned: 1,
+                files_skipped: 1,
+                ..IndexReport::default()
+            });
+        }
+        Ok(self.rag.index_text(path, content)?)
     }
 
     fn search(&self, query: &str, opts: &SearchOptions) -> Result<ContextPack, HostError> {
@@ -218,6 +268,7 @@ impl HostInner {
             connections: self.counters.connections.load(Ordering::SeqCst),
             chunks: rag.chunks as u64,
             files: rag.files as u64,
+            embed_dim: self.embed_dim as u64,
         })
     }
 
@@ -349,13 +400,18 @@ impl Host {
         validate_config(&cfg)?;
         let arena = Arena::with_cap(cfg.hot_cap_bytes)?;
         let engine = Engine::open(&cfg.db_path, cfg.memory)?;
-        let rag = Rag::open(engine.graph().clone(), RagConfig::default())?;
+        let rag_config = RagConfig::default();
+        let max_file_bytes = rag_config.max_file_bytes;
+        let embed_dim = rag_config.embed_dim;
+        let rag = Rag::open(engine.graph().clone(), rag_config)?;
         let port_file = port_file_for(&cfg);
         Ok(Host {
             inner: Arc::new(HostInner {
                 engine,
                 rag,
                 root: cfg.root.clone(),
+                max_file_bytes,
+                embed_dim,
                 indexed: Mutex::new(false),
                 index_passes: AtomicU64::new(0),
                 arena: Mutex::new(arena),
@@ -399,6 +455,10 @@ impl Host {
             Some(report) => Ok(report),
             None => Err(HostError::Unexpected("index pass skipped")),
         }
+    }
+
+    pub fn index_file(&self, path: &str, content: &str) -> Result<IndexReport, HostError> {
+        self.inner.index_file(path, content)
     }
 
     pub fn index_passes(&self) -> u64 {
