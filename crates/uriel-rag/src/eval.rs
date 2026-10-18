@@ -532,3 +532,193 @@ mod tests {
         assert_eq!(sample(&c[..10], 100).len(), 10);
     }
 }
+
+pub const SOUL_BUDGETS: [usize; 3] = [300, 1200, 4000];
+const SOUL_DEFAULT_BUDGET: usize = 1200;
+const SOUL_REPEATS: usize = 3;
+
+#[derive(Debug, Clone)]
+pub struct SoulRow {
+    pub budget: usize,
+    pub guide_tokens: usize,
+    pub guide_sections: usize,
+    pub rounds: usize,
+    pub diffusion_hits: usize,
+    pub initial_hits: usize,
+    pub baseline_sections: usize,
+    pub baseline_tokens: usize,
+    pub baseline_hits: usize,
+    pub chance_hits: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SoulEvalReport {
+    pub files: usize,
+    pub chunks: usize,
+    pub queries: usize,
+    pub gold_resolved: usize,
+    pub corpus_digest_matches: bool,
+    pub rows: Vec<SoulRow>,
+    pub digest: String,
+    pub seed: u64,
+    pub repeats_identical: bool,
+}
+
+impl fmt::Display for SoulEvalReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "corpus: {} files, {} chunks; {} queries, gold chunk resolved for {}; recorded corpus digest {}",
+            self.files,
+            self.chunks,
+            self.queries,
+            self.gold_resolved,
+            if self.corpus_digest_matches { "matches" } else { "DRIFTED" }
+        )?;
+        writeln!(f)?;
+        writeln!(
+            f,
+            "| budget | guide tokens | sections | rounds | soul gold hits | rounds=0 gold hits | plain top-k tokens | plain top-k sections | plain top-k gold hits | chance |"
+        )?;
+        writeln!(f, "|---|---|---|---|---|---|---|---|---|---|")?;
+        for r in &self.rows {
+            writeln!(
+                f,
+                "| {} | {} | {} | {} | {}/{} | {}/{} | {} | {} | {}/{} | {:.2} |",
+                r.budget,
+                r.guide_tokens,
+                r.guide_sections,
+                r.rounds,
+                r.diffusion_hits,
+                self.queries,
+                r.initial_hits,
+                self.queries,
+                r.baseline_tokens,
+                r.baseline_sections,
+                r.baseline_hits,
+                self.queries,
+                r.chance_hits
+            )?;
+        }
+        writeln!(f)?;
+        writeln!(
+            f,
+            "default budget {SOUL_DEFAULT_BUDGET} guide digest {} seed {:016x}; {SOUL_REPEATS} fresh indexes of the same corpus produce identical guides: {}",
+            self.digest, self.seed, self.repeats_identical
+        )
+    }
+}
+
+fn fresh_rag(root: &Path) -> Result<Rag, RagError> {
+    let rag = Rag::open(
+        Graph::open_in_memory(uriel_core::MemoryBudget::mib(256))?,
+        RagConfig::default(),
+    )?;
+    rag.index_dir(root, &IndexOptions::default())?;
+    Ok(rag)
+}
+
+pub fn run_soul_frozen(corpus_dir: &Path, queries_path: &Path) -> Result<SoulEvalReport, RagError> {
+    let text = fs::read_to_string(queries_path).map_err(crate::io_err(queries_path))?;
+    let set = parse_queries(&text)?;
+    let (digest, files) = corpus_digest(corpus_dir)?;
+    if files != set.files {
+        return Err(crate::corrupt(format!(
+            "frozen corpus has {files} files, query file expects {}",
+            set.files
+        )));
+    }
+    let corpus = materialize(corpus_dir)?;
+    let mut report = run_soul_on(corpus.root(), &set.queries)?;
+    report.corpus_digest_matches = digest == set.corpus_sha256;
+    Ok(report)
+}
+
+fn run_soul_on(root: &Path, queries: &[EvalQuery]) -> Result<SoulEvalReport, RagError> {
+    let rag = fresh_rag(root)?;
+    let scan = rag.salience_scan()?;
+    let gold: Vec<Option<u64>> = queries
+        .iter()
+        .map(|q| {
+            scan.rows
+                .iter()
+                .find(|r| r.file == q.file && r.start <= q.signature_line && q.signature_line <= r.end)
+                .map(|r| r.id)
+        })
+        .collect();
+    let gold_resolved = gold.iter().flatten().count();
+    let hits_in = |ids: &std::collections::HashSet<u64>| -> usize {
+        gold.iter().flatten().filter(|g| ids.contains(g)).count()
+    };
+    let mut ranked: Vec<&crate::soul::Row> = scan.rows.iter().collect();
+    ranked.sort_by(|a, b| b.salience.total_cmp(&a.salience).then(a.id.cmp(&b.id)));
+    let read = rag.graph.begin_read()?;
+    let mut rows = Vec::new();
+    let mut default_guide = None;
+    for budget in SOUL_BUDGETS {
+        let guide = rag.soul(&crate::SoulOptions {
+            budget_tokens: budget,
+            ..crate::SoulOptions::default()
+        })?;
+        let initial = rag.soul(&crate::SoulOptions {
+            budget_tokens: budget,
+            max_rounds: 0,
+            ..crate::SoulOptions::default()
+        })?;
+        let ids = |g: &crate::Soul| -> std::collections::HashSet<u64> {
+            g.sections.iter().map(|s| s.chunk_id).collect()
+        };
+        let (mut used, mut picked) = (0usize, std::collections::HashSet::new());
+        for r in &ranked {
+            let piece = format!(
+                "// {}:{}-{} #{} {}\n",
+                r.file,
+                r.start,
+                r.end,
+                r.id,
+                Rag::gist_of(&read, r.id)?
+            );
+            let cost = crate::tokenize::token_estimate(&piece);
+            if used + cost <= guide.tokens {
+                used += cost;
+                picked.insert(r.id);
+            }
+        }
+        rows.push(SoulRow {
+            budget,
+            guide_tokens: guide.tokens,
+            guide_sections: guide.sections.len(),
+            rounds: guide.rounds,
+            diffusion_hits: hits_in(&ids(&guide)),
+            initial_hits: hits_in(&ids(&initial)),
+            baseline_sections: picked.len(),
+            baseline_tokens: used,
+            baseline_hits: hits_in(&picked),
+            chance_hits: gold_resolved as f64 * guide.sections.len() as f64
+                / scan.rows.len().max(1) as f64,
+        });
+        if budget == SOUL_DEFAULT_BUDGET {
+            default_guide = Some(guide);
+        }
+    }
+    let default_guide = default_guide.ok_or_else(|| crate::corrupt("default budget missing"))?;
+    let mut repeats_identical = true;
+    for _ in 1..SOUL_REPEATS {
+        let again = fresh_rag(root)?.soul(&crate::SoulOptions {
+            budget_tokens: SOUL_DEFAULT_BUDGET,
+            ..crate::SoulOptions::default()
+        })?;
+        repeats_identical &= again.text == default_guide.text && again.digest == default_guide.digest;
+    }
+    Ok(SoulEvalReport {
+        files: rag.stats()?.files,
+        chunks: scan.rows.len(),
+        queries: queries.len(),
+        gold_resolved,
+        corpus_digest_matches: false,
+        rows,
+        digest: default_guide.digest,
+        seed: default_guide.seed,
+        repeats_identical,
+    })
+}
