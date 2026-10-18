@@ -136,7 +136,7 @@ fn latex() {
     assert_span("so $x^2 + y_1$ holds", "$x^2 + y_1$");
     assert_span("so $$a=b$$ holds", "$$a=b$$");
     assert_span("so \\(a+b\\) holds", "\\(a+b\\)");
-    assert_span("so \\frac{a}{b} holds", "\\frac");
+    assert_span("so \\frac{a}{b} holds", "\\frac{a}{b}");
     assert_span("costs $5 or maybe $6 total", "5");
 }
 
