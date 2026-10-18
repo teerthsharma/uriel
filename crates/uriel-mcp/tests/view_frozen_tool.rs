@@ -70,7 +70,7 @@ fn the_view_tool_on_the_frozen_queries_reports_recall_and_proxy_tokens() {
         println!("{}
 {}
 {}", default.line, off.line, on.line);
-        assert_eq!(default.outputs, on.outputs, "the default differs from islands=true at budget {budget}");
+        assert_eq!(default.outputs, off.outputs, "the default differs from islands=false at budget {budget}");
         for (i, (want, got)) in off.outputs.iter().zip(&on.outputs).enumerate() {
             let single = !got.1.contains("\"islands\":");
             assert!(!single || want == got, "query {i} has one island but differs at budget {budget}");
