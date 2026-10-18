@@ -3,13 +3,14 @@ mod common;
 use common::{random_request, random_response, Rng};
 use uriel_host::codec::{begin_frame, finish_frame, parse_frame, put_str, put_u32, put_u8};
 use uriel_host::{
-    encode_query, AccessMode, CodecError, Request, Response, Value, DEFAULT_MAX_FRAME, MSG_PING,
+    encode_index, encode_index_file, encode_query, AccessMode, CodecError, IndexReport, Request,
+    Response, Value, DEFAULT_MAX_FRAME, MSG_INDEX, MSG_INDEX_FILE, MSG_INDEX_OK, MSG_PING,
     MSG_QUERY, MSG_STATS,
 };
 use std::collections::BTreeMap;
 
-const KNOWN_KINDS: [u8; 10] = [
-    0x01, 0x02, 0x03, 0x04, 0x81, 0x82, 0x83, 0x84, 0xE0, 0xE1,
+const KNOWN_KINDS: [u8; 13] = [
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x81, 0x82, 0x83, 0x84, 0x85, 0xE0, 0xE1,
 ];
 
 #[test]
@@ -296,4 +297,195 @@ fn query_parameters_survive_a_round_trip_with_exact_float_bits() {
     assert_eq!(bits(&back["neg_zero"]), (-0.0f64).to_bits());
     assert_eq!(bits(&back["inf"]), f64::INFINITY.to_bits());
     assert_eq!(back["min"], Value::Int(i64::MIN));
+}
+
+#[test]
+fn index_message_kinds_are_pinned() {
+    assert_eq!(MSG_INDEX, 0x05);
+    assert_eq!(MSG_INDEX_FILE, 0x06);
+    assert_eq!(MSG_INDEX_OK, 0x85);
+}
+
+#[test]
+fn index_frame_layout_is_prefix_kind_then_one_string() {
+    let mut buf = Vec::new();
+    encode_index(&mut buf, "ab", DEFAULT_MAX_FRAME).expect("encode");
+    assert_eq!(buf, [1 + 4 + 2, 0, 0, 0, MSG_INDEX, 2, 0, 0, 0, b'a', b'b']);
+    encode_index_file(&mut buf, "p", "xyz", DEFAULT_MAX_FRAME).expect("encode");
+    assert_eq!(
+        buf,
+        [1 + 4 + 1 + 4 + 3, 0, 0, 0, MSG_INDEX_FILE, 1, 0, 0, 0, b'p', 3, 0, 0, 0, b'x', b'y', b'z']
+    );
+}
+
+#[test]
+fn indexed_response_carries_the_seven_report_counts_in_order() {
+    let report = IndexReport {
+        files_scanned: 1,
+        files_indexed: 2,
+        files_unchanged: 3,
+        files_skipped: 4,
+        files_removed: 5,
+        chunks_added: 6,
+        chunks_removed: 7,
+    };
+    let mut buf = Vec::new();
+    Response::Indexed(report.clone())
+        .encode(&mut buf, DEFAULT_MAX_FRAME)
+        .expect("encode");
+    assert_eq!(buf.len(), 4 + 1 + 7 * 8);
+    assert_eq!(buf[4], MSG_INDEX_OK);
+    for (i, expected) in (1u64..=7).enumerate() {
+        let at = 5 + i * 8;
+        assert_eq!(&buf[at..at + 8], &expected.to_le_bytes());
+    }
+    assert_eq!(
+        Response::decode(&buf, DEFAULT_MAX_FRAME).expect("decode"),
+        Response::Indexed(report)
+    );
+}
+
+#[test]
+fn an_index_file_over_the_frame_cap_is_refused_by_the_encoder_and_the_prefix_check() {
+    let mut buf = Vec::new();
+    let big = "x".repeat(2_048);
+    assert!(matches!(
+        encode_index_file(&mut buf, "p", &big, 1_024),
+        Err(CodecError::FrameTooLarge { max: 1_024, .. })
+    ));
+    assert!(matches!(
+        encode_index(&mut buf, &big, 1_024),
+        Err(CodecError::FrameTooLarge { max: 1_024, .. })
+    ));
+    encode_index_file(&mut buf, "p", "x", DEFAULT_MAX_FRAME).expect("encode");
+    let mut lying = buf.clone();
+    lying[..4].copy_from_slice(&(1_025u32).to_le_bytes());
+    assert_eq!(
+        Request::decode(&lying, 1_024),
+        Err(CodecError::FrameTooLarge { len: 1_025, max: 1_024 })
+    );
+}
+
+#[test]
+fn index_counts_larger_than_the_remaining_bytes_are_rejected_without_allocating() {
+    for kind in [MSG_INDEX, MSG_INDEX_FILE] {
+        let mut frame = Vec::new();
+        begin_frame(&mut frame, kind);
+        put_u32(&mut frame, u32::MAX);
+        finish_frame(&mut frame, DEFAULT_MAX_FRAME).expect("finish");
+        assert!(matches!(
+            Request::decode(&frame, DEFAULT_MAX_FRAME),
+            Err(CodecError::CountOverflow { .. })
+        ));
+    }
+    let mut frame = Vec::new();
+    begin_frame(&mut frame, MSG_INDEX_FILE);
+    put_str(&mut frame, "p");
+    put_u32(&mut frame, u32::MAX);
+    finish_frame(&mut frame, DEFAULT_MAX_FRAME).expect("finish");
+    assert!(matches!(
+        Request::decode(&frame, DEFAULT_MAX_FRAME),
+        Err(CodecError::CountOverflow { .. })
+    ));
+}
+
+#[test]
+fn index_frames_with_trailing_bytes_or_bad_utf8_are_rejected() {
+    let mut frame = Vec::new();
+    encode_index(&mut frame, "r", DEFAULT_MAX_FRAME).expect("encode");
+    frame.push(0);
+    let body = (frame.len() - 4) as u32;
+    frame[..4].copy_from_slice(&body.to_le_bytes());
+    assert_eq!(Request::decode(&frame, DEFAULT_MAX_FRAME), Err(CodecError::Trailing(1)));
+
+    begin_frame(&mut frame, MSG_INDEX_FILE);
+    put_str(&mut frame, "p");
+    put_u32(&mut frame, 2);
+    frame.extend_from_slice(&[0xFF, 0xFE]);
+    finish_frame(&mut frame, DEFAULT_MAX_FRAME).expect("finish");
+    assert_eq!(Request::decode(&frame, DEFAULT_MAX_FRAME), Err(CodecError::InvalidUtf8));
+}
+
+fn decoded_text_bytes(request: &Request) -> usize {
+    match request {
+        Request::Index { root } => root.len(),
+        Request::IndexFile { path, content } => path.len() + content.len(),
+        _ => 0,
+    }
+}
+
+#[test]
+fn index_decoders_survive_twenty_thousand_adversarial_inputs_with_bounded_output() {
+    let mut rng = Rng::new(0x5EA1_0B07);
+    let kinds = [MSG_INDEX, MSG_INDEX_FILE, MSG_INDEX_OK];
+    let mut valid = Vec::new();
+    for round in 0..20_000usize {
+        let kind = kinds[rng.index(kinds.len())];
+        let mut frame = Vec::new();
+        match rng.index(5) {
+            0 => {
+                begin_frame(&mut frame, kind);
+                let len = rng.index(120);
+                frame.extend_from_slice(&rng.bytes(len));
+                finish_frame(&mut frame, DEFAULT_MAX_FRAME).expect("finish");
+            }
+            1 => {
+                begin_frame(&mut frame, kind);
+                for _ in 0..rng.index(4) {
+                    put_u32(&mut frame, [u32::MAX, u32::MAX - 1, 1 << 31, 0, 1, 7][rng.index(6)]);
+                    let len = rng.index(10);
+                    frame.extend_from_slice(&rng.bytes(len));
+                }
+                finish_frame(&mut frame, DEFAULT_MAX_FRAME).expect("finish");
+            }
+            2 => {
+                let request = if rng.flag() {
+                    Request::Index {
+                        root: common::random_string(&mut rng, 30),
+                    }
+                } else {
+                    Request::IndexFile {
+                        path: common::random_string(&mut rng, 30),
+                        content: common::random_string(&mut rng, 90),
+                    }
+                };
+                request.encode(&mut frame, DEFAULT_MAX_FRAME).expect("encode");
+                for _ in 0..1 + rng.index(4) {
+                    let at = rng.index(frame.len());
+                    let mask = if rng.flag() { 0x7F } else { 0xFF };
+                    frame[at] = rng.draw() as u8 & mask;
+                }
+            }
+            3 => {
+                let request = Request::IndexFile {
+                    path: common::random_string(&mut rng, 30),
+                    content: common::random_string(&mut rng, 90),
+                };
+                request.encode(&mut frame, DEFAULT_MAX_FRAME).expect("encode");
+                let cut = rng.index(frame.len());
+                frame.truncate(cut);
+                if frame.len() >= 5 {
+                    let body = (frame.len() - 4) as u32;
+                    frame[..4].copy_from_slice(&body.to_le_bytes());
+                }
+            }
+            _ => {
+                let len = rng.index(200);
+                frame = rng.bytes(len);
+                if round % 2 == 0 && frame.len() >= 5 {
+                    let body = (frame.len() - 4) as u32;
+                    frame[..4].copy_from_slice(&body.to_le_bytes());
+                    frame[4] = kind;
+                }
+            }
+        }
+        if let Ok(request) = Request::decode(&frame, DEFAULT_MAX_FRAME) {
+            assert!(decoded_text_bytes(&request) <= frame.len());
+            valid.push(request);
+        }
+        let _ = Response::decode(&frame, DEFAULT_MAX_FRAME);
+    }
+    assert!(valid.len() > 200, "only {} adversarial inputs decoded", valid.len());
+    assert!(valid.iter().any(|r| matches!(r, Request::Index { .. })));
+    assert!(valid.iter().any(|r| matches!(r, Request::IndexFile { .. })));
 }

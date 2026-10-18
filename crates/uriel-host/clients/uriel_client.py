@@ -6,9 +6,12 @@ import time
 MSG_SEARCH = 0x02
 MSG_STATS = 0x03
 MSG_PING = 0x04
+MSG_INDEX = 0x05
+MSG_INDEX_FILE = 0x06
 MSG_SEARCH_OK = 0x82
 MSG_STATS_OK = 0x83
 MSG_PONG = 0x84
+MSG_INDEX_OK = 0x85
 MSG_ERROR = 0xE0
 MSG_BUSY = 0xE1
 
@@ -33,7 +36,17 @@ ERROR_CODES = {
     4: "shutting_down",
     5: "too_large",
     6: "internal",
+    7: "index",
 }
+REPORT_FIELDS = (
+    "files_scanned",
+    "files_indexed",
+    "files_unchanged",
+    "files_skipped",
+    "files_removed",
+    "chunks_added",
+    "chunks_removed",
+)
 
 
 class HostError(Exception):
@@ -159,6 +172,21 @@ class Client:
         out = {name: reader.unpack("Q") for name in STATS_FIELDS}
         reader.finish()
         return out
+
+    def read_report(self, kind, reader, what):
+        if kind != MSG_INDEX_OK:
+            raise HostError("unexpected reply %#x to %s" % (kind, what))
+        out = {name: reader.unpack("Q") for name in REPORT_FIELDS}
+        reader.finish()
+        return out
+
+    def index(self, root=""):
+        kind, reader = self.call(MSG_INDEX, put_string(root))
+        return self.read_report(kind, reader, "index")
+
+    def index_file(self, path, content):
+        kind, reader = self.call(MSG_INDEX_FILE, put_string(path) + put_string(content))
+        return self.read_report(kind, reader, "index_file")
 
     def search(self, query, k=8, budget_tokens=2000, expand_hops=0, use_utility=True):
         payload = put_string(query) + struct.pack("<QQQB", k, budget_tokens, expand_hops, 1 if use_utility else 0)

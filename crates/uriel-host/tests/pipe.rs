@@ -430,3 +430,60 @@ fn the_python_reference_client_round_trips_against_a_live_pipe() {
     assert!(stdout.contains("\"top_file\": \"a.rs\""), "{stdout}");
     assert!(stdout.contains("\"files\": 2"), "{stdout}");
 }
+
+#[test]
+fn index_and_index_file_round_trip_over_a_named_pipe() {
+    let (dir, host, path) = gate_host("index-pipe");
+    let transport = PipeTransport::connect(&path, GATE_MAX_FRAME).expect("connect pipe");
+    let mut client = Client::connect_with(transport, GATE_MAX_FRAME, Duration::from_secs(10))
+        .expect("handshake");
+    let root = dir.path().join("src").to_string_lossy().into_owned();
+    let report = client.index(&root).expect("index");
+    assert_eq!((report.files_scanned, report.files_indexed), (2, 2));
+    assert_eq!(host.index_passes(), 1);
+    let report = client
+        .index_file("scratch/ghost.rs", "pub fn quokka_pelican_shuffle() {}\n")
+        .expect("index_file");
+    assert_eq!(report.files_indexed, 1);
+    let pack = client
+        .search("quokka_pelican_shuffle", &SearchOptions::default())
+        .expect("search");
+    assert_eq!(pack.hits[0].file, "scratch/ghost.rs");
+    match client.index_file("x", &"y".repeat(GATE_MAX_FRAME)) {
+        Err(HostError::Codec(_)) => {}
+        other => panic!("client let an over-cap frame out: {other:?}"),
+    }
+    client.ping().expect("still usable");
+}
+
+#[test]
+fn two_thousand_random_index_frames_never_wedge_the_pipe_server() {
+    let (_dir, host, path) = gate_host("index-fuzz");
+    let mut rng = Rng::new(0x1DE7_0001);
+    let mut probe = Probe::connect(&path);
+    for round in 0..2_000usize {
+        let mut body = vec![[0x05u8, 0x06][rng.index(2)]];
+        let len = rng.index(80);
+        body.extend_from_slice(&rng.bytes(len));
+        probe.send(&frame_of(&body));
+        match probe.reply() {
+            Reply::Frame(Response::Error { code, .. }) => {
+                assert!(matches!(
+                    code,
+                    ErrorCode::Malformed | ErrorCode::TooLarge | ErrorCode::Index
+                ));
+            }
+            Reply::Frame(Response::Indexed(_)) => {}
+            Reply::Frame(other) => panic!("round {round}: unexpected {other:?}"),
+            Reply::Closed => panic!("round {round}: server closed"),
+            Reply::Silent => panic!("round {round}: server went silent"),
+        }
+    }
+    for gauge in host.connection_buffers() {
+        assert!(gauge.inbound_capacity <= 4 * GATE_MAX_FRAME);
+        assert!(gauge.outbound_capacity <= 4 * GATE_MAX_FRAME);
+    }
+    probe.send(&ping_frame(5));
+    probe.expect_pong(5);
+    server_is_healthy(&path);
+}

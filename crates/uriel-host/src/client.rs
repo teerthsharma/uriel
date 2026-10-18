@@ -3,11 +3,14 @@ use std::time::Duration;
 
 use uriel_core::Value;
 use uriel_query::{AccessMode, QueryResult};
-use uriel_rag::{ContextPack, SearchOptions};
+use uriel_rag::{ContextPack, IndexReport, SearchOptions};
 
 use crate::codec::DEFAULT_MAX_FRAME;
 use crate::error::HostError;
-use crate::message::{encode_ping, encode_query, encode_search, encode_stats_request, Response};
+use crate::message::{
+    encode_index, encode_index_file, encode_ping, encode_query, encode_search,
+    encode_stats_request, Response,
+};
 use crate::stats::HostStats;
 use crate::transport::{Recv, Transport};
 
@@ -70,6 +73,22 @@ impl Client {
         match self.round_trip()? {
             Response::Search(pack) => Ok(pack),
             other => Err(unexpected(other, "search")),
+        }
+    }
+
+    pub fn index(&mut self, root: &str) -> Result<IndexReport, HostError> {
+        encode_index(&mut self.outbound, root, self.max_frame)?;
+        match self.round_trip()? {
+            Response::Indexed(report) => Ok(report),
+            other => Err(unexpected(other, "index")),
+        }
+    }
+
+    pub fn index_file(&mut self, path: &str, content: &str) -> Result<IndexReport, HostError> {
+        encode_index_file(&mut self.outbound, path, content, self.max_frame)?;
+        match self.round_trip()? {
+            Response::Indexed(report) => Ok(report),
+            other => Err(unexpected(other, "index_file")),
         }
     }
 

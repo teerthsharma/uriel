@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use uriel_host::{
-    ContextPack, ErrorCode, Hit, HitVia, HostConfig, HostStats, QueryResult, QueryStats, Request,
-    Response, SearchOptions, Value,
+    ContextPack, ErrorCode, Hit, HitVia, HostConfig, HostStats, IndexReport, QueryResult,
+    QueryStats, Request, Response, SearchOptions, Value,
 };
 use uriel_host::AccessMode;
 
@@ -90,7 +90,7 @@ pub fn random_value(rng: &mut Rng, depth: usize) -> Value {
 }
 
 pub fn random_request(rng: &mut Rng) -> Request {
-    match rng.below(4) {
+    match rng.below(6) {
         0 => {
             let mut params = BTreeMap::new();
             for _ in 0..rng.index(3) {
@@ -118,7 +118,26 @@ pub fn random_request(rng: &mut Rng) -> Request {
             },
         },
         2 => Request::Stats,
+        3 => Request::Index {
+            root: random_string(rng, 40),
+        },
+        4 => Request::IndexFile {
+            path: random_string(rng, 40),
+            content: random_string(rng, 200),
+        },
         _ => Request::Ping { nonce: rng.draw() },
+    }
+}
+
+pub fn random_report(rng: &mut Rng) -> IndexReport {
+    IndexReport {
+        files_scanned: rng.index(100_000),
+        files_indexed: rng.index(100_000),
+        files_unchanged: rng.index(100_000),
+        files_skipped: rng.index(100_000),
+        files_removed: rng.index(100_000),
+        chunks_added: rng.index(100_000),
+        chunks_removed: rng.index(100_000),
     }
 }
 
@@ -139,7 +158,7 @@ fn random_hit(rng: &mut Rng) -> Hit {
 }
 
 pub fn random_response(rng: &mut Rng) -> Response {
-    match rng.below(6) {
+    match rng.below(7) {
         0 => {
             let width = rng.index(4);
             let columns = (0..width).map(|_| random_string(rng, 8)).collect();
@@ -189,6 +208,7 @@ pub fn random_response(rng: &mut Rng) -> Response {
             files: rng.draw(),
         }),
         3 => Response::Pong { nonce: rng.draw() },
+        5 => Response::Indexed(random_report(rng)),
         4 => Response::Error {
             code: [
                 ErrorCode::Query,
@@ -197,7 +217,8 @@ pub fn random_response(rng: &mut Rng) -> Response {
                 ErrorCode::ShuttingDown,
                 ErrorCode::TooLarge,
                 ErrorCode::Internal,
-            ][rng.index(6)],
+                ErrorCode::Index,
+            ][rng.index(7)],
             message: random_string(rng, 50),
         },
         _ => Response::Busy,
