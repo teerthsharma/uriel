@@ -103,7 +103,9 @@ fn rag_search_respects_budget_tokens() {
         json!({"query": "scheduler job priority backoff invoice settings", "budget_tokens": 4000}),
     );
     assert!(hits(&wide).len() >= 3, "{wide}");
-    for budget in [60usize, 30] {
+    let full = wide["tokens"].as_u64().expect("tokens") as usize;
+    assert!(full > 3, "{wide}");
+    for budget in [full * 2 / 3, full / 3] {
         let r = s.ok(
             "rag_search",
             json!({"query": "scheduler job priority backoff invoice settings", "budget_tokens": budget}),
