@@ -642,3 +642,44 @@ fn a_range_unsafe_corpus_refuses_before_any_score_is_read() {
     let y = x.map(|v| v * 1e-3);
     assert!(enclose_scores(&[y, [0.0; 4]], &y, Kernel::GramCheap).is_ok());
 }
+
+#[test]
+fn endpoints_are_rounded_outward_so_enclosures_within_two_ulps_do_not_certify() {
+    let two_ulps = 2.0f64.next_up();
+    assert!(matches!(
+        certified_topk(&[0.0, two_ulps], &[1.0], 1, false, false),
+        Err(Refusal::BoundaryUndetermined { .. })
+    ));
+    assert!(matches!(
+        certified_topk(&[two_ulps, 0.0], &[1.0], 1, true, false),
+        Err(Refusal::BoundaryUndetermined { .. })
+    ));
+    assert_eq!(
+        certified_topk(&[0.0, two_ulps.next_up()], &[1.0], 1, false, false),
+        Ok(vec![0])
+    );
+}
+
+#[test]
+fn threshold_endpoints_are_rounded_outward() {
+    assert_eq!(
+        certified_threshold(&[0.0], &[1.0], 1.0f64.next_up()),
+        Ok(vec![Trit::Undetermined])
+    );
+    assert_eq!(
+        certified_threshold(&[0.0], &[1.0], (-1.0f64).next_down()),
+        Ok(vec![Trit::Undetermined])
+    );
+    assert_eq!(
+        certified_threshold(&[0.0], &[1.0], 1.0f64.next_up().next_up()),
+        Ok(vec![Trit::Below])
+    );
+}
+
+#[test]
+fn a_zero_distance_radius_is_the_underflow_floor_rounded_upward() {
+    let x = [[1.0f32, 2.0, 3.0, 4.0]];
+    let e = enclose_scores(&x, &x[0], Kernel::Direct).unwrap();
+    assert_eq!(e.scores, vec![0.0]);
+    assert_eq!(e.radii, vec![eta(4, Precision::F32).next_up()]);
+}
