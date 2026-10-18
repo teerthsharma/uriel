@@ -1262,3 +1262,100 @@ fn a_read_only_server_on_a_missing_database_creates_no_file_and_serves_an_empty_
     assert!(!missing.exists());
     assert!(!missing.parent().expect("parent").exists());
 }
+
+fn second_need(s: &mut Session) -> Value {
+    s.ok(
+        "house_need",
+        json!({"project": "proj", "goal": "second", "acceptance": []}),
+    )
+}
+
+fn n2_goals() -> Vec<Value> {
+    vec![leaf("N2.G1", "N2.G0"), leaf("N2.G2", "N2.G0")]
+}
+
+fn dispatched(batch: &Value) -> Vec<&str> {
+    batch["dispatches"]
+        .as_array()
+        .expect("dispatches")
+        .iter()
+        .map(|d| d["goal"].as_str().expect("goal"))
+        .collect()
+}
+
+fn two_needs_merged(s: &mut Session) {
+    need(s);
+    chart_and_merge(s, tiny());
+    second_need(s);
+    s.ok(
+        "house_chart",
+        json!({"fellow": "Foreman", "chart": {"goals": n2_goals()}}),
+    );
+    s.ok("house_merge", json!({}));
+}
+
+#[test]
+fn house_chart_merge_and_next_default_to_the_newest_open_need() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    two_needs_merged(&mut s);
+    let b = s.ok("house_next", json!({}));
+    assert_eq!(dispatched(&b), ["N2.G1", "N2.G2"], "{b}");
+}
+
+#[test]
+fn house_next_with_a_need_argument_targets_an_older_open_need() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    two_needs_merged(&mut s);
+    let b = s.ok("house_next", json!({"need": "G0"}));
+    assert_eq!(dispatched(&b), ["G1", "G2"], "{b}");
+}
+
+#[test]
+fn house_chart_and_merge_with_a_need_argument_fill_the_older_need() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    need(&mut s);
+    second_need(&mut s);
+    let r = s.ok(
+        "house_chart",
+        json!({"fellow": "Foreman", "need": "G0", "chart": {"goals": tiny()}}),
+    );
+    assert_eq!(r["accepted"], true, "{r}");
+    let m = s.ok("house_merge", json!({"need": "G0"}));
+    assert_eq!(m["leaves"], 2, "{m}");
+    s.err("house_next", json!({}));
+    assert_eq!(
+        dispatched(&s.ok("house_next", json!({"need": "G0"}))),
+        ["G1", "G2"]
+    );
+}
+
+#[test]
+fn house_tools_reject_an_unknown_need_and_a_conflicting_chart_need() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    two_needs_merged(&mut s);
+    for tool in ["house_next", "house_merge", "house_status"] {
+        let e = s.err(tool, json!({"need": "N9.G0"}));
+        assert!(e.contains("unknown need"), "{tool}: {e}");
+    }
+    let e = s.err(
+        "house_chart",
+        json!({"fellow": "Foreman", "need": "G0", "chart": {"need": "N2.G0", "goals": n2_goals()}}),
+    );
+    assert!(e.contains("conflicts"), "{e}");
+}
+
+#[test]
+fn house_status_with_a_need_argument_describes_that_need() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    two_needs_merged(&mut s);
+    let one = s.ok("house_status", json!({"need": "G0"}));
+    assert_eq!(one["need"]["id"], "G0", "{one}");
+    assert_eq!(one["goals"]["total"], 2, "{one}");
+    let newest = s.ok("house_status", json!({}));
+    assert_eq!(newest["need"]["id"], "N2.G0", "{newest}");
+}

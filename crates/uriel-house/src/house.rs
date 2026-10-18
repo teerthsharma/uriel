@@ -104,6 +104,12 @@ impl House {
     }
 
     #[allow(missing_docs)]
+    pub fn resolve_need(&self, need: Option<&GoalId>) -> Result<GoalId, HouseError> {
+        let g = self.lock();
+        g.state.target(need).map(|i| g.state.needs[i].id.clone())
+    }
+
+    #[allow(missing_docs)]
     pub fn decision_log(&self) -> Vec<DecisionRecord> {
         self.lock().decisions.clone()
     }
@@ -149,14 +155,14 @@ impl House {
             HouseCall::SubmitChart { fellow, chart } => {
                 let _ = self.submit_chart(fellow, chart);
             }
-            HouseCall::Merge => {
-                let _ = self.merge();
+            HouseCall::Merge { need } => {
+                let _ = self.merge_in(need.as_ref());
             }
-            HouseCall::AddFact(fact) => {
-                let _ = self.add_fact(fact);
+            HouseCall::AddFact { fact, need } => {
+                let _ = self.add_fact_in(need.as_ref(), fact);
             }
-            HouseCall::Next => {
-                let _ = self.next();
+            HouseCall::Next { need } => {
+                let _ = self.next_in(need.as_ref());
             }
             HouseCall::Report {
                 goal,
@@ -498,18 +504,36 @@ impl House {
     /// Merges the stored charts (backbone, guards, ALT groups, refutations), validates the
     /// effective tree and stores it. Reached goals stay reached across re-merges.
     pub fn merge(&self) -> Result<MergeReport, Vec<Violation>> {
+        self.merge_in(None)
+    }
+
+    #[allow(missing_docs)]
+    pub fn merge_in(&self, need: Option<&GoalId>) -> Result<MergeReport, Vec<Violation>> {
         let mut g = self.lock();
-        g.history.push(HouseCall::Merge);
-        self.merge_inner(&mut g, None)
+        g.history.push(HouseCall::Merge {
+            need: need.cloned(),
+        });
+        self.merge_inner(&mut g, need)
     }
 
     /// Records a verified fact. A fact that `refutes` a goal takes effect immediately when a
     /// merged tree exists; if the re-merge fails validation the fact is kept and the next
     /// `merge()` reports why (`status().merge_stale` is `true` meanwhile).
     pub fn add_fact(&self, fact: Fact) -> Result<(), HouseError> {
+        self.add_fact_in(None, fact)
+    }
+
+    #[allow(missing_docs)]
+    pub fn add_fact_in(&self, need: Option<&GoalId>, fact: Fact) -> Result<(), HouseError> {
         let mut g = self.lock();
         let inner = &mut *g;
-        inner.history.push(HouseCall::AddFact(fact.clone()));
+        inner.history.push(HouseCall::AddFact {
+            fact: fact.clone(),
+            need: need.cloned(),
+        });
+        if need.is_some() {
+            inner.state.target(need)?;
+        }
         if inner.state.facts.iter().any(|f| f.id == fact.id) {
             return Err(HouseError::Invalid(format!(
                 "fact {} already recorded",
@@ -529,11 +553,11 @@ impl House {
         self.sink.emit(ev);
         let merged = inner
             .state
-            .target(None)
+            .target(need)
             .ok()
             .filter(|i| inner.state.needs[*i].merged);
         if let Some(idx) = merged {
-            if self.merge_inner(inner, None).is_err() {
+            if self.merge_inner(inner, need).is_err() {
                 inner.state.needs[idx].merge_stale = true;
                 inner.state.dirty.meta = true;
                 self.flush(inner)?;
@@ -545,10 +569,17 @@ impl House {
     /// The next batch: ready goals that fit the governor and have no file conflicts.
     /// Dispatched goals become `Active`.
     pub fn next(&self) -> Result<Batch, HouseError> {
+        self.next_in(None)
+    }
+
+    #[allow(missing_docs)]
+    pub fn next_in(&self, need: Option<&GoalId>) -> Result<Batch, HouseError> {
         let mut g = self.lock();
         let inner = &mut *g;
-        inner.history.push(HouseCall::Next);
-        let idx = inner.state.target(None)?;
+        inner.history.push(HouseCall::Next {
+            need: need.cloned(),
+        });
+        let idx = inner.state.target(need)?;
         if !inner.state.needs[idx].merged {
             return Err(HouseError::NotMerged);
         }

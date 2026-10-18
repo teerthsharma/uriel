@@ -149,3 +149,124 @@ fn both_needs_and_their_charts_survive_a_reopen() {
         "N3.G0"
     );
 }
+
+fn two_open_needs(e: &Env) {
+    e.house.need("p", "one", &[]).expect("need one");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart(Fellow::Foreman, flat("G0", &["G1", "G2"])),
+        )
+        .expect("chart one");
+    e.house.merge().expect("merge one");
+    e.house.need("p", "two", &[]).expect("need two");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart_of("N2.G0", Fellow::Foreman, flat("N2.G0", &["N2.G1", "N2.G2"])),
+        )
+        .expect("chart two");
+    e.house.merge().expect("merge two");
+}
+
+#[test]
+fn a_call_without_a_need_skips_a_complete_need_and_targets_the_newest_open_one() {
+    let e = env();
+    two_open_needs(&e);
+    e.house
+        .next_in(Some(&gid("N2.G0")))
+        .expect("dispatch the second need");
+    prove(&e, "N2.G1");
+    prove(&e, "N2.G2");
+    assert_eq!(e.house.status().expect("status")["complete"], false);
+    let b = e.house.next().expect("next");
+    assert_eq!(ids(&b), ["G1", "G2"]);
+    assert!(!b.complete);
+}
+
+#[test]
+fn a_call_without_a_need_falls_back_to_the_newest_need_when_every_need_is_complete() {
+    let e = env();
+    two_open_needs(&e);
+    e.house.next_in(Some(&gid("G0"))).expect("next one");
+    e.house.next_in(Some(&gid("N2.G0"))).expect("next two");
+    for g in ["G1", "G2", "N2.G1", "N2.G2"] {
+        prove(&e, g);
+    }
+    let b = e.house.next().expect("next");
+    assert!(b.complete);
+    assert_eq!(e.house.status().expect("status")["need"]["id"], "N2.G0");
+}
+
+#[test]
+fn next_in_names_an_older_need_while_a_newer_one_is_open() {
+    let e = env();
+    two_open_needs(&e);
+    let first = e.house.next_in(Some(&gid("G0"))).expect("next one");
+    assert_eq!(ids(&first), ["G1", "G2"]);
+    let second = e.house.next().expect("next default");
+    assert_eq!(ids(&second), ["N2.G1", "N2.G2"]);
+}
+
+#[test]
+fn merge_in_merges_the_named_need_and_leaves_the_newest_unmerged() {
+    let e = env();
+    e.house.need("p", "one", &[]).expect("need one");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart(Fellow::Foreman, flat("G0", &["G1", "G2"])),
+        )
+        .expect("chart one");
+    e.house.need("p", "two", &[]).expect("need two");
+    let report = e.house.merge_in(Some(&gid("G0"))).expect("merge one");
+    assert_eq!(report.leaves, 2);
+    assert!(matches!(
+        e.house.next_in(Some(&gid("N2.G0"))),
+        Err(HouseError::NotMerged)
+    ));
+    assert_eq!(
+        ids(&e.house.next_in(Some(&gid("G0"))).expect("next one")),
+        ["G1", "G2"]
+    );
+}
+
+#[test]
+fn a_fact_in_the_named_need_retires_its_goal_and_leaves_the_other_need_alone() {
+    let e = env();
+    two_open_needs(&e);
+    let fact = Fact {
+        id: "F1".into(),
+        by: "Wilson".into(),
+        refutes: Some(gid("G1")),
+        source: "x:1".into(),
+        text: "G1 is dead".into(),
+    };
+    e.house
+        .add_fact_in(Some(&gid("G0")), fact)
+        .expect("fact in G0");
+    let one = e.house.status_in(Some(&gid("G0"))).expect("status one");
+    assert!(one["retired"].as_array().expect("retired").len() + one["pending_rechart"].as_array().expect("pending").len() >= 1, "{one}");
+    let two = e.house.status_in(Some(&gid("N2.G0"))).expect("status two");
+    assert_eq!(two["goals"]["retired"], 0);
+    assert_eq!(two["goals"]["blocked"], 0);
+}
+
+#[test]
+fn status_in_describes_only_the_named_need_and_rejects_an_unknown_one() {
+    let e = env();
+    two_open_needs(&e);
+    let one = e.house.status_in(Some(&gid("G0"))).expect("status one");
+    assert_eq!(one["need"]["id"], "G0");
+    let listed: Vec<&str> = one["goal_list"]
+        .as_array()
+        .expect("goal_list")
+        .iter()
+        .map(|g| g["id"].as_str().expect("id"))
+        .collect();
+    assert_eq!(listed, ["G0", "G1", "G2"]);
+    assert!(matches!(
+        e.house.status_in(Some(&gid("N9.G0"))),
+        Err(HouseError::UnknownNeed(_))
+    ));
+}

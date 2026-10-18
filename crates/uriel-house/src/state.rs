@@ -172,6 +172,12 @@ impl State {
         }
     }
 
+    pub fn is_complete(&self, idx: usize) -> bool {
+        self.goals
+            .get(&self.needs[idx].id)
+            .is_some_and(|r| r.status == GoalStatus::Reached)
+    }
+
     pub fn target(&self, sel: Option<&GoalId>) -> Result<usize, HouseError> {
         match sel {
             Some(id) => self
@@ -179,7 +185,11 @@ impl State {
                 .iter()
                 .position(|n| n.id == *id)
                 .ok_or_else(|| HouseError::UnknownNeed(id.clone())),
-            None => self.needs.len().checked_sub(1).ok_or(HouseError::NoNeed),
+            None => (0..self.needs.len())
+                .rev()
+                .find(|i| !self.is_complete(*i))
+                .or(self.needs.len().checked_sub(1))
+                .ok_or(HouseError::NoNeed),
         }
     }
 
