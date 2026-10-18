@@ -81,6 +81,7 @@ fn both_python_adapters_pass_every_shape_and_concurrency_check_against_a_live_ho
     let output = within(180, move || {
         Command::new("python")
             .arg("-I")
+            .arg("-B")
             .arg(driver())
             .env("URIEL_CLIENTS", clients_dir())
             .env("URIEL_PIPE", pipe)
