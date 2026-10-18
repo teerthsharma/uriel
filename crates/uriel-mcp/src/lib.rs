@@ -6,6 +6,8 @@ pub mod house_tools;
 pub mod memory;
 pub mod place_tools;
 pub mod placement;
+pub mod prefix;
+pub mod prefix_tree;
 pub mod rag_tools;
 mod render;
 pub mod server;

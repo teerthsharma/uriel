@@ -97,6 +97,11 @@ OPTIONS:
                          nodes the tools read, which why_hot and pin explain and steer
     -h, --help           Print this help
     -V, --version        Print version
+
+ENVIRONMENT:
+    URIEL_STABLE_PREFIX  off (or 0, false) keeps the json result of view and soul in the plain
+                         serialisation; by default it leads with a byte-stable scaffold preamble
+                         and carries prefix_id and stable_prefix_bytes
 ";
 
 pub fn default_db_path() -> PathBuf {

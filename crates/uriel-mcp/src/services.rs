@@ -1,11 +1,12 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use uriel_core::Graph;
 use uriel_house::{FakeProbe, House, HouseConfig, JsonlSink, RealProbe, SystemProbe};
 use uriel_rag::{Rag, RagConfig};
 
 use crate::config::{default_config_path, Config};
+use crate::prefix::Scaffold;
 
 pub const FAKE_PROBE_ENV: &str = "SEAL_MCP_FAKE_PROBE";
 
@@ -16,6 +17,17 @@ pub struct Services {
     pub house_cfg: HouseConfig,
     rag: OnceLock<Rag>,
     house: OnceLock<House>,
+    pub stable_prefix: bool,
+    scaffold: Mutex<Option<Scaffold>>,
+}
+
+pub const STABLE_PREFIX_ENV: &str = "URIEL_STABLE_PREFIX";
+
+fn stable_prefix_from_env() -> bool {
+    !matches!(
+        std::env::var(STABLE_PREFIX_ENV).as_deref(),
+        Ok("off" | "0" | "false")
+    )
 }
 
 fn probe_from_env() -> Box<dyn SystemProbe> {
@@ -65,7 +77,26 @@ impl Services {
             house_cfg,
             rag: OnceLock::new(),
             house: OnceLock::new(),
+            stable_prefix: stable_prefix_from_env(),
+            scaffold: Mutex::new(None),
         })
+    }
+
+    pub fn scaffold_with(
+        &self,
+        compute: impl FnOnce() -> Result<Scaffold, String>,
+    ) -> Result<Scaffold, String> {
+        let mut slot = self.scaffold.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(hit) = slot.as_ref() {
+            return Ok(hit.clone());
+        }
+        let fresh = compute()?;
+        *slot = Some(fresh.clone());
+        Ok(fresh)
+    }
+
+    pub fn forget_scaffold(&self) {
+        *self.scaffold.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
     pub fn rag(&self, graph: &Graph) -> Result<&Rag, String> {

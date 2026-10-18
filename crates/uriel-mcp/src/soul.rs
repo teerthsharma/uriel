@@ -123,7 +123,7 @@ fn soul(ctx: &Context, args: &Json) -> ToolResult {
     };
     match format {
         Format::Compact => Ok(if text.is_empty() { EMPTY.to_string() } else { text }),
-        Format::Json => Ok(json!({
+        Format::Json => crate::prefix::lead_json(ctx, json!({
             "tokens": text.chars().count().div_ceil(4),
             "text": text,
             "sections": chosen.iter().map(listed).collect::<Vec<_>>(),
@@ -134,6 +134,7 @@ fn soul(ctx: &Context, args: &Json) -> ToolResult {
             "digest": guide.digest,
             "cached": guide.cache.hit,
         })
-        .to_string()),
+        .to_string(),
+        ),
     }
 }

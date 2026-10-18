@@ -464,7 +464,7 @@ fn view(ctx: &Context, args: &Json) -> ToolResult {
     let salient = bounded(args, "salient_k", 0, 0, MAX_K)?;
     let islands = opt_bool(args, "islands")?.unwrap_or(ISLANDS_DEFAULT);
     let rag = ctx.services.rag(ctx.engine.graph())?;
-    run_view(
+    let body = run_view(
         rag,
         &ViewRequest {
             question,
@@ -475,7 +475,11 @@ fn view(ctx: &Context, args: &Json) -> ToolResult {
             format,
             islands,
         },
-    )
+    )?;
+    match format {
+        Format::Json => crate::prefix::lead_json(ctx, body),
+        Format::Compact => Ok(body),
+    }
 }
 
 #[cfg(test)]
