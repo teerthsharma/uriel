@@ -340,3 +340,45 @@ pub fn leap_ready(s: &mut Session) {
     let st = s.ok("house_status", json!({}));
     assert_eq!(st["leap_candidates"][0], "G2", "{st}");
 }
+
+pub struct Frozen {
+    pub session: Session,
+    pub queries: Vec<String>,
+    pub crates: Vec<String>,
+    _corpus: uriel_rag::eval::FrozenCorpus,
+}
+
+pub fn frozen() -> Frozen {
+    let rag_tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../uriel-rag/tests");
+    let corpus = uriel_rag::eval::materialize(&rag_tests.join("frozen_corpus")).expect("materialize");
+    let recorded = std::fs::read_to_string(rag_tests.join("eval_queries.json")).expect("queries");
+    let queries: Vec<String> = uriel_rag::eval::parse_queries(&recorded)
+        .expect("parse")
+        .queries
+        .into_iter()
+        .map(|q| q.query)
+        .collect();
+    assert_eq!(queries.len(), 100);
+    let mut crates: Vec<String> = std::fs::read_dir(corpus.root())
+        .expect("root")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    crates.sort();
+    let args = [
+        "--root".to_string(),
+        corpus.root().to_string_lossy().into_owned(),
+        "--in-memory".to_string(),
+        "--memory-mib".to_string(),
+        "512".to_string(),
+        "--token-limit".to_string(),
+        "100000000".to_string(),
+    ];
+    let mut session = Session::start(&args, &[]);
+    session.text("rag_index", json!({}));
+    Frozen {
+        session,
+        queries,
+        crates,
+        _corpus: corpus,
+    }
+}
