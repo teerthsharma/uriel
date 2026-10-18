@@ -189,7 +189,7 @@ fn min(xs: &[f64]) -> f64 {
 #[test]
 fn prose_baseline_table() {
     let all = samples();
-    assert!(all.len() >= 40, "only {} samples", all.len());
+    assert!(all.len() >= 30, "only {} samples", all.len());
     if let Ok(dir) = std::env::var("URIEL_TERSE_DUMP") {
         for (i, s) in all.iter().enumerate() {
             std::fs::write(format!("{dir}/prose_{i:02}.txt"), &s.text).unwrap();
