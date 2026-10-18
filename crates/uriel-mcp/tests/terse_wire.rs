@@ -392,11 +392,11 @@ fn filler_project() -> tempfile::TempDir {
     dir
 }
 
-fn section<'a>(guide: &'a str, file: &str) -> &'a str {
-    let start = guide.find(&format!("// {file}:")).unwrap_or_else(|| panic!("no {file} in {guide}"));
-    let rest = &guide[start..];
-    let end = rest[3..].find("\n// ").map_or(rest.len(), |i| i + 3);
-    &rest[..end]
+fn section(guide: &str, file: &str) -> String {
+    let pack = uriel_mcp::compact::decode_pack(guide).unwrap_or_else(|e| panic!("{e}: {guide}"));
+    let bodies: Vec<String> = pack.hits.into_iter().filter(|h| h.file == file).filter_map(|h| h.body).collect();
+    assert!(!bodies.is_empty(), "no {file} in {guide}");
+    bodies.join("\n")
 }
 
 #[test]

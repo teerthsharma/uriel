@@ -120,7 +120,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "rag_search",
         title: "Search the RAG",
-        description: "Hybrid BM25 + vector search over compressed memories, packed under a token budget. Compact by default: `#<hits>`, then per hit a citation `>file:start-end#chunk_id[flags]` followed on the same line by a one-line text, or by `+n` and n text lines. `@a=prefix` lines abbreviate paths as `@a rest` (a space inside a path is `\\s`); the file is left out when it equals the previous hit's file; `start+n` means end = start + n, a bare `start` means end = start, and a start written `+d`/`-d` is relative to the end of the previous hit in the same file. The top hit is shown at L1, hits 2 to 4 at L2, the rest as one-line L3 gists (flag `L1`/`L2`; none means L3); flags `g` graph neighbour, `m` remembered. A chunk already delivered in this session comes back as a bare citation with flag `r` (`~` if it changed since); pass fresh=true to get the text again. Zoom one hit with rag_expand(chunk_id, level). format=json returns the v1 JSON.",
+        description: "Hybrid BM25 + vector search over compressed memories, packed under a token budget. Compact v3 by default: `#<hits>` (and ` omit=<n>` when the budget dropped hits), then per hit a citation line `file:start-end#chunk_id[flags]` followed on the same line by a one-line text, or by `+n` and n text lines. `@a=prefix` lines abbreviate paths as `@a rest` (a space inside a path is `\\s`; a path that starts with `@` or `'` or is all digits is written with a leading `'`). A file is written in full once; a later hit in another, already written file cites it by its number `3:` (files count from 0 in order of first appearance), and a hit in the same file as the previous hit leaves the file out; `start+n` means end = start + n, a bare `start` means end = start, and a start written `+d`/`-d` is relative to the end of the previous hit in the same file. The top hit is shown at L1, hits 2 to 4 at L2, the rest as one-line L3 gists (flag `L1`/`L2`; none means L3); flags `g` graph neighbour, `m` remembered; a line `=g` marks every following hit a graph neighbour until a line `=`. A chunk already delivered in this session comes back as a bare citation with flag `r` (`~` if it changed since); pass fresh=true to get the text again. Zoom one hit with rag_expand(chunk_id, level). format=json returns the v1 JSON.",
         writes: false,
         schema: rag_search_schema,
     },
@@ -148,7 +148,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "seal_recall",
         title: "Recall findings",
-        description: "Search remembered findings first, then the general index. Returns cited memories with chunk ids; remembered ones are flagged. Same encoding, ladder and session dedup as rag_search.",
+        description: "Search remembered findings first, then the general index. Returns cited memories with chunk ids; remembered ones are flagged. Same compact v3 encoding, ladder and session dedup as rag_search.",
         writes: false,
         schema: recall_schema,
     },

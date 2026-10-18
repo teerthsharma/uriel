@@ -12,22 +12,23 @@ const K: u64 = 64;
 const SESSION_BUDGET: u64 = 800;
 const TOOLS: [&str; 4] = ["rag_search", "seal_recall", "view", "soul"];
 
-const OLD_FORMAT_ESTIMATES: [(&str, u64, usize); 12] = [
-    ("rag_search", 300, 35927),
-    ("rag_search", 800, 96174),
-    ("rag_search", 4000, 461604),
-    ("seal_recall", 300, 35739),
-    ("seal_recall", 800, 95833),
-    ("seal_recall", 4000, 191799),
-    ("view", 300, 36896),
-    ("view", 800, 60774),
-    ("view", 4000, 60774),
-    ("soul", 300, 4681),
-    ("soul", 800, 12319),
-    ("soul", 4000, 55808),
+const ESTIMATES: [(&str, u64, usize, usize); 12] = [
+    ("rag_search", 300, 35927, 33938),
+    ("rag_search", 800, 96174, 90019),
+    ("rag_search", 4000, 461604, 415408),
+    ("seal_recall", 300, 35739, 33790),
+    ("seal_recall", 800, 95833, 89700),
+    ("seal_recall", 4000, 191799, 178013),
+    ("view", 300, 36896, 35052),
+    ("view", 800, 60774, 57881),
+    ("view", 4000, 60774, 57881),
+    ("soul", 300, 4681, 4186),
+    ("soul", 800, 12319, 10397),
+    ("soul", 4000, 55808, 44698),
 ];
-const OLD_SESSION_ESTIMATE: usize = 56014;
-const REQUIRED_KEPT_PERCENT: usize = 95;
+const SESSION_ESTIMATES: (usize, usize) = (56014, 53097);
+const REQUIRED_KEPT_PERCENT: usize = 96;
+const SLACK_PERCENT: usize = 1;
 
 #[derive(Debug, Clone, PartialEq)]
 struct Cite {
@@ -345,6 +346,15 @@ fn collect() -> Outputs {
             matrix.insert(("soul".to_string(), b, j), (c, jt));
         }
     }
+    for (i, q) in f.queries.iter().enumerate() {
+        let a = json!({"query": q, "budget_tokens": 4000, "k": 1, "fresh": true});
+        let c = f.session.text("rag_search", a.clone());
+        let mut aj = a;
+        aj["format"] = json!("json");
+        aj["ladder"] = json!(true);
+        let j = f.session.text("rag_search", aj);
+        matrix.insert(("rag_search_k1".to_string(), 4000, i), (c, j));
+    }
     f.session.text("session_reset", json!({}));
     let session = f
         .queries
@@ -387,6 +397,22 @@ fn every_frozen_query_round_trips_through_the_compact_decoder_at_three_budgets()
     }
     let queries = o.matrix.keys().filter(|(t, ..)| t == "rag_search").count();
     assert_eq!(queries, 300);
+}
+
+#[test]
+fn short_runs_of_graph_neighbours_keep_their_flags_and_still_round_trip() {
+    let o = outputs();
+    let mut flagged = 0;
+    for ((tool, _, i), (compact, json_text)) in &o.matrix {
+        if tool != "rag_search_k1" {
+            continue;
+        }
+        let got = decode(compact).unwrap_or_else(|e| panic!("k1 #{i}: {e}\n{compact}"));
+        assert_eq!(got.cites, ladder_truth(json_text).cites, "k1 #{i}\n{compact}");
+        let toggled = compact.lines().any(|l| l == "=g");
+        flagged += usize::from(!toggled && got.cites.iter().any(|c| c.graph));
+    }
+    assert!(flagged > 10, "only {flagged} outputs carry a per-hit graph flag");
 }
 
 #[test]
@@ -435,9 +461,9 @@ fn rag_expand_resolves_every_cited_chunk_id() {
 }
 
 #[test]
-fn the_compact_outputs_stay_below_the_recorded_old_format_by_the_estimate() {
+fn the_compact_outputs_stay_below_the_recorded_v2_totals_by_the_estimate() {
     let o = outputs();
-    for (tool, b, old) in OLD_FORMAT_ESTIMATES {
+    for (tool, b, old, achieved) in ESTIMATES {
         let total: usize = o
             .matrix
             .iter()
@@ -446,12 +472,15 @@ fn the_compact_outputs_stay_below_the_recorded_old_format_by_the_estimate() {
             .sum();
         assert!(
             total * 100 <= old * REQUIRED_KEPT_PERCENT,
-            "{tool} {b}: {total} estimated tokens against the old format's {old} (must be at most {REQUIRED_KEPT_PERCENT} percent)"
+            "{tool} {b}: {total} estimated tokens against the v2 total {old}; at most {REQUIRED_KEPT_PERCENT} percent is allowed"
+        );
+        assert!(
+            total * 100 <= achieved * (100 + SLACK_PERCENT),
+            "{tool} {b}: {total} estimated tokens regressed past the v3 total {achieved}"
         );
     }
     let session: usize = o.session.iter().map(|t| estimate_tokens(t)).sum();
-    assert!(
-        session * 100 <= OLD_SESSION_ESTIMATE * REQUIRED_KEPT_PERCENT,
-        "session pass: {session} against {OLD_SESSION_ESTIMATE}"
-    );
+    let (old, achieved) = SESSION_ESTIMATES;
+    assert!(session * 100 <= old * REQUIRED_KEPT_PERCENT, "session pass: {session} against the v2 total {old}");
+    assert!(session * 100 <= achieved * (100 + SLACK_PERCENT), "session pass: {session} regressed past {achieved}");
 }

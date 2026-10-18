@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde_json::{json, Value};
 
@@ -7,11 +8,8 @@ mod common;
 const BUDGETS: [u64; 3] = [300, 800, 4000];
 const K: u64 = 64;
 
-#[test]
-#[ignore]
-fn dump_compact_and_json_outputs_for_the_frozen_queries() {
-    let out = PathBuf::from(std::env::var("TOKEN_DUMP_OUT").expect("TOKEN_DUMP_OUT"));
-    std::fs::create_dir_all(&out).expect("out");
+fn dump(out: &Path) {
+    std::fs::create_dir_all(out).expect("out");
     let mut f = common::frozen();
     let put = |name: String, text: &str| std::fs::write(out.join(name), text).expect("write");
     for b in BUDGETS {
@@ -53,4 +51,22 @@ fn dump_compact_and_json_outputs_for_the_frozen_queries() {
             &f.session.text("rag_search", json!({"query": q, "budget_tokens": 800, "k": K})),
         );
     }
+}
+
+#[test]
+#[ignore]
+fn dump_compact_and_json_outputs_for_the_frozen_queries() {
+    dump(&PathBuf::from(std::env::var("TOKEN_DUMP_OUT").expect("TOKEN_DUMP_OUT")));
+}
+
+#[test]
+#[ignore]
+fn real_tokenizer_totals_stay_below_the_recorded_v2_baseline() {
+    let out = tempfile::tempdir().expect("tmp");
+    dump(out.path());
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/token_eval/real_tokens.py");
+    let run = Command::new("python").arg("-I").arg(script).arg(out.path()).output().expect("python");
+    let report = String::from_utf8_lossy(&run.stdout);
+    println!("{report}{}", String::from_utf8_lossy(&run.stderr));
+    assert!(run.status.success(), "{report}");
 }

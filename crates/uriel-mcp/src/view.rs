@@ -47,7 +47,7 @@ fn view_schema() -> Json {
 pub const TOOLS: &[ToolDef] = &[ToolDef {
     name: "view",
     title: "Build a budgeted context view",
-    description: "Build a context view for a question under a hard token budget: RAG candidates are ordered into blocks, selected by the uriel-topo schedule (the first block as sink, the last two as local window, the blocks nearest to focus as relevant), rendered through the resolution ladder (top hit L1, next three L2, the rest one-line L3 gists) and never over budget. Compact by default with a citation per hit (`>file:start-end#chunk_id`, same encoding as rag_search); format=json returns text, hits and counts. With islands=true the candidates are partitioned into connected islands and rendered as one section per island. Deterministic and independent of the session: the same arguments return the same bytes.",
+    description: "Build a context view for a question under a hard token budget: RAG candidates are ordered into blocks, selected by the uriel-topo schedule (the first block as sink, the last two as local window, the blocks nearest to focus as relevant), rendered through the resolution ladder (top hit L1, next three L2, the rest one-line L3 gists) and never over budget. Compact by default with a citation per hit (`file:start-end#chunk_id`, the compact v3 encoding of rag_search); format=json returns text, hits and counts. With islands=true the candidates are partitioned into connected islands and rendered as one section per island. Deterministic and independent of the session: the same arguments return the same bytes.",
     writes: false,
     schema: view_schema,
 }];
