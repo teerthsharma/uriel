@@ -31,6 +31,7 @@ impl Session {
     fn spawn(args: &[&str]) -> Session {
         let mut child = Command::new(env!("CARGO_BIN_EXE_uriel-mcp"))
             .args(args)
+            .env_remove("URIEL_MODE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -323,6 +324,17 @@ const MODE_TOOLS: &[&str] = &[
     "seal_remember",
     "seal_recall",
     "session_reset",
+    "calibrate",
+    "why_hot",
+    "pin",
+    "unpin",
+    "replay",
+    "view",
+    "soul",
+    "tier_stats",
+];
+
+const HOUSE_TOOLS: &[&str] = &[
     "house_need",
     "house_chart",
     "house_merge",
@@ -334,15 +346,25 @@ const MODE_TOOLS: &[&str] = &[
     "house_status",
     "house_select_tests",
     "house_config",
-    "calibrate",
-    "why_hot",
-    "pin",
-    "unpin",
-    "replay",
-    "view",
-    "soul",
-    "tier_stats",
+    "research_orbit_audit",
+    "research_pooling_audit",
+    "research_record",
 ];
+
+#[test]
+fn house_mode_tools_list_names() {
+    let mut s = Session::spawn(&["--in-memory", "--mode", "house"]);
+    let mut got = tool_names(&mut s);
+    let mut want: Vec<String> = ALL_TOOLS
+        .iter()
+        .chain(MODE_TOOLS)
+        .chain(HOUSE_TOOLS)
+        .map(|x| x.to_string())
+        .collect();
+    got.sort();
+    want.sort();
+    assert_eq!(got, want);
+}
 
 #[test]
 fn tools_list_names() {

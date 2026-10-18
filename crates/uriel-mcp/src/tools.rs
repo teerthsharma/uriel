@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value as Json};
 
 use crate::compact::{encode_table, Table};
-use crate::config::Format;
+use crate::config::{Format, Mode};
 use crate::services::Services;
 use crate::session::Session;
 use crate::placement::PlaceState;
-use crate::{house_tools, memory, place_tools, rag_tools, soul, view};
+use crate::{house_tools, memory, place_tools, rag_tools, research_tools, soul, view};
 use uriel_query::{AccessMode, Engine, QueryStats};
 
 pub type ToolResult = Result<String, String>;
@@ -15,6 +15,7 @@ pub type ToolResult = Result<String, String>;
 pub struct Context {
     pub engine: Engine,
     pub read_only: bool,
+    pub mode: Mode,
     pub services: Services,
     pub format: Format,
     pub session: Session,
@@ -256,17 +257,22 @@ pub fn all() -> impl Iterator<Item = &'static ToolDef> {
         .iter()
         .chain(rag_tools::TOOLS.iter())
         .chain(house_tools::TOOLS.iter())
+        .chain(research_tools::TOOLS.iter())
         .chain(place_tools::TOOLS.iter())
         .chain(view::TOOLS.iter())
         .chain(soul::TOOLS.iter())
 }
 
-pub fn visible(read_only: bool) -> impl Iterator<Item = &'static ToolDef> {
-    all().filter(move |t| !(read_only && t.writes))
+pub fn house_only(name: &str) -> bool {
+    name.starts_with("house_") || name.starts_with("research_")
 }
 
-pub fn list_json(read_only: bool) -> Json {
-    let tools: Vec<Json> = visible(read_only)
+pub fn visible(read_only: bool, mode: Mode) -> impl Iterator<Item = &'static ToolDef> {
+    all().filter(move |t| !(read_only && t.writes) && (mode == Mode::House || !house_only(t.name)))
+}
+
+pub fn list_json(read_only: bool, mode: Mode) -> Json {
+    let tools: Vec<Json> = visible(read_only, mode)
         .map(|t| {
             json!({
                 "name": t.name,
@@ -286,6 +292,16 @@ pub fn list_json(read_only: bool) -> Json {
 
 pub fn call(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
     let def = all().find(|t| t.name == name)?;
+    if house_only(def.name) && ctx.mode != Mode::House {
+        return Some(Err(json!({
+            "error": "wrong_mode",
+            "tool": name,
+            "mode": ctx.mode.name(),
+            "requires": "house",
+            "hint": "restart the server with --mode house (or URIEL_MODE=house)"
+        })
+        .to_string()));
+    }
     if def.writes && ctx.read_only {
         return Some(Err(format!(
             "tool '{name}' is disabled: the server was started with --read-only"
@@ -304,6 +320,7 @@ pub fn call(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
             rag_tools::call(ctx, n, args)
         }
         n if n.starts_with("house_") => house_tools::call(ctx, n, args),
+        n if n.starts_with("research_") => research_tools::call(ctx, n, args),
         "view" => view::call(ctx, name, args),
         "soul" => soul::call(ctx, name, args),
         "calibrate" | "why_hot" | "pin" | "unpin" | "replay" | "tier_stats" => {

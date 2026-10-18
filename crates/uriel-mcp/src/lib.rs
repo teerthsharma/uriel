@@ -9,6 +9,7 @@ pub mod placement;
 pub mod prefix;
 pub mod prefix_tree;
 pub mod rag_tools;
+pub mod research_tools;
 mod render;
 pub mod server;
 pub mod services;
@@ -59,6 +60,7 @@ pub fn build_server(cfg: &Config) -> Result<Server, String> {
     let ctx = Context {
         engine,
         read_only: cfg.read_only,
+        mode: cfg.mode,
         services: Services::from_config(cfg)?,
         format: cfg.format,
         session: session::Session::for_budget(cfg.memory),

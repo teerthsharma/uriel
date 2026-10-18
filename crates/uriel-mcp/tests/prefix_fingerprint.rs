@@ -77,30 +77,30 @@ fn the_scaffold_fingerprint_is_identical_across_concurrent_threads() {
 
 #[test]
 fn the_scaffold_fingerprint_changes_when_a_tool_schema_changes() {
-    let base = fingerprint_of("{\"tools\":[{\"name\":\"view\"}]}", OUTPUT_CONTRACT_VERSION, "d");
-    let edited = fingerprint_of("{\"tools\":[{\"name\":\"view2\"}]}", OUTPUT_CONTRACT_VERSION, "d");
+    let base = fingerprint_of("{\"tools\":[{\"name\":\"view\"}]}", OUTPUT_CONTRACT_VERSION, "d", "normal");
+    let edited = fingerprint_of("{\"tools\":[{\"name\":\"view2\"}]}", OUTPUT_CONTRACT_VERSION, "d", "normal");
     assert_ne!(base, edited);
 }
 
 #[test]
 fn the_scaffold_fingerprint_changes_when_the_format_version_changes() {
-    let base = fingerprint_of("t", OUTPUT_CONTRACT_VERSION, "d");
-    assert_ne!(base, fingerprint_of("t", OUTPUT_CONTRACT_VERSION + 1, "d"));
+    let base = fingerprint_of("t", OUTPUT_CONTRACT_VERSION, "d", "normal");
+    assert_ne!(base, fingerprint_of("t", OUTPUT_CONTRACT_VERSION + 1, "d", "normal"));
 }
 
 #[test]
 fn the_scaffold_fingerprint_changes_when_the_soul_header_changes() {
     assert_ne!(
-        fingerprint_of("t", OUTPUT_CONTRACT_VERSION, "d"),
-        fingerprint_of("t", OUTPUT_CONTRACT_VERSION, "e")
+        fingerprint_of("t", OUTPUT_CONTRACT_VERSION, "d", "normal"),
+        fingerprint_of("t", OUTPUT_CONTRACT_VERSION, "e", "normal")
     );
 }
 
 #[test]
 fn the_scaffold_fingerprint_does_not_split_fields_ambiguously() {
     assert_ne!(
-        fingerprint_of("ab", OUTPUT_CONTRACT_VERSION, "c"),
-        fingerprint_of("a", OUTPUT_CONTRACT_VERSION, "bc")
+        fingerprint_of("ab", OUTPUT_CONTRACT_VERSION, "c", "normal"),
+        fingerprint_of("a", OUTPUT_CONTRACT_VERSION, "bc", "normal")
     );
 }
 

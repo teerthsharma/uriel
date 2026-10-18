@@ -46,6 +46,43 @@ impl PlacementMode {
     }
 }
 
+pub const MODE_ENV: &str = "URIEL_MODE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Normal,
+    House,
+}
+
+impl Mode {
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s {
+            "normal" => Some(Mode::Normal),
+            "house" => Some(Mode::House),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Mode::Normal => "normal",
+            Mode::House => "house",
+        }
+    }
+
+    pub fn resolve(flag: Option<Mode>, env: Option<&str>) -> Result<Mode, String> {
+        if let Some(mode) = flag {
+            return Ok(mode);
+        }
+        match env.filter(|v| !v.is_empty()) {
+            None => Ok(Mode::Normal),
+            Some(v) => Mode::parse(v)
+                .ok_or_else(|| format!("{MODE_ENV} expects normal or house, got '{v}'")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub db: PathBuf,
@@ -58,6 +95,7 @@ pub struct Config {
     pub format: Format,
     pub placement: PlacementMode,
     pub memory: MemoryBudget,
+    pub mode: Mode,
 }
 
 impl Config {
@@ -95,10 +133,14 @@ OPTIONS:
                          query cache and the RAG index (default: 50, minimum: 16)
     --placement <M>      local (default) or planned: planned keeps a placement model fed by the
                          nodes the tools read, which why_hot and pin explain and steer
+    --mode <M>           normal (default) or house: normal serves the cypher, memory, rag and view
+                         tools; house adds the house_* tools and the research_* Caustic tools.
+                         A normal server neither lists nor accepts a house_* or research_* tool
     -h, --help           Print this help
     -V, --version        Print version
 
 ENVIRONMENT:
+    URIEL_MODE           normal or house; used when --mode is not given
     URIEL_STABLE_PREFIX  off (or 0, false) keeps the json result of view and soul in the plain
                          serialisation; by default it leads with a byte-stable scaffold preamble
                          and carries prefix_id and stable_prefix_bytes
@@ -121,6 +163,15 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
+    parse_args_env(args, std::env::var(MODE_ENV).ok().as_deref())
+}
+
+pub fn parse_args_env<I, S>(args: I, mode_env: Option<&str>) -> Result<Cli, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut mode_flag = None;
     let mut cfg = Config {
         db: default_db_path(),
         read_only: false,
@@ -132,6 +183,7 @@ where
         format: Format::Compact,
         placement: PlacementMode::Local,
         memory: MemoryBudget::mib(DEFAULT_MEMORY_MIB),
+        mode: Mode::Normal,
     };
     let mut it = args.into_iter().map(Into::into);
     while let Some(arg) = it.next() {
@@ -165,6 +217,13 @@ where
                 cfg.format = Format::parse(&v)
                     .ok_or_else(|| format!("--format expects compact or json, got '{v}'"))?;
             }
+            "--mode" => {
+                let v = value(&flag, inline, &mut it)?;
+                mode_flag = Some(
+                    Mode::parse(&v)
+                        .ok_or_else(|| format!("--mode expects normal or house, got '{v}'"))?,
+                );
+            }
             "--placement" => {
                 let v = value(&flag, inline, &mut it)?;
                 cfg.placement = PlacementMode::parse(&v)
@@ -187,6 +246,7 @@ where
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
+    cfg.mode = Mode::resolve(mode_flag, mode_env)?;
     Ok(Cli::Run(cfg))
 }
 

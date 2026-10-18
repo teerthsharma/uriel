@@ -2,6 +2,7 @@ use std::io::{BufRead, Write};
 
 use serde_json::{json, Value as Json};
 
+use crate::config::Mode;
 use crate::tools::{self, Context};
 
 pub const SUPPORTED_VERSIONS: &[&str] = &["2025-06-18", "2024-11-05"];
@@ -49,6 +50,23 @@ pub fn truncate(text: String, limit: usize) -> String {
         "{}\n... [truncated: showing {limit} of {total} characters; refine the query or raise --token-limit]",
         &text[..cut]
     )
+}
+
+const NORMAL_RW: &str = "seal graph database, normal mode. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. Light research from cached and stored context: rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats.";
+
+const NORMAL_RO: &str = "seal graph database (read-only), normal mode. Use get_neo4j_schema, read_neo4j_cypher, the memory read tools, rag_search, rag_expand, seal_recall, view, why_hot, replay, calibrate and tier_stats.";
+
+const HOUSE_RW: &str = "seal graph database, house mode. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. The differential: house_need, house_chart, house_merge, house_fact, house_next, house_report, house_test_run, house_leap, house_status, house_select_tests, house_config. Inspector research, one-sided evidence that can disprove a claim and never confirm one: research_orbit_audit, research_pooling_audit, research_record. Retrieval: rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats.";
+
+const HOUSE_RO: &str = "seal graph database (read-only), house mode. Use get_neo4j_schema, read_neo4j_cypher, the memory read tools, house_status, house_select_tests, house_config, research_orbit_audit, research_pooling_audit, rag_search, rag_expand, seal_recall, view, why_hot, replay, calibrate and tier_stats.";
+
+fn instructions(mode: Mode, read_only: bool) -> &'static str {
+    match (mode, read_only) {
+        (Mode::Normal, false) => NORMAL_RW,
+        (Mode::Normal, true) => NORMAL_RO,
+        (Mode::House, false) => HOUSE_RW,
+        (Mode::House, true) => HOUSE_RO,
+    }
 }
 
 impl Server {
@@ -128,7 +146,7 @@ impl Server {
         match method {
             "initialize" => Ok(self.initialize(params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(tools::list_json(self.ctx.read_only)),
+            "tools/list" => Ok(tools::list_json(self.ctx.read_only, self.ctx.mode)),
             "tools/call" => self.tools_call(params),
             m if m.starts_with("notifications/") => Ok(Json::Null),
             other => Err(RpcError::new(
@@ -143,11 +161,7 @@ impl Server {
         let version = requested
             .filter(|v| SUPPORTED_VERSIONS.contains(v))
             .unwrap_or(SUPPORTED_VERSIONS[0]);
-        let instructions = if self.ctx.read_only {
-            "seal graph database (read-only). Use get_neo4j_schema, read_neo4j_cypher, the memory read tools, rag_search, rag_expand, seal_recall, house_status, house_select_tests, house_config, view, why_hot, replay, calibrate and tier_stats."
-        } else {
-            "seal graph database. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. Seal mode (light research): rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. House mode (the differential): house_need, house_chart, house_merge, house_fact, house_next, house_report, house_test_run, house_leap, house_status, house_select_tests, house_config. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats."
-        };
+        let instructions = instructions(self.ctx.mode, self.ctx.read_only);
         json!({
             "protocolVersion": version,
             "capabilities": {"tools": {"listChanged": false}},
