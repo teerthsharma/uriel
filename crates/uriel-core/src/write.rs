@@ -15,7 +15,7 @@ use redb::ReadableTable;
 use crate::catalog::ConstraintKind;
 use crate::checksum::crc32c;
 use crate::codec::{encode_node, encode_rel};
-use crate::command::{Command, WriteBatch};
+use crate::command::{Command, GraphDump, WriteBatch};
 use crate::error::{Error, Result};
 use crate::graph::{CommitInfo, Inner, Touched, WriterGate};
 use crate::ids::{Edge, Node, NodeId, Props, Rel, RelId};
@@ -1046,11 +1046,44 @@ impl WriteTx {
                 found: batch.epoch,
             });
         }
+        self.apply_commands(&batch.commands)?;
+        if !self.dirty {
+            return Err(Error::InvalidBatch("batch changed nothing".to_string()));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore(&mut self, dump: &GraphDump) -> Result<()> {
+        let empty = self.st.epoch == 0
+            && self.st.node_count == 0
+            && self.st.rel_count == 0
+            && self.st.next_node == 0
+            && self.st.next_rel == 0
+            && self.st.indexes.is_empty()
+            && self.st.unique.is_empty()
+            && self.st.exists.is_empty();
+        if !empty {
+            return Err(Error::InvalidBatch(
+                "a dump restores only into an empty graph".to_string(),
+            ));
+        }
+        if dump.batch.epoch == 0 {
+            return Err(Error::InvalidBatch("a dump has epoch 0".to_string()));
+        }
+        self.st.epoch = dump.batch.epoch - 1;
+        self.apply_commands(&dump.batch.commands)?;
+        self.st.next_node = self.st.next_node.max(dump.next_node);
+        self.st.next_rel = self.st.next_rel.max(dump.next_rel);
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn apply_commands(&mut self, commands: &[Command]) -> Result<()> {
         let node_floor = self.st.next_node;
         let rel_floor = self.st.next_rel;
         let mut node_ids = BTreeSet::new();
         let mut rel_ids = BTreeSet::new();
-        for command in &batch.commands {
+        for command in commands {
             match command {
                 Command::CreateNode { id, labels, props } => {
                     if id.0 < node_floor || !node_ids.insert(id.0) {
@@ -1093,9 +1126,6 @@ impl WriteTx {
                     self.drop_constraint(*kind, label, key)?;
                 }
             }
-        }
-        if !self.dirty {
-            return Err(Error::InvalidBatch("batch changed nothing".to_string()));
         }
         Ok(())
     }

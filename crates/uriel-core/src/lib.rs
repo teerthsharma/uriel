@@ -68,7 +68,7 @@ mod tests;
 
 pub use budget::MemoryBudget;
 pub use catalog::{ConstraintDef, ConstraintKind, EntitySchema, IndexDef, Schema};
-pub use command::{Command, WriteBatch};
+pub use command::{Command, GraphDump, WriteBatch};
 pub use error::{Error, Result};
 pub use graph::{
     CommitInfo, Graph, Integrity, Mode, ModeCause, ModeEvent, Options, RecordId, ScrubReport,

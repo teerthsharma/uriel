@@ -283,3 +283,41 @@ impl WriteBatch {
         Ok(WriteBatch { epoch, commands })
     }
 }
+
+const DUMP_COUNTERS_BYTES: usize = 16;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphDump {
+    pub next_node: u64,
+    pub next_rel: u64,
+    pub batch: WriteBatch,
+}
+
+impl GraphDump {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&self.next_node.to_le_bytes());
+        out.extend_from_slice(&self.next_rel.to_le_bytes());
+        out.extend_from_slice(&self.batch.encode());
+        let crc = crc32c(&out);
+        out.extend_from_slice(&crc.to_le_bytes());
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<GraphDump> {
+        if bytes.len() < DUMP_COUNTERS_BYTES + HEADER_BYTES + 2 * CRC_BYTES {
+            return Err(invalid("dump truncated"));
+        }
+        let (body, tail) = bytes.split_at(bytes.len() - CRC_BYTES);
+        let stored = u32::from_le_bytes(tail.try_into().expect("4 bytes"));
+        if stored != crc32c(body) {
+            return Err(invalid("dump checksum mismatch"));
+        }
+        let word = |at: usize| u64::from_le_bytes(body[at..at + 8].try_into().expect("8 bytes"));
+        Ok(GraphDump {
+            next_node: word(0),
+            next_rel: word(8),
+            batch: WriteBatch::decode(&body[DUMP_COUNTERS_BYTES..])?,
+        })
+    }
+}
