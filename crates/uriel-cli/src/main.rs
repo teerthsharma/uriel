@@ -63,6 +63,13 @@ enum ModeArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TerseArg {
+    Off,
+    Data,
+    Prose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PlacementArg {
     Local,
     Planned,
@@ -82,6 +89,8 @@ struct McpArgs {
     placement: Option<PlacementArg>,
     #[arg(long, value_enum)]
     mode: Option<ModeArg>,
+    #[arg(long, value_enum)]
+    terse: Option<TerseArg>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(16..))]
     memory_mib: Option<u64>,
 }
@@ -127,7 +136,10 @@ struct RecallArgs {
 
 impl McpArgs {
     fn to_config(&self) -> Result<Config, String> {
-        self.to_config_env(std::env::var(MODE_ENV).ok().as_deref())
+        self.to_config_envs(
+            std::env::var(MODE_ENV).ok().as_deref(),
+            std::env::var(TERSE_ENV).ok().as_deref(),
+        )
     }
 
     fn to_config_env(&self, mode_env: Option<&str>) -> Result<Config, String> {
@@ -135,7 +147,11 @@ impl McpArgs {
     }
 
     fn to_config_envs(&self, mode_env: Option<&str>, terse_env: Option<&str>) -> Result<Config, String> {
-        let _ = terse_env;
+        let terse_flag = self.terse.map(|t| match t {
+            TerseArg::Off => Terse::Off,
+            TerseArg::Data => Terse::Data,
+            TerseArg::Prose => Terse::Prose,
+        });
         let mode_flag = self.mode.map(|m| match m {
             ModeArg::Normal => ServerMode::Normal,
             ModeArg::House => ServerMode::House,
@@ -164,7 +180,7 @@ impl McpArgs {
                     .map_or(DEFAULT_MEMORY_MIB, |m| usize::try_from(m).unwrap_or(DEFAULT_MEMORY_MIB)),
             ),
             mode: ServerMode::resolve(mode_flag, mode_env)?,
-            terse: Terse::Off,
+            terse: Terse::resolve(terse_flag, terse_env)?,
         })
     }
 }
@@ -342,6 +358,7 @@ mod tests {
                 format: Some(FormatArg::Json),
                 placement: Some(PlacementArg::Planned),
                 mode: None,
+                terse: None,
                 memory_mib: Some(64),
             }))
         );
@@ -548,6 +565,7 @@ mod tests {
                     format: None,
                     placement: None,
                     mode: None,
+                    terse: None,
                     memory_mib: None,
                 })),
             };
@@ -570,6 +588,7 @@ mod tests {
                 format: None,
                 placement: None,
                 mode: None,
+                terse: None,
                 memory_mib: None,
             })),
         };

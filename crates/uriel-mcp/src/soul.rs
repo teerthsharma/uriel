@@ -115,8 +115,8 @@ fn soul(ctx: &Context, args: &Json) -> ToolResult {
             ..SoulOptions::default()
         })
         .map_err(|e| e.to_string())?;
-    let chosen = pick(&guide, &ids, budget)?;
-    let text: String = if ids.is_empty() {
+    let (chosen, changed) = crate::terse::prose_sections(ctx, pick(&guide, &ids, budget)?);
+    let text: String = if ids.is_empty() && !changed {
         guide.text.clone()
     } else {
         chosen.iter().map(SoulSection::render).collect()

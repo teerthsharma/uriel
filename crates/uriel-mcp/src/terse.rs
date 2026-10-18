@@ -1,14 +1,21 @@
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::json;
-use uriel_rag::SoulSection;
+use uriel_rag::{Hit, SoulSection, MEMORY_PREFIX};
+use uriel_terse::data::{decode, encode};
+use uriel_terse::{compact, estimate_tokens, Level, Report, Value};
 
 use crate::config::Terse;
+use crate::prefix::is_led;
 use crate::tools::{no_args, Context, ToolDef, ToolResult};
 
 pub const STATS: &str = "terse_stats";
 
-pub const INSTRUCTION: &str = "";
+pub const INSTRUCTION: &str = "Terse JSON results: indent nests; `k: v`; `k[n]: a,b`; `k[n]{c1,c2=const,c3^prefix}:` then n rows (const columns omitted, prefix prepended); `$x=key` lines first name keys; `- ` list items; a leading `!` means plain JSON.";
+
+const RAW_TEXT_TOOLS: &[&str] = &["rag_expand", STATS];
+
+const PROSE_FILES: &[&str] = &[".md", ".markdown", ".txt", ".rst"];
 
 #[derive(Debug, Default)]
 pub struct Meter {
@@ -17,55 +24,128 @@ pub struct Meter {
 }
 
 impl Meter {
-    pub fn add(&self, _before: &str, _after: &str) {
-        let _ = (&self.before, &self.after);
+    pub fn add(&self, before: &str, after: &str) {
+        self.add_pair((estimate_tokens(before), estimate_tokens(after)));
+    }
+
+    pub fn add_pair(&self, (before, after): (usize, usize)) {
+        self.before.fetch_add(before as u64, Ordering::Relaxed);
+        self.after.fetch_add(after as u64, Ordering::Relaxed);
     }
 
     pub fn totals(&self) -> (u64, u64) {
-        (0, 0)
+        (
+            self.before.load(Ordering::Relaxed),
+            self.after.load(Ordering::Relaxed),
+        )
     }
 }
 
 pub const TOOLS: &[ToolDef] = &[ToolDef {
     name: STATS,
     title: "Terse savings",
-    description: "Report the tokens the terse encoding saved in this session: terse_before_tokens, terse_after_tokens and saved_ratio.",
+    description: "Report the tokens the terse encoding saved in this session: terse_before_tokens, terse_after_tokens and saved_ratio, over the results it shortened or passed through unchanged.",
     writes: false,
     schema: no_args,
 }];
 
+fn pack(value: &Value, text: &str) -> String {
+    match encode(value) {
+        Ok(enc)
+            if estimate_tokens(&enc) < estimate_tokens(text)
+                && decode(&enc).is_ok_and(|back| back == *value) =>
+        {
+            enc
+        }
+        _ => text.to_string(),
+    }
+}
+
 pub fn data_text(text: &str) -> String {
-    text.to_string()
+    match Value::parse(text) {
+        Ok(value) => pack(&value, text),
+        Err(_) => text.to_string(),
+    }
 }
 
-pub fn shape(_ctx: &Context, _name: &str, text: String) -> String {
-    text
+pub fn shape(ctx: &Context, name: &str, text: String) -> String {
+    if ctx.terse == Terse::Off || RAW_TEXT_TOOLS.contains(&name) || is_led(&text) {
+        return text;
+    }
+    let Ok(value) = Value::parse(&text) else {
+        return text;
+    };
+    let out = pack(&value, &text);
+    ctx.meter.add(&text, &out);
+    out
 }
 
-pub fn lite(_ctx: &Context, text: &str) -> String {
-    text.to_string()
+pub fn lite_text(ctx: &Context, text: &str) -> String {
+    if ctx.terse != Terse::Prose {
+        return text.to_string();
+    }
+    let out = compact(text, Level::Lite);
+    if out.is_empty() || out.chars().count() >= text.chars().count() {
+        return text.to_string();
+    }
+    out
 }
 
-pub fn prose_sections(_ctx: &Context, sections: Vec<SoulSection>) -> (Vec<SoulSection>, bool) {
-    (sections, false)
+pub fn remembered(ctx: &Context, mut hits: Vec<Hit>) -> Vec<Hit> {
+    if ctx.terse != Terse::Prose {
+        return hits;
+    }
+    for hit in hits.iter_mut().filter(|h| h.file.starts_with(MEMORY_PREFIX)) {
+        let out = lite_text(ctx, &hit.memory);
+        ctx.meter.add(&hit.memory, &out);
+        hit.memory = out;
+    }
+    hits
+}
+
+fn is_prose_file(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    PROSE_FILES.iter().any(|ext| lower.ends_with(ext))
+}
+
+pub fn prose_sections(ctx: &Context, mut sections: Vec<SoulSection>) -> (Vec<SoulSection>, bool) {
+    if ctx.terse != Terse::Prose {
+        return (sections, false);
+    }
+    let mut changed = false;
+    for section in sections.iter_mut().filter(|s| is_prose_file(&s.file)) {
+        let out = lite_text(ctx, &section.text);
+        ctx.meter.add(&section.text, &out);
+        changed |= out != section.text;
+        section.text = out;
+    }
+    (sections, changed)
 }
 
 pub fn stats(ctx: &Context) -> ToolResult {
+    let (before, after) = ctx.meter.totals();
+    let report = Report::from_counts(before as usize, after as usize);
     Ok(json!({
         "terse": ctx.terse.name(),
-        "terse_before_tokens": 0,
-        "terse_after_tokens": 0,
-        "saved_ratio": 0.0,
+        "terse_before_tokens": report.before,
+        "terse_after_tokens": report.after,
+        "saved_ratio": report.saved_ratio,
     })
     .to_string())
 }
 
-pub fn fingerprint_key(mode: &str, _terse: Terse) -> String {
-    mode.to_string()
+pub fn fingerprint_key(mode: &str, terse: Terse) -> String {
+    match terse {
+        Terse::Off => mode.to_string(),
+        other => format!("{mode}+terse:{}", other.name()),
+    }
 }
 
-pub fn instructions(base: &str, _terse: Terse) -> String {
-    base.to_string()
+pub fn instructions(base: &str, terse: Terse) -> String {
+    match terse {
+        Terse::Off => base.to_string(),
+        _ => format!("{base} {INSTRUCTION}"),
+    }
 }
 
 #[cfg(test)]

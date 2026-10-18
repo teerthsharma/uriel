@@ -177,11 +177,17 @@ OPTIONS:
     --mode <M>           normal (default) or house: normal serves the cypher, memory, rag and view
                          tools; house adds the house_* tools and the research_* Caustic tools.
                          A normal server neither lists nor accepts a house_* or research_* tool
+    --terse <L>          off (default), data or prose: data returns JSON results in a lossless
+                         compact text encoding (decoded by the line the server adds to its
+                         instructions); prose also shortens the prose of returned findings and of
+                         documentation sections of the soul guide. Stored data is never altered.
+                         Adds the terse_stats tool
     -h, --help           Print this help
     -V, --version        Print version
 
 ENVIRONMENT:
     URIEL_MODE           normal or house; used when --mode is not given
+    URIEL_TERSE          off, data or prose; used when --terse is not given
     URIEL_STABLE_PREFIX  off (or 0, false) keeps the json result of view and soul in the plain
                          serialisation; by default it leads with a byte-stable scaffold preamble
                          and carries prefix_id and stable_prefix_bytes
@@ -228,8 +234,8 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let _ = terse_env;
     let mut mode_flag = None;
+    let mut terse_flag = None;
     let mut cfg = Config {
         db: default_db_path(),
         read_only: false,
@@ -283,6 +289,12 @@ where
                         .ok_or_else(|| format!("--mode expects normal or house, got '{v}'"))?,
                 );
             }
+            "--terse" => {
+                let v = value(&flag, inline, &mut it)?;
+                terse_flag = Some(Terse::parse(&v).ok_or_else(|| {
+                    format!("--terse expects off, data or prose, got '{v}'")
+                })?);
+            }
             "--placement" => {
                 let v = value(&flag, inline, &mut it)?;
                 cfg.placement = PlacementMode::parse(&v)
@@ -306,6 +318,7 @@ where
         }
     }
     cfg.mode = Mode::resolve(mode_flag, mode_env)?;
+    cfg.terse = Terse::resolve(terse_flag, terse_env)?;
     Ok(Cli::Run(cfg))
 }
 

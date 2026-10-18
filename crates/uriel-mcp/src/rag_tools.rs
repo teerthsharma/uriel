@@ -5,8 +5,9 @@ use uriel_rag::{Hit, HitVia, IndexOptions, Level, Rag, SearchOptions, MEMORY_PRE
 use serde_json::{json, Value as Json};
 
 use crate::compact::{encode_pack, Pack, PackHit};
-use crate::config::Format;
+use crate::config::{Format, Terse};
 use crate::session::Seen;
+use crate::terse;
 use crate::tools::{
     format_arg, format_prop, no_args, object, opt_bool, opt_strings, opt_usize, req_str, str_list,
     str_prop, Context, ToolDef, ToolResult,
@@ -310,23 +311,42 @@ fn to_pack(
     Ok((hits, deliveries))
 }
 
+fn remembered_bodies(ctx: &Context, shown: &mut [Shown]) -> (usize, usize) {
+    let mut totals = (0, 0);
+    if ctx.terse != Terse::Prose {
+        return totals;
+    }
+    for item in shown.iter_mut().filter(|s| s.hit.file.starts_with(MEMORY_PREFIX)) {
+        let out = terse::lite_text(ctx, &item.body);
+        totals.0 += proxy(&item.body);
+        totals.1 += proxy(&out);
+        item.body = out;
+    }
+    totals
+}
+
 fn deliver(ctx: &Context, hits: Vec<Hit>, d: &Delivery) -> ToolResult {
     let rag = rag(ctx)?;
     let ids: Vec<u64> = hits.iter().map(|h| h.chunk_id).collect();
     ctx.placement.observe_chunks(&ids);
     match (d.format, d.ladder) {
-        (Format::Json, false) => Ok(pack(hits, d.budget).to_string()),
+        (Format::Json, false) => Ok(pack(terse::remembered(ctx, hits), d.budget).to_string()),
         (Format::Json, true) => {
-            let (shown, omitted) = ladder_shown(rag, &hits, d.budget)?;
+            let (mut shown, omitted) = ladder_shown(rag, &hits, d.budget)?;
+            ctx.meter.add_pair(remembered_bodies(ctx, &mut shown));
             Ok(ladder_json(&shown, omitted, d.budget).to_string())
         }
         (Format::Compact, ladder) => {
+            let hits = if ladder { hits } else { terse::remembered(ctx, hits) };
             let mut inner = d.budget;
             loop {
-                let (shown, omitted) = if ladder {
-                    ladder_shown(rag, &hits, inner)?
+                let (shown, omitted, saved) = if ladder {
+                    let (mut shown, omitted) = ladder_shown(rag, &hits, inner)?;
+                    let saved = remembered_bodies(ctx, &mut shown);
+                    (shown, omitted, saved)
                 } else {
-                    memory_shown(&hits, inner)
+                    let (shown, omitted) = memory_shown(&hits, inner);
+                    (shown, omitted, (0, 0))
                 };
                 let (entries, deliveries) = to_pack(ctx, rag, &shown, d.fresh)?;
                 let text = encode_pack(&Pack {
@@ -341,6 +361,7 @@ fn deliver(ctx: &Context, hits: Vec<Hit>, d: &Delivery) -> ToolResult {
                     for (id, fp, detail) in deliveries {
                         ctx.session.record(id, &fp, detail);
                     }
+                    ctx.meter.add_pair(saved);
                     return Ok(text);
                 }
                 inner = inner.saturating_sub(over);

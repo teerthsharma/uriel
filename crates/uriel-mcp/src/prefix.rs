@@ -58,6 +58,10 @@ fn compute(ctx: &Context) -> Result<Scaffold, String> {
     Ok(Scaffold { id, preamble })
 }
 
+pub fn is_led(body: &str) -> bool {
+    body.starts_with("{\"prefix_id\":")
+}
+
 pub fn lead_json(ctx: &Context, body: String) -> Result<String, String> {
     if !ctx.services.stable_prefix {
         return Ok(body);

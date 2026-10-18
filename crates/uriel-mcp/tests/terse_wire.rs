@@ -123,14 +123,30 @@ fn calls() -> Vec<(&'static str, Value)> {
         ("seal_recall", json!({"query": "scheduler backoff", "format": fmt})),
         ("rag_search", json!({"query": "backoff delay", "format": fmt})),
         ("rag_search", json!({"query": "invoice customer billing"})),
-        ("view", json!({"question": "scheduler priority", "format": fmt})),
+        ("view", json!({"question": "scheduler priority", "budget_tokens": 1500, "format": fmt})),
         ("soul", json!({"format": fmt})),
         ("session_reset", json!({})),
         ("rag_feedback", json!({"used": [1], "unused": [2]})),
     ]
 }
 
+const LEAD: &str = "{\"prefix_id\"";
+
+fn scrub(text: &str) -> Value {
+    let mut v: Value = serde_json::from_str(text).expect("json");
+    if let Some(m) = v.as_object_mut() {
+        m.remove("prefix_id");
+        m.remove("preamble");
+    }
+    v
+}
+
 fn equivalent(name: &str, off: &str, got: &str) {
+    if off.starts_with(LEAD) {
+        assert!(got.starts_with(LEAD), "{name}: {got}");
+        assert_eq!(scrub(off), scrub(got), "{name}");
+        return;
+    }
     match Terse::parse(off) {
         Ok(expected) => {
             let direct = Terse::parse(got).ok().filter(|v| *v == expected);
@@ -193,7 +209,7 @@ fn compact_text_results_are_never_touched_in_data_mode() {
         ("rag_search", json!({"query": "backoff delay"})),
         ("rag_search", json!({"query": "scheduler priority", "format": "compact"})),
         ("seal_recall", json!({"query": "scheduler"})),
-        ("view", json!({"question": "invoice", "format": "compact"})),
+        ("view", json!({"question": "invoice", "budget_tokens": 1500, "format": "compact"})),
         ("soul", json!({"format": "compact"})),
         ("read_neo4j_cypher", json!({"query": "MATCH (c:Chunk) RETURN c.file AS f ORDER BY f"})),
         ("rag_expand", json!({"chunk_id": 1, "level": 0})),
@@ -270,7 +286,7 @@ fn the_stats_tool_counts_exactly_what_was_shaped() {
     for (name, args) in calls() {
         let a = text(&off, name, args.clone());
         let b = text(&data, name, args);
-        if !EXCLUDED.contains(&name) && Terse::parse(&a).is_ok() {
+        if !EXCLUDED.contains(&name) && !a.starts_with(LEAD) && Terse::parse(&a).is_ok() {
             before += estimate_tokens(&a);
             after += estimate_tokens(&b);
         }
@@ -294,8 +310,8 @@ fn the_stable_prefix_lead_is_left_byte_exact() {
     for s in [&off, &data] {
         text(s, "rag_index", json!({}));
     }
-    let a = text(&off, "view", json!({"question": "scheduler", "format": "json"}));
-    let b = text(&data, "view", json!({"question": "scheduler", "format": "json"}));
+    let a = text(&off, "view", json!({"question": "scheduler", "budget_tokens": 1500, "format": "json"}));
+    let b = text(&data, "view", json!({"question": "scheduler", "budget_tokens": 1500, "format": "json"}));
     assert!(a.starts_with("{\"prefix_id\""), "{a}");
     assert!(b.starts_with("{\"prefix_id\""), "{b}");
     let (pa, pb): (Value, Value) = (serde_json::from_str(&a).unwrap(), serde_json::from_str(&b).unwrap());
@@ -343,7 +359,7 @@ fn prose_never_touches_code_chunks_or_citations() {
         ("rag_search", json!({"query": "backoff delay", "fresh": true})),
         ("rag_search", json!({"query": "backoff delay", "format": "json", "fresh": true})),
         ("rag_expand", json!({"chunk_id": 1, "level": 0})),
-        ("view", json!({"question": "invoice", "format": "compact"})),
+        ("view", json!({"question": "invoice", "budget_tokens": 1500, "format": "compact"})),
     ] {
         assert_eq!(call(&data, name, args.clone()), call(&prose, name, args), "{name}");
     }
@@ -356,7 +372,12 @@ fn prose_compacts_documentation_sections_of_the_soul_but_not_code() {
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
     std::fs::write(
         dir.path().join("docs/guide.md"),
-        "# Retry guide\nYou should basically make sure that the gateway client really does always retry with a backoff delay, in order to avoid the thundering herd problem, because it is just a very important thing.\n",
+        format!(
+            "# Retry guide\n{}",
+            (0..12)
+                .map(|i| format!("Step {i}: you should basically make sure that the gateway client really does always retry with a backoff delay, in order to avoid the thundering herd problem, because it is just a very important thing.\n\n"))
+                .collect::<String>()
+        ),
     )
     .unwrap();
     std::fs::write(
