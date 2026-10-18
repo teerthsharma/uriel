@@ -24,8 +24,8 @@ const SHORT_WINDOW: usize = 300;
 const TOKEN_CAP: usize = 256;
 
 const UNITS: [&str; 23] = [
-    "ms", "us", "ns", "sec", "min", "hr", "KB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB",
-    "Hz", "kHz", "MHz", "GHz", "px", "tokens", "tok", "fps", "ops",
+    "ms", "us", "ns", "sec", "min", "hr", "KB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB", "Hz",
+    "kHz", "MHz", "GHz", "px", "tokens", "tok", "fps", "ops",
 ];
 
 const FILE_EXTENSIONS: [&str; 44] = [
@@ -133,7 +133,11 @@ fn fence(b: &[u8], i: usize) -> Option<usize> {
             k += 1;
         }
         let m = b[k..end].iter().take_while(|&&c| c == ch).count();
-        if m >= n && b[k + m..end].iter().all(|c| matches!(c, b' ' | b'\t' | b'\r')) {
+        if m >= n
+            && b[k + m..end]
+                .iter()
+                .all(|c| matches!(c, b' ' | b'\t' | b'\r'))
+        {
             let cut = if end > start && b[end - 1] == b'\r' {
                 end - 1
             } else {
@@ -217,7 +221,12 @@ fn backslash(b: &[u8], i: usize) -> Hit {
             None => Hit::Nothing,
         },
         Some(c) if c.is_ascii_alphabetic() => {
-            let mut j = i + 1 + b[i + 1..].iter().take_while(|c| c.is_ascii_alphabetic()).count();
+            let mut j = i
+                + 1
+                + b[i + 1..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_alphabetic())
+                    .count();
             while b.get(j) == Some(&b'{') {
                 match brace_end(b, j) {
                     Some(end) => j = end,
@@ -298,7 +307,9 @@ fn single_quote(b: &[u8], i: usize) -> Hit {
     let limit = b.len().min(i + 1 + SHORT_WINDOW);
     let mut q = i + 2;
     while q < limit && b[q] != b'\n' {
-        if b[q] == b'\'' && !b[q - 1].is_ascii_whitespace() && !b.get(q + 1).is_some_and(|&c| is_word(c))
+        if b[q] == b'\''
+            && !b[q - 1].is_ascii_whitespace()
+            && !b.get(q + 1).is_some_and(|&c| is_word(c))
         {
             return Hit::Span(q + 1, Kind::Quoted);
         }
@@ -412,7 +423,8 @@ fn url(b: &[u8], i: usize) -> Option<usize> {
             .iter()
             .take_while(|&&c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'.' | b'-'))
             .count();
-        scheme = b[k..].starts_with(b"://") && b.get(k + 3).is_some_and(|c| !c.is_ascii_whitespace());
+        scheme =
+            b[k..].starts_with(b"://") && b.get(k + 3).is_some_and(|c| !c.is_ascii_whitespace());
     }
     if !scheme && !(lower_www && b.get(i + 4).is_some_and(u8::is_ascii_alphanumeric)) {
         return None;
@@ -487,7 +499,8 @@ fn token(b: &[u8], i: usize) -> (usize, Option<Kind>) {
         {
             pre = true;
             j += 1;
-            while j < b.len() && (b[j].is_ascii_alphanumeric() || matches!(b[j], b'.' | b'-' | b'+'))
+            while j < b.len()
+                && (b[j].is_ascii_alphanumeric() || matches!(b[j], b'.' | b'-' | b'+'))
             {
                 j += 1;
             }
@@ -523,7 +536,8 @@ fn token(b: &[u8], i: usize) -> (usize, Option<Kind>) {
         .windows(2)
         .any(|w| w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase());
     let colons = b[j..].starts_with(b"::")
-        && b.get(j + 2).is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_');
+        && b.get(j + 2)
+            .is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_');
     let call = b[j..].starts_with(b"()");
     if !(snake || camel || colons || call) {
         return (j, None);

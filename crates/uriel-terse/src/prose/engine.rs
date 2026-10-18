@@ -66,9 +66,7 @@ fn real_terminator(t: &[Tok], p: usize) -> bool {
             }
             let prev = &t[p - 1];
             match prev.k {
-                K::Word => {
-                    prev.l.chars().count() != 1 && !ABBREVIATIONS.contains(&prev.l.as_str())
-                }
+                K::Word => prev.l.chars().count() != 1 && !ABBREVIATIONS.contains(&prev.l.as_str()),
                 K::Punct => !prev.is_punct('.'),
                 _ => true,
             }
@@ -162,7 +160,10 @@ pub(super) fn verbatim(t: &[Tok]) -> bool {
 
 fn terminator_group_end(t: &[Tok], from: usize) -> usize {
     let mut k = from;
-    while t.get(k).is_some_and(|x| matches!(x.ch(), Some('.' | '!' | '?'))) {
+    while t
+        .get(k)
+        .is_some_and(|x| matches!(x.ch(), Some('.' | '!' | '?')))
+    {
         k += 1;
     }
     k
@@ -183,7 +184,9 @@ fn closer(t: &[Tok], j: usize) -> Option<usize> {
         if end == k && k < t.len() {
             continue;
         }
-        if t.get(end).is_some_and(|x| x.k != K::Space && x.k != K::Newline) {
+        if t.get(end)
+            .is_some_and(|x| x.k != K::Space && x.k != K::Newline)
+        {
             continue;
         }
         if neg_in(&t[j..end]) > 0 {
@@ -255,9 +258,8 @@ fn hedge(t: &[Tok], i: usize) -> Option<(usize, Vec<Tok>)> {
     if t.get(k).is_some_and(|x| x.k == K::Space) {
         k += 1;
     }
-    let rest_empty = k >= t.len()
-        || matches!(t[k].ch(), Some('.' | '!' | '?'))
-        || t[k].k == K::Newline;
+    let rest_empty =
+        k >= t.len() || matches!(t[k].ch(), Some('.' | '!' | '?')) || t[k].k == K::Newline;
     if rest_empty {
         let emit: Vec<Tok> = tag_tokens().into();
         return fits(t, i, k, emit);
@@ -349,9 +351,7 @@ pub(super) fn sentences(t: Vec<Tok>) -> Vec<Tok> {
 fn drop_ok(t: &[Tok], i: usize, end: usize) -> bool {
     let before = i == 0
         || t[i - 1].k == K::Space
-        || t[i - 1]
-            .ch()
-            .is_some_and(|c| "([{\"'-*#>+".contains(c));
+        || t[i - 1].ch().is_some_and(|c| "([{\"'-*#>+".contains(c));
     before
         && t.get(end).is_some_and(|x| x.k == K::Space)
         && t.get(end + 1).is_some_and(Tok::is_atom)
@@ -486,9 +486,8 @@ pub(super) fn copulas(t: Vec<Tok>) -> Vec<Tok> {
     while i < t.len() {
         let tok = &t[i];
         if tok.k == K::Word && matches!(tok.t.as_str(), "is" | "are") && !q[i] {
-            let before_ok = prev_atom(&t, i).is_some_and(|p| {
-                p.k == K::Prot || !BEFORE_COPULA_STOP.contains(&p.l.as_str())
-            });
+            let before_ok = prev_atom(&t, i)
+                .is_some_and(|p| p.k == K::Prot || !BEFORE_COPULA_STOP.contains(&p.l.as_str()));
             let after_ok = next_atom(&t, i).is_some_and(|n| {
                 n.k == K::Prot || (!is_neg(&n.l) && !AFTER_COPULA_STOP.contains(&n.l.as_str()))
             });

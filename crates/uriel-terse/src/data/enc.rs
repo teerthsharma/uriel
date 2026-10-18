@@ -59,6 +59,12 @@ fn toon(root: &Value) -> String {
     out
 }
 
+enum Col {
+    Plain,
+    Prefix(usize),
+    Const,
+}
+
 #[derive(Default)]
 struct Enc {
     counts: HashMap<String, usize>,
@@ -200,9 +206,23 @@ impl Enc {
             })
             .collect();
         let mut header = Vec::with_capacity(cols.len());
-        let mut prefixes: Vec<Option<String>> = Vec::with_capacity(cols.len());
+        let mut kinds: Vec<Col> = Vec::with_capacity(cols.len());
+        let mut constant: Vec<bool> = (0..cols.len())
+            .map(|j| rows.iter().all(|r| r[j].1 == rows[0][j].1))
+            .collect();
+        if constant.iter().all(|c| *c) {
+            constant[0] = false;
+        }
         for (j, col) in cols.iter().enumerate() {
             let mut name = self.key(col);
+            let first = &rows[0][j].1;
+            if constant[j] {
+                name.push('=');
+                name.push_str(&scalar_token(first, Ctx::Cell));
+                header.push(name);
+                kinds.push(Col::Const);
+                continue;
+            }
             let strings: Option<Vec<&str>> = rows
                 .iter()
                 .map(|r| match &r[j].1 {
@@ -210,7 +230,7 @@ impl Enc {
                     _ => None,
                 })
                 .collect();
-            let mut prefix = None;
+            let mut kind = Col::Plain;
             if let Some(strings) = strings {
                 let p = common_prefix(&strings);
                 if !p.is_empty() {
@@ -228,21 +248,22 @@ impl Enc {
                     if with < without {
                         name.push('^');
                         name.push_str(&ptoken);
-                        prefix = Some(p);
+                        kind = Col::Prefix(p.len());
                     }
                 }
             }
             header.push(name);
-            prefixes.push(prefix);
+            kinds.push(kind);
         }
         push_line(out, ind, &format!("{key}[{n}]{{{}}}:", header.join(",")));
         for r in &rows {
             let cells: Vec<String> = r
                 .iter()
-                .zip(&prefixes)
-                .map(|((_, v), prefix)| match (v, prefix) {
-                    (Value::String(s), Some(p)) => raw_token(&s[p.len()..], Ctx::Cell),
-                    _ => scalar_token(v, Ctx::Cell),
+                .zip(&kinds)
+                .filter_map(|((_, v), kind)| match (v, kind) {
+                    (_, Col::Const) => None,
+                    (Value::String(s), Col::Prefix(n)) => Some(raw_token(&s[*n..], Ctx::Cell)),
+                    _ => Some(scalar_token(v, Ctx::Cell)),
                 })
                 .collect();
             push_line(out, ind + 1, &cells.join(","));

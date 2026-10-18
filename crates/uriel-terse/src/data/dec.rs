@@ -10,7 +10,13 @@ struct Line<'a> {
     off: usize,
 }
 
-type Cols = Vec<(String, Option<Cell>)>;
+enum Col {
+    Plain,
+    Prefix(Cell),
+    Const(Cell),
+}
+
+type Cols = Vec<(String, Col)>;
 
 struct Cell {
     text: String,
@@ -234,13 +240,17 @@ impl<'a> Decoder<'a> {
         loop {
             let (name, rest) = self.key_from(cur, true)?;
             cur = rest;
-            let mut prefix = None;
+            let mut kind = Col::Plain;
             if let Some(after) = cur.strip_prefix('^') {
                 let (cell, rest) = self.cell(after)?;
-                prefix = Some(cell);
+                kind = Col::Prefix(cell);
+                cur = rest;
+            } else if let Some(after) = cur.strip_prefix('=') {
+                let (cell, rest) = self.cell(after)?;
+                kind = Col::Const(cell);
                 cur = rest;
             }
-            cols.push((name, prefix));
+            cols.push((name, kind));
             if let Some(after) = cur.strip_prefix(',') {
                 cur = after;
             } else if let Some(after) = cur.strip_prefix('}') {
@@ -303,13 +313,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn rows(
-        &mut self,
-        ind: usize,
-        child: usize,
-        n: usize,
-        cols: &[(String, Option<Cell>)],
-    ) -> Result<Value, Error> {
+    fn rows(&mut self, ind: usize, child: usize, n: usize, cols: &Cols) -> Result<Value, Error> {
         enter(child)?;
         self.pos += 1;
         let mut items = Vec::new();
@@ -319,20 +323,29 @@ impl<'a> Decoder<'a> {
                 return self.fail("bad row indent");
             }
             let cells = self.split_cells(l.text)?;
-            if cells.len() != cols.len() {
+            let plain = cols
+                .iter()
+                .filter(|(_, k)| !matches!(k, Col::Const(_)))
+                .count();
+            if cells.len() != plain {
                 return self.fail("row width mismatch");
             }
-            let fields = cols
-                .iter()
-                .zip(cells)
-                .map(|((name, prefix), cell)| {
-                    let value = match prefix {
-                        Some(p) => Value::String(format!("{}{}", p.text, cell.text)),
-                        None => cell_value(&cell),
-                    };
-                    (name.clone(), value)
-                })
-                .collect();
+            let mut cells = cells.into_iter();
+            let mut fields = Vec::with_capacity(cols.len());
+            for (name, kind) in cols {
+                let value = match kind {
+                    Col::Const(c) => cell_value(c),
+                    Col::Prefix(p) => match cells.next() {
+                        Some(cell) => Value::String(format!("{}{}", p.text, cell.text)),
+                        None => return self.fail("row width mismatch"),
+                    },
+                    Col::Plain => match cells.next() {
+                        Some(cell) => cell_value(&cell),
+                        None => return self.fail("row width mismatch"),
+                    },
+                };
+                fields.push((name.clone(), value));
+            }
             items.push(Value::Object(fields));
             self.pos += 1;
         }

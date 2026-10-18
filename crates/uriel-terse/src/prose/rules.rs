@@ -14,8 +14,21 @@ pub(super) const ABBREVIATIONS: &[&str] = &[
 ];
 
 pub(super) const FILLERS: &[&str] = &[
-    "really", "very", "quite", "actually", "basically", "essentially", "simply", "literally",
-    "honestly", "frankly", "definitely", "certainly", "obviously", "totally", "just",
+    "really",
+    "very",
+    "quite",
+    "actually",
+    "basically",
+    "essentially",
+    "simply",
+    "literally",
+    "honestly",
+    "frankly",
+    "definitely",
+    "certainly",
+    "obviously",
+    "totally",
+    "just",
 ];
 
 pub(super) const AFTER_A_STOP: &[&str] = &[
@@ -24,8 +37,8 @@ pub(super) const AFTER_A_STOP: &[&str] = &[
 ];
 
 pub(super) const BEFORE_COPULA_STOP: &[&str] = &[
-    "there", "here", "what", "where", "how", "who", "whom", "which", "why", "when", "that",
-    "this", "whatever", "whoever",
+    "there", "here", "what", "where", "how", "who", "whom", "which", "why", "when", "that", "this",
+    "whatever", "whoever",
 ];
 
 pub(super) const AFTER_COPULA_STOP: &[&str] = &["to", "being"];
@@ -470,9 +483,14 @@ mod tests {
 
     #[test]
     fn closers_and_leadins_are_lowercase() {
-        for p in CLOSERS.iter().chain(LEADINS.iter()).chain(HEDGE_PREFIXES.iter()) {
+        for p in CLOSERS
+            .iter()
+            .chain(LEADINS.iter())
+            .chain(HEDGE_PREFIXES.iter())
+        {
             assert!(
-                p.chars().all(|c| c.is_ascii_lowercase() || c == ' ' || c == '\''),
+                p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c == ' ' || c == '\''),
                 "{p}"
             );
         }
@@ -485,6 +503,9 @@ mod tests {
         assert!(firsts.contains(&"in order to"));
         assert!(firsts.contains(&"in other words"));
         assert!(idx.candidates("zzz").next().is_none());
-        assert!(Index::new(Level::Lite).candidates("utilize").next().is_none());
+        assert!(Index::new(Level::Lite)
+            .candidates("utilize")
+            .next()
+            .is_none());
     }
 }

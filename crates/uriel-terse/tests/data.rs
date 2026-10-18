@@ -37,8 +37,24 @@ fn json_text_round_trips_exactly() {
 #[test]
 fn json_parser_rejects_bad_input() {
     for bad in [
-        "", "{", "[1,]", "{\"a\":1,}", "01", "1.", ".5", "+1", "\"\\ud800\"", "\"\\udc00\"",
-        "\"a\nb\"", "tru", "[1] x", "{'a':1}", "\"\\x\"", "-", "1e", "nul",
+        "",
+        "{",
+        "[1,]",
+        "{\"a\":1,}",
+        "01",
+        "1.",
+        ".5",
+        "+1",
+        "\"\\ud800\"",
+        "\"\\udc00\"",
+        "\"a\nb\"",
+        "tru",
+        "[1] x",
+        "{'a':1}",
+        "\"\\x\"",
+        "-",
+        "1e",
+        "nul",
     ] {
         assert!(Value::parse(bad).is_err(), "accepted {bad:?}");
     }
@@ -79,10 +95,13 @@ fn constant_columns_move_into_the_header() {
     let enc = roundtrip(
         "{\"hits\":[{\"a\":1,\"v\":\"direct\",\"r\":false},{\"a\":2,\"v\":\"direct\",\"r\":false},{\"a\":3,\"v\":\"direct\",\"r\":false}]}",
     );
-    assert_eq!(enc, "hits[3]{a,v=direct,r=false}:
+    assert_eq!(
+        enc,
+        "hits[3]{a,v=direct,r=false}:
  1
  2
- 3");
+ 3"
+    );
     let all_same = roundtrip("[{\"k\":1},{\"k\":1}]");
     assert!(all_same.contains('1'), "{all_same}");
     roundtrip("[{\"k\":\"a,b\",\"n\":null},{\"k\":\"a,b\",\"n\":null},{\"k\":\"a,b\",\"n\":1}]");
@@ -91,7 +110,10 @@ fn constant_columns_move_into_the_header() {
 
 #[test]
 fn scalar_arrays_are_inline() {
-    assert_eq!(roundtrip("{\"k\":[1,\"two\",null,true]}"), "k[4]: 1,two,null,true");
+    assert_eq!(
+        roundtrip("{\"k\":[1,\"two\",null,true]}"),
+        "k[4]: 1,two,null,true"
+    );
     assert_eq!(roundtrip("{\"k\":[]}"), "k[0]:");
     assert_eq!(roundtrip("{\"k\":{}}"), "k: {}");
 }
@@ -102,10 +124,7 @@ fn nested_objects_and_lists() {
         "{\"alpha\":{\"beta\":{\"gamma\":\"one\",\"delta\":\"two\"},\"epsilon\":\"three\"},\"items\":[{\"identifier\":\"xray\",\"labels\":[\"a\",\"b\"]},{\"identifier\":\"yankee\",\"labels\":[\"c\"]},[\"p\",\"q\"],\"s\",{}]}",
     );
     assert!(enc.contains("\nalpha:\n beta:\n  gamma: one\n"), "{enc}");
-    assert!(
-        enc.contains("\n - $0: xray\n   labels[2]: a,b\n"),
-        "{enc}"
-    );
+    assert!(enc.contains("\n - $0: xray\n   labels[2]: a,b\n"), "{enc}");
     assert!(enc.contains("\n - [2]: p,q\n"), "{enc}");
     assert!(enc.ends_with("\n - s\n - {}"), "{enc}");
 }
@@ -128,7 +147,8 @@ fn repeated_long_keys_use_a_dictionary() {
 
 #[test]
 fn key_order_is_preserved() {
-    let text = "{\"zeta\":1,\"alpha\":[{\"y\":1,\"b\":2},{\"y\":3,\"b\":4}],\"mid\":{\"q\":1,\"a\":2}}";
+    let text =
+        "{\"zeta\":1,\"alpha\":[{\"y\":1,\"b\":2},{\"y\":3,\"b\":4}],\"mid\":{\"q\":1,\"a\":2}}";
     let value = v(text);
     let back = decode(&encode(&value).unwrap()).unwrap();
     assert_eq!(back.to_json(), text);
@@ -137,11 +157,57 @@ fn key_order_is_preserved() {
 #[test]
 fn awkward_strings_survive() {
     let strings = [
-        "", " ", " lead", "trail ", "tab\there", "a,b", "a:b", "k: v", "\"q\"", "true", "false",
-        "null", "123", "-1", "1e5", "-", "$x", "$", "{}", "[0]:", "- x", "-", "!hi", "!", "[",
-        "{", "a^b", "^", "x}", "\u{e9}t\u{e9}", "\u{1f600}", "\u{0}", "\u{2028}", "a\nb", "a\r\nb",
-        "https://x.org/a_b?c=d,e", "C:\\a\\b", "#c", "@m", "~t", "=", "a=b", "0x10", "01", "1.",
-        "NaN", "Infinity", "\\", "a\\", "\"", "''",
+        "",
+        " ",
+        " lead",
+        "trail ",
+        "tab\there",
+        "a,b",
+        "a:b",
+        "k: v",
+        "\"q\"",
+        "true",
+        "false",
+        "null",
+        "123",
+        "-1",
+        "1e5",
+        "-",
+        "$x",
+        "$",
+        "{}",
+        "[0]:",
+        "- x",
+        "-",
+        "!hi",
+        "!",
+        "[",
+        "{",
+        "a^b",
+        "^",
+        "x}",
+        "\u{e9}t\u{e9}",
+        "\u{1f600}",
+        "\u{0}",
+        "\u{2028}",
+        "a\nb",
+        "a\r\nb",
+        "https://x.org/a_b?c=d,e",
+        "C:\\a\\b",
+        "#c",
+        "@m",
+        "~t",
+        "=",
+        "a=b",
+        "0x10",
+        "01",
+        "1.",
+        "NaN",
+        "Infinity",
+        "\\",
+        "a\\",
+        "\"",
+        "''",
     ];
     for s in strings {
         let value = Value::Object(vec![
@@ -177,7 +243,11 @@ fn awkward_strings_survive() {
             ),
         ]);
         let enc = encode(&value).unwrap();
-        assert_eq!(decode(&enc).unwrap(), value, "string {s:?}\nencoded:\n{enc}");
+        assert_eq!(
+            decode(&enc).unwrap(),
+            value,
+            "string {s:?}\nencoded:\n{enc}"
+        );
         let root = Value::String(s.to_string());
         let enc = encode(&root).unwrap();
         assert_eq!(decode(&enc).unwrap(), root, "root string {s:?}");
@@ -195,8 +265,18 @@ fn edge_numbers_survive() {
 #[test]
 fn roots_of_every_shape() {
     for text in [
-        "null", "true", "1", "\"s\"", "[]", "{}", "[1,2]", "[{\"a\":1},{\"a\":2}]", "[[1],[2]]",
-        "{\"a\":null}", "[\"x\"]", "[{}]",
+        "null",
+        "true",
+        "1",
+        "\"s\"",
+        "[]",
+        "{}",
+        "[1,2]",
+        "[{\"a\":1},{\"a\":2}]",
+        "[[1],[2]]",
+        "{\"a\":null}",
+        "[\"x\"]",
+        "[{}]",
     ] {
         roundtrip(text);
     }
@@ -256,21 +336,85 @@ fn mutated_valid_encodings_never_panic() {
 }
 
 const KEYS: &[&str] = &[
-    "a", "b", "id", "file", "start_line", "score", "via", "remembered", "k y", "", "$d", "x,y",
-    "n:m", "q\"r", "\u{e9}", "averyveryLongKeyName", "path", "name", "[0]", "-", "!",
+    "a",
+    "b",
+    "id",
+    "file",
+    "start_line",
+    "score",
+    "via",
+    "remembered",
+    "k y",
+    "",
+    "$d",
+    "x,y",
+    "n:m",
+    "q\"r",
+    "\u{e9}",
+    "averyveryLongKeyName",
+    "path",
+    "name",
+    "[0]",
+    "-",
+    "!",
 ];
 
 const STRS: &[&str] = &[
-    "", "x", "true", "null", "42", "1e5", "-", "a,b", "k: v", "\"q\"", " sp", "sp ", "$ref",
-    "{}", "[]", "- item", "!bang", "line\nbreak", "tab\t", "\u{e9}t\u{e9}", "\u{1f600}", "\u{0}",
-    "crates/uriel-rag/src/bm25.rs", "crates/uriel-rag/src/index.rs", "crates/uriel-core/x.rs",
-    "src/a", "src/b", "src/", "bm25", "vector", "https://x.org/a_b", "C:\\a\\b", "0x1f", "NaN",
-    "#hash", "a^b", "x}",
+    "",
+    "x",
+    "true",
+    "null",
+    "42",
+    "1e5",
+    "-",
+    "a,b",
+    "k: v",
+    "\"q\"",
+    " sp",
+    "sp ",
+    "$ref",
+    "{}",
+    "[]",
+    "- item",
+    "!bang",
+    "line\nbreak",
+    "tab\t",
+    "\u{e9}t\u{e9}",
+    "\u{1f600}",
+    "\u{0}",
+    "crates/uriel-rag/src/bm25.rs",
+    "crates/uriel-rag/src/index.rs",
+    "crates/uriel-core/x.rs",
+    "src/a",
+    "src/b",
+    "src/",
+    "bm25",
+    "vector",
+    "https://x.org/a_b",
+    "C:\\a\\b",
+    "0x1f",
+    "NaN",
+    "#hash",
+    "a^b",
+    "x}",
 ];
 
 const NUMS: &[&str] = &[
-    "0", "1", "-1", "42", "3.5", "0.91", "-0", "-0.0", "1e5", "1E+2", "0.1e-7", "1e400",
-    "123456789012345678901234567890", "5e-324", "10",
+    "0",
+    "1",
+    "-1",
+    "42",
+    "3.5",
+    "0.91",
+    "-0",
+    "-0.0",
+    "1e5",
+    "1E+2",
+    "0.1e-7",
+    "1e400",
+    "123456789012345678901234567890",
+    "5e-324",
+    "10",
 ];
 
 fn random_scalar(rng: &mut SplitMix) -> Value {
@@ -344,8 +488,12 @@ fn random_values_round_trip() {
     for i in 0..6000 {
         let value = random_value(&mut rng, 1 + i % 5);
         let enc = encode(&value).unwrap();
-        let back = decode(&enc)
-            .unwrap_or_else(|e| panic!("decode failed: {e}\nvalue: {}\nenc:\n{enc}", value.to_json()));
+        let back = decode(&enc).unwrap_or_else(|e| {
+            panic!(
+                "decode failed: {e}\nvalue: {}\nenc:\n{enc}",
+                value.to_json()
+            )
+        });
         assert_eq!(back, value, "value: {}\nenc:\n{enc}", value.to_json());
         assert_eq!(Value::parse(&value.to_json()).unwrap(), value);
     }

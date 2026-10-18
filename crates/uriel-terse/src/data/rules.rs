@@ -24,7 +24,7 @@ pub(super) fn classify(tok: &str) -> Scalar<'_> {
     }
 }
 
-pub(super) const KEY_STOP: &[char] = &[':', ',', '[', ']', '{', '}', '^', '"'];
+pub(super) const KEY_STOP: &[char] = &[':', ',', '[', ']', '{', '}', '^', '=', '"'];
 
 fn plain_text(s: &str) -> bool {
     let mut chars = s.chars();
@@ -44,7 +44,7 @@ pub(super) fn raw_ok(s: &str, ctx: Ctx) -> bool {
     match ctx {
         Ctx::Field => true,
         Ctx::Cell => !s.contains([',', '"', '}']),
-        Ctx::Item => !s.contains([':', '[', ']', '{', '}', ',', '"', '^']),
+        Ctx::Item => !s.contains([':', '[', ']', '{', '}', ',', '"', '^', '=']),
     }
 }
 

@@ -172,7 +172,16 @@ fn arbitrary_bytes_never_panic() {
 #[test]
 fn hostile_inputs_are_bounded() {
     let started = std::time::Instant::now();
-    for pat in ["`", "\"", "'", "$", "`` ", "\u{201c}", "a`b\"c'd$e", "```\n"] {
+    for pat in [
+        "`",
+        "\"",
+        "'",
+        "$",
+        "`` ",
+        "\u{201c}",
+        "a`b\"c'd$e",
+        "```\n",
+    ] {
         let s = pat.repeat(100_000 / pat.len());
         let _ = scan(&s);
     }

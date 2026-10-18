@@ -27,7 +27,9 @@ fn paragraphs(doc: &str, want: usize) -> Vec<String> {
     if all.len() <= want {
         return all;
     }
-    (0..want).map(|i| all[i * all.len() / want].clone()).collect()
+    (0..want)
+        .map(|i| all[i * all.len() / want].clone())
+        .collect()
 }
 
 struct Sample {
@@ -62,7 +64,12 @@ fn string(s: impl ToString) -> Value {
 }
 
 fn obj(fields: Vec<(&str, Value)>) -> Value {
-    Value::Object(fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    Value::Object(
+        fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+    )
 }
 
 fn gist(i: usize) -> String {
@@ -91,9 +98,12 @@ fn hits(rng: &mut SplitMix, n: usize, view: bool) -> (Vec<Value>, String) {
             ("score", num(score)),
         ];
         if view {
-            fields.push(("level", num(1 + (i.min(4) + 1) / 2)));
+            fields.push(("level", num(1 + i.min(4).div_ceil(2))));
         } else {
-            fields.push(("via", string(if rng.below(6) == 0 { "graph" } else { "direct" })));
+            fields.push((
+                "via",
+                string(if rng.below(6) == 0 { "graph" } else { "direct" }),
+            ));
             fields.push(("remembered", Value::Bool(false)));
         }
         list.push(obj(fields));
@@ -150,10 +160,16 @@ fn view(seed: u64, n: usize, islands: bool) -> Value {
 fn fixtures() -> Vec<(String, Value)> {
     let mut out = Vec::new();
     for (i, n) in [3usize, 8, 20, 50].into_iter().enumerate() {
-        out.push((format!("rag_search n={n} +text"), rag_search(10 + i as u64, n, true)));
+        out.push((
+            format!("rag_search n={n} +text"),
+            rag_search(10 + i as u64, n, true),
+        ));
     }
     for (i, n) in [8usize, 20, 50].into_iter().enumerate() {
-        out.push((format!("rag_search n={n} hits only"), rag_search(20 + i as u64, n, false)));
+        out.push((
+            format!("rag_search n={n} hits only"),
+            rag_search(20 + i as u64, n, false),
+        ));
     }
     for (i, n) in [4usize, 12, 30].into_iter().enumerate() {
         out.push((format!("view n={n} +text"), view(30 + i as u64, n, false)));
@@ -181,10 +197,16 @@ fn prose_baseline_table() {
     }
     let classes = ["README", "PLAN", "docs", "notes (synthetic)"];
     let levels = [Level::Lite, Level::Full, Level::Ultra];
-    println!("prose: {} samples, saved_ratio = 1 - after/before, tokens = ceil(chars/4)", all.len());
-    println!("{:<20} {:>3} {:>16} {:>16} {:>16}", "class", "n", "Lite mean/worst", "Full mean/worst", "Ultra mean/worst");
+    println!(
+        "prose: {} samples, saved_ratio = 1 - after/before, tokens = ceil(chars/4)",
+        all.len()
+    );
+    println!(
+        "{:<20} {:>3} {:>16} {:>16} {:>16}",
+        "class", "n", "Lite mean/worst", "Full mean/worst", "Ultra mean/worst"
+    );
     let mut totals: Vec<Vec<f64>> = vec![Vec::new(); 3];
-    for class in classes.iter().map(|c| *c).chain(["ALL"]) {
+    for class in classes.iter().copied().chain(["ALL"]) {
         let rows: Vec<&Sample> = all
             .iter()
             .filter(|s| class == "ALL" || s.class == class)
@@ -199,19 +221,37 @@ fn prose_baseline_table() {
             if class == "ALL" {
                 totals[li] = ratios.clone();
             }
-            cells.push(format!("{:>6.1}% /{:>5.1}%", mean(&ratios) * 100.0, min(&ratios) * 100.0));
+            cells.push(format!(
+                "{:>6.1}% /{:>5.1}%",
+                mean(&ratios) * 100.0,
+                min(&ratios) * 100.0
+            ));
         }
-        println!("{:<20} {:>3} {:>16} {:>16} {:>16}", class, rows.len(), cells[0], cells[1], cells[2]);
+        println!(
+            "{:<20} {:>3} {:>16} {:>16} {:>16}",
+            class,
+            rows.len(),
+            cells[0],
+            cells[1],
+            cells[2]
+        );
     }
     assert!(mean(&totals[0]) <= mean(&totals[1]) && mean(&totals[1]) <= mean(&totals[2]));
-    assert!(mean(&totals[1]) > 0.02, "Full saves too little: {}", mean(&totals[1]));
+    assert!(
+        mean(&totals[1]) > 0.02,
+        "Full saves too little: {}",
+        mean(&totals[1])
+    );
 }
 
 #[test]
 fn data_baseline_table() {
     let dump = std::env::var("URIEL_TERSE_DUMP").ok();
     println!("data: before = minified JSON, after = data::encode, tokens = ceil(chars/4)");
-    println!("{:<28} {:>7} {:>7} {:>8}", "fixture", "before", "after", "saved");
+    println!(
+        "{:<28} {:>7} {:>7} {:>8}",
+        "fixture", "before", "after", "saved"
+    );
     let mut ratios = Vec::new();
     let mut hit_only = Vec::new();
     for (name, value) in fixtures() {
@@ -219,9 +259,18 @@ fn data_baseline_table() {
         let enc = encode(&value).unwrap();
         assert_eq!(decode(&enc).unwrap(), value, "{name}");
         let r = Report::measure(&json, &enc);
-        println!("{:<28} {:>7} {:>7} {:>7.1}%", name, r.before, r.after, r.saved_ratio * 100.0);
+        println!(
+            "{:<28} {:>7} {:>7} {:>7.1}%",
+            name,
+            r.before,
+            r.after,
+            r.saved_ratio * 100.0
+        );
         if let Some(dir) = &dump {
-            let slug: String = name.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+            let slug: String = name
+                .chars()
+                .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                .collect();
             std::fs::write(format!("{dir}/json_{slug}.json"), &json).unwrap();
             std::fs::write(format!("{dir}/json_{slug}.enc"), &enc).unwrap();
         }
@@ -231,6 +280,11 @@ fn data_baseline_table() {
         }
         ratios.push(r.saved_ratio);
     }
-    println!("mean {:.1}%  worst {:.1}%  hits-only mean {:.1}%", mean(&ratios) * 100.0, min(&ratios) * 100.0, mean(&hit_only) * 100.0);
+    println!(
+        "mean {:.1}%  worst {:.1}%  hits-only mean {:.1}%",
+        mean(&ratios) * 100.0,
+        min(&ratios) * 100.0,
+        mean(&hit_only) * 100.0
+    );
     assert!(mean(&hit_only) > 0.10, "{}", mean(&hit_only));
 }

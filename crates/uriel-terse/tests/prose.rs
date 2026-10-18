@@ -34,14 +34,23 @@ fn lite_leaves_long_words_alone() {
 #[test]
 fn uncertainty_is_mapped_not_deleted() {
     assert_eq!(
-        compact("I'm not certain, but likely the cache is stale.", Level::Full),
+        compact(
+            "I'm not certain, but likely the cache is stale.",
+            Level::Full
+        ),
         "Likely cache stale. Me not sure."
     );
     assert_eq!(
-        compact("I'm not certain, but likely the cache is stale.", Level::Lite),
+        compact(
+            "I'm not certain, but likely the cache is stale.",
+            Level::Lite
+        ),
         "Likely the cache is stale. Me not sure."
     );
-    assert_eq!(compact("I think it works.", Level::Full), "Likely it works.");
+    assert_eq!(
+        compact("I think it works.", Level::Full),
+        "Likely it works."
+    );
     assert_eq!(compact("Perhaps it works.", Level::Full), "Maybe it works.");
 }
 
