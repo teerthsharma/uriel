@@ -402,3 +402,20 @@ fn prose_compacts_documentation_sections_of_the_soul_but_not_code() {
     assert_eq!(code_lines(&a), code_lines(&b));
     assert!(b.contains("src/retry.rs") && b.contains("docs/guide.md"), "{b}");
 }
+
+#[test]
+fn rag_expand_returns_json_file_text_byte_exact_in_every_level() {
+    let dir = tempfile::tempdir().expect("dir");
+    let body = "{\n  \"alpha\": [1, 2, 3],\n  \"beta\": {\"gamma\": \"delta\", \"eps\": \"zeta\"},\n  \"rows\": [{\"k\": 1, \"v\": \"a\"}, {\"k\": 2, \"v\": \"b\"}]\n}\n";
+    std::fs::write(dir.path().join("conf.json"), body).unwrap();
+    let expand = |level: &str| {
+        let s = server(dir.path(), &["--terse", level], "normal");
+        text(&s, "rag_index", json!({}));
+        text(&s, "rag_expand", json!({"chunk_id": 1, "level": 0}))
+    };
+    let plain = expand("off");
+    assert!(Terse::parse(&plain).is_ok(), "fixture must be json: {plain}");
+    assert_eq!(plain.trim_end(), body.trim_end());
+    assert_eq!(expand("data"), plain);
+    assert_eq!(expand("prose"), plain);
+}
