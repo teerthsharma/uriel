@@ -332,6 +332,16 @@ mod tests {
     }
 
     #[test]
+    fn stable_prefix_flag_defaults_on_and_takes_on_or_off() {
+        assert!(run(&[]).stable_prefix);
+        assert!(!run(&["--stable-prefix", "off"]).stable_prefix);
+        assert!(run(&["--stable-prefix=on"]).stable_prefix);
+        for bad in [&["--stable-prefix", "maybe"][..], &["--stable-prefix"], &["--stable-prefix="]] {
+            assert!(parse_args(bad.iter().copied()).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn help_and_version() {
         assert_eq!(parse_args(["--help"]).unwrap(), Cli::Help);
         assert_eq!(parse_args(["-V"]).unwrap(), Cli::Version);
