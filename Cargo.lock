@@ -1062,6 +1062,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "uriel-repl"
+version = "0.1.0"
+dependencies = [
+ "redb",
+ "sha2 0.10.9",
+ "thiserror",
+ "uriel-core",
+ "uriel-kv",
+ "uriel-query",
+]
+
+[[package]]
 name = "uriel-sys"
 version = "0.1.0"
 dependencies = [

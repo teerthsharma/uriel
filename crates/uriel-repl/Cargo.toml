@@ -1,0 +1,21 @@
+[package]
+name = "uriel-repl"
+description = "Replicated property graph for seal: one Raft range, a deterministic state machine over uriel-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+mutations = []
+
+[dependencies]
+uriel-core = { path = "../uriel-core" }
+uriel-kv = { path = "../uriel-kv" }
+thiserror = "2.0.21"
+
+[dev-dependencies]
+uriel-query = { path = "../uriel-query" }
+redb = "4.4.0"
+sha2 = "0.10"
