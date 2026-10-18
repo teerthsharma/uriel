@@ -80,6 +80,23 @@ pub struct SoulSection {
     pub text: String,
 }
 
+impl SoulSection {
+    pub fn render(&self) -> String {
+        let head = format!(
+            "// {}:{}-{} #{}",
+            self.file, self.start_line, self.end_line, self.chunk_id
+        );
+        if self.level == Level::L3 {
+            format!("{head} {}
+", self.text)
+        } else {
+            format!("{head}
+{}
+", self.text)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SoulCache {
     pub hit: bool,

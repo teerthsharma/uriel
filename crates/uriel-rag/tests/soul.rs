@@ -337,3 +337,13 @@ fn a_read_only_graph_computes_in_memory_and_leaves_the_database_file_unchanged()
     assert!(soul_at(&rag, 400).cache.hit, "a read-only graph reads a cache a writer left");
     assert_eq!(writable.text, read_only.text);
 }
+
+#[test]
+fn rendered_sections_concatenate_to_the_guide_text() {
+    let (_dir, rag) = fixture(40);
+    for budget in [120, 400, 1200] {
+        let soul = soul_at(&rag, budget);
+        let joined: String = soul.sections.iter().map(|s| s.render()).collect();
+        assert_eq!(joined, soul.text, "budget {budget}");
+    }
+}

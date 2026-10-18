@@ -11,6 +11,7 @@ mod render;
 pub mod server;
 pub mod services;
 pub mod session;
+pub mod soul;
 pub mod tools;
 pub mod view;
 
