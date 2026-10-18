@@ -224,6 +224,17 @@ mod tests {
     }
 
     #[test]
+    fn a_value_the_encoder_refuses_falls_back_to_the_text() {
+        let mut deep = Value::Null;
+        for _ in 0..1000 {
+            deep = Value::Array(vec![deep]);
+        }
+        assert_eq!(pack(&deep, "TEXT"), "TEXT");
+        assert_eq!(pack(&Value::Number("0x10".to_string()), "0x10"), "0x10");
+        assert_eq!(pack(&Value::Object(vec![("k".to_string(), Value::Number("1.".to_string()))]), "RAW"), "RAW");
+    }
+
+    #[test]
     fn hostile_depth_and_size_never_panic_and_pass_through() {
         let deep = format!("{}{}", "[".repeat(200_000), "]".repeat(200_000));
         assert_eq!(data_text(&deep), deep);

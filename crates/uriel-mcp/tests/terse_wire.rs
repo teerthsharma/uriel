@@ -187,7 +187,10 @@ fn off_changes_no_byte_and_adds_no_tool_or_instruction() {
     let plain = server(p.dir.path(), &[], "house");
     let off = server(p.dir.path(), &["--terse", "off"], "house");
     for (name, args) in calls() {
-        assert_eq!(call(&plain, name, args.clone()), call(&off, name, args), "{name}");
+        let compact_search = name == "rag_search" && args.get("format").is_none();
+        let (got, _) = call(&off, name, args.clone());
+        assert_eq!(call(&plain, name, args), (got.clone(), false), "{name}");
+        assert!(compact_search || serde_json::from_str::<Value>(&got).is_ok(), "{name} is not plain json: {got}");
     }
     assert_eq!(instructions(&plain), instructions(&off));
     assert!(!instructions(&off).contains("Terse"));
@@ -365,26 +368,43 @@ fn prose_never_touches_code_chunks_or_citations() {
     }
 }
 
-#[test]
-fn prose_compacts_documentation_sections_of_the_soul_but_not_code() {
+const FILLER: &str = "you should basically make sure that the gateway client really does always retry with a backoff delay, in order to avoid the thundering herd problem, because it is just a very important thing.";
+
+fn filler_project() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("dir");
     std::fs::create_dir_all(dir.path().join("docs")).unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
-    std::fs::write(
-        dir.path().join("docs/guide.md"),
-        format!(
-            "# Retry guide\n{}",
-            (0..12)
-                .map(|i| format!("Step {i}: you should basically make sure that the gateway client really does always retry with a backoff delay, in order to avoid the thundering herd problem, because it is just a very important thing.\n\n"))
-                .collect::<String>()
-        ),
-    )
-    .unwrap();
+    let guide: String = (0..12).map(|i| format!("Step {i}: {FILLER}
+
+")).collect();
+    std::fs::write(dir.path().join("docs/guide.md"), format!("# Retry guide
+{guide}")).unwrap();
+    let comments: String = (0..12).map(|i| format!("    // Step {i}: {FILLER}
+")).collect();
     std::fs::write(
         dir.path().join("src/retry.rs"),
-        "/// You should basically make sure that this function really does always retry in order to avoid failure.\npub fn retry_with_backoff(attempt: u32) -> u64 {\n    100u64 << attempt.min(8)\n}\n",
+        format!("pub fn retry_with_backoff(attempt: u32) -> u64 {{
+{comments}    100u64 << attempt.min(8)
+}}
+"),
     )
     .unwrap();
+    dir
+}
+
+fn section<'a>(guide: &'a str, file: &str) -> &'a str {
+    let start = guide.find(&format!("// {file}:")).unwrap_or_else(|| panic!("no {file} in {guide}"));
+    let rest = &guide[start..];
+    let end = rest[3..].find("
+// ").map_or(rest.len(), |i| i + 3);
+    &rest[..end]
+}
+
+#[test]
+fn prose_compacts_documentation_sections_of_the_soul_but_not_code() {
+    let dir = filler_project();
+    let line = format!("Step 3: {FILLER}");
+    assert_ne!(uriel_terse::compact(&line, uriel_terse::Level::Lite), line, "the fixture must be compactable");
     let data = server(dir.path(), &["--terse", "data"], "normal");
     let prose = server(dir.path(), &["--terse", "prose"], "normal");
     for s in [&data, &prose] {
@@ -392,15 +412,33 @@ fn prose_compacts_documentation_sections_of_the_soul_but_not_code() {
     }
     let a = text(&data, "soul", json!({"budget_tokens": 4000}));
     let b = text(&prose, "soul", json!({"budget_tokens": 4000}));
-    assert!(estimate_tokens(&b) < estimate_tokens(&a), "{a}\n---\n{b}");
-    let code_lines = |t: &str| -> Vec<String> {
-        t.lines()
-            .filter(|l| l.contains("retry_with_backoff") || l.contains("100u64"))
-            .map(str::to_string)
-            .collect()
-    };
-    assert_eq!(code_lines(&a), code_lines(&b));
-    assert!(b.contains("src/retry.rs") && b.contains("docs/guide.md"), "{b}");
+    assert!(estimate_tokens(&b) < estimate_tokens(&a), "{a}
+---
+{b}");
+    assert_eq!(section(&a, "src/retry.rs"), section(&b, "src/retry.rs"));
+    assert_ne!(section(&a, "docs/guide.md"), section(&b, "docs/guide.md"));
+    let only_code = json!({"budget_tokens": 4000, "focus": "src"});
+    let c = text(&data, "soul", only_code.clone());
+    assert!(c.contains("basically"), "{c}");
+    assert_eq!(c, text(&prose, "soul", only_code));
+}
+
+#[test]
+fn prose_leaves_code_hits_of_a_search_untouched() {
+    let dir = filler_project();
+    let data = server(dir.path(), &["--terse", "data"], "normal");
+    let prose = server(dir.path(), &["--terse", "prose"], "normal");
+    for s in [&data, &prose] {
+        text(s, "rag_index", json!({}));
+    }
+    for q in ["retry_with_backoff attempt", "retry with a backoff delay gateway client"] {
+        for format in ["compact", "json"] {
+            let args = json!({"query": q, "fresh": true, "format": format});
+            let a = text(&data, "rag_search", args.clone());
+            assert_eq!(a, text(&prose, "rag_search", args), "{q} {format}");
+            assert!(a.contains("src/retry.rs"), "{a}");
+        }
+    }
 }
 
 #[test]
