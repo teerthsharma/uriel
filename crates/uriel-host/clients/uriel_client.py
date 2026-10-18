@@ -28,6 +28,7 @@ STATS_FIELDS = (
     "connections",
     "chunks",
     "files",
+    "embed_dim",
 )
 ERROR_CODES = {
     1: "query",

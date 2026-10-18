@@ -11,6 +11,7 @@ pub struct HostStats {
     pub connections: u64,
     pub chunks: u64,
     pub files: u64,
+    pub embed_dim: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

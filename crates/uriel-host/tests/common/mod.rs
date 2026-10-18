@@ -206,6 +206,7 @@ pub fn random_response(rng: &mut Rng) -> Response {
             connections: rng.draw(),
             chunks: rng.draw(),
             files: rng.draw(),
+            embed_dim: rng.draw(),
         }),
         3 => Response::Pong { nonce: rng.draw() },
         5 => Response::Indexed(random_report(rng)),

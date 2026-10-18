@@ -444,6 +444,7 @@ fn put_host_stats(buf: &mut Vec<u8>, s: &HostStats) {
         s.connections,
         s.chunks,
         s.files,
+        s.embed_dim,
     ] {
         put_u64(buf, v);
     }
@@ -462,6 +463,7 @@ fn get_host_stats(c: &mut Cursor<'_>) -> Result<HostStats, CodecError> {
         connections: c.u64()?,
         chunks: c.u64()?,
         files: c.u64()?,
+        embed_dim: c.u64()?,
     })
 }
 

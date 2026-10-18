@@ -85,6 +85,7 @@ pub(crate) struct HostInner {
     rag: Rag,
     root: PathBuf,
     max_file_bytes: u64,
+    embed_dim: usize,
     indexed: Mutex<bool>,
     index_passes: AtomicU64,
     arena: Mutex<Arena>,
@@ -267,6 +268,7 @@ impl HostInner {
             connections: self.counters.connections.load(Ordering::SeqCst),
             chunks: rag.chunks as u64,
             files: rag.files as u64,
+            embed_dim: self.embed_dim as u64,
         })
     }
 
@@ -400,6 +402,7 @@ impl Host {
         let engine = Engine::open(&cfg.db_path, cfg.memory)?;
         let rag_config = RagConfig::default();
         let max_file_bytes = rag_config.max_file_bytes;
+        let embed_dim = rag_config.embed_dim;
         let rag = Rag::open(engine.graph().clone(), rag_config)?;
         let port_file = port_file_for(&cfg);
         Ok(Host {
@@ -408,6 +411,7 @@ impl Host {
                 rag,
                 root: cfg.root.clone(),
                 max_file_bytes,
+                embed_dim,
                 indexed: Mutex::new(false),
                 index_passes: AtomicU64::new(0),
                 arena: Mutex::new(arena),

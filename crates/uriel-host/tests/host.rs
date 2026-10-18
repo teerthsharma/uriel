@@ -111,6 +111,7 @@ fn query_and_search_round_trip_through_channel_transport() {
     let stats = client.stats().expect("stats");
     assert!(stats.chunks > 0);
     assert!(stats.files >= 2);
+    assert_eq!(stats.embed_dim, 256);
     assert_eq!(stats.connections, 1);
     assert!(stats.requests_served >= 4);
     assert_eq!(stats.arena_cap, 1 << 20);
