@@ -16,12 +16,29 @@ pub struct Stable<T: Eq> {
 
 impl<T: Eq> Stable<T> {
     pub fn new(need: usize, cap: usize) -> Self {
-        let _ = (need, cap);
-        unimplemented!()
+        Self {
+            previous: None,
+            streak: 0,
+            seen: 0,
+            need: need.max(1),
+            cap: cap.max(1),
+        }
     }
 
     pub fn observe(&mut self, value: T) -> Stop {
-        let _ = value;
-        unimplemented!()
+        self.streak = if self.previous.as_ref() == Some(&value) {
+            self.streak.saturating_add(1)
+        } else {
+            1
+        };
+        self.seen = self.seen.saturating_add(1);
+        self.previous = Some(value);
+        if self.streak >= self.need {
+            Stop::Converged
+        } else if self.seen >= self.cap {
+            Stop::CapReached
+        } else {
+            Stop::Continue
+        }
     }
 }
