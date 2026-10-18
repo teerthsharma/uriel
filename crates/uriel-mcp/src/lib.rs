@@ -15,6 +15,7 @@ pub mod server;
 pub mod services;
 pub mod session;
 pub mod soul;
+pub mod terse;
 pub mod tools;
 pub mod view;
 
@@ -61,6 +62,8 @@ pub fn build_server(cfg: &Config) -> Result<Server, String> {
         engine,
         read_only: cfg.read_only,
         mode: cfg.mode,
+        terse: cfg.terse,
+        meter: terse::Meter::default(),
         services: Services::from_config(cfg)?,
         format: cfg.format,
         session: session::Session::for_budget(cfg.memory),

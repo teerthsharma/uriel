@@ -146,7 +146,11 @@ impl Server {
         match method {
             "initialize" => Ok(self.initialize(params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(tools::list_json(self.ctx.read_only, self.ctx.mode)),
+            "tools/list" => Ok(tools::list_json_with(
+                self.ctx.read_only,
+                self.ctx.mode,
+                self.ctx.terse,
+            )),
             "tools/call" => self.tools_call(params),
             m if m.starts_with("notifications/") => Ok(Json::Null),
             other => Err(RpcError::new(
@@ -161,7 +165,10 @@ impl Server {
         let version = requested
             .filter(|v| SUPPORTED_VERSIONS.contains(v))
             .unwrap_or(SUPPORTED_VERSIONS[0]);
-        let instructions = instructions(self.ctx.mode, self.ctx.read_only);
+        let instructions = crate::terse::instructions(
+            instructions(self.ctx.mode, self.ctx.read_only),
+            self.ctx.terse,
+        );
         json!({
             "protocolVersion": version,
             "capabilities": {"tools": {"listChanged": false}},

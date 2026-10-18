@@ -13,7 +13,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use uriel_core::MemoryBudget;
 use uriel_mcp::config::{
     default_db_path, Config, Format, Mode as ServerMode, PlacementMode, DEFAULT_MEMORY_MIB, DEFAULT_TOKEN_LIMIT,
-    MODE_ENV,
+    Terse, MODE_ENV, TERSE_ENV,
 };
 
 use banner::{mode_from_env, render_banner, Mode};
@@ -63,6 +63,13 @@ enum ModeArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TerseArg {
+    Off,
+    Data,
+    Prose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PlacementArg {
     Local,
     Planned,
@@ -82,6 +89,8 @@ struct McpArgs {
     placement: Option<PlacementArg>,
     #[arg(long, value_enum)]
     mode: Option<ModeArg>,
+    #[arg(long, value_enum)]
+    terse: Option<TerseArg>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(16..))]
     memory_mib: Option<u64>,
 }
@@ -127,10 +136,23 @@ struct RecallArgs {
 
 impl McpArgs {
     fn to_config(&self) -> Result<Config, String> {
-        self.to_config_env(std::env::var(MODE_ENV).ok().as_deref())
+        self.to_config_envs(
+            std::env::var(MODE_ENV).ok().as_deref(),
+            std::env::var(TERSE_ENV).ok().as_deref(),
+        )
     }
 
+    #[cfg(test)]
     fn to_config_env(&self, mode_env: Option<&str>) -> Result<Config, String> {
+        self.to_config_envs(mode_env, None)
+    }
+
+    fn to_config_envs(&self, mode_env: Option<&str>, terse_env: Option<&str>) -> Result<Config, String> {
+        let terse_flag = self.terse.map(|t| match t {
+            TerseArg::Off => Terse::Off,
+            TerseArg::Data => Terse::Data,
+            TerseArg::Prose => Terse::Prose,
+        });
         let mode_flag = self.mode.map(|m| match m {
             ModeArg::Normal => ServerMode::Normal,
             ModeArg::House => ServerMode::House,
@@ -159,6 +181,7 @@ impl McpArgs {
                     .map_or(DEFAULT_MEMORY_MIB, |m| usize::try_from(m).unwrap_or(DEFAULT_MEMORY_MIB)),
             ),
             mode: ServerMode::resolve(mode_flag, mode_env)?,
+            terse: Terse::resolve(terse_flag, terse_env)?,
         })
     }
 }
@@ -336,6 +359,7 @@ mod tests {
                 format: Some(FormatArg::Json),
                 placement: Some(PlacementArg::Planned),
                 mode: None,
+                terse: None,
                 memory_mib: Some(64),
             }))
         );
@@ -372,6 +396,23 @@ mod tests {
         );
         assert!(cfg_of(&["mcp"], Some("warp")).expect_err("bad env").contains(MODE_ENV));
         assert!(parse(&["mcp", "--mode", "warp"]).is_err());
+    }
+
+    #[test]
+    fn mcp_terse_flag_maps_into_the_server_config_and_the_default_is_off() {
+        let cfg_of = |argv: &[&str], env: Option<&str>| {
+            let Some(Command::Mcp(args)) = command(argv) else {
+                panic!("expected mcp");
+            };
+            args.to_config_envs(None, env)
+        };
+        assert_eq!(cfg_of(&["mcp"], None).expect("config").terse, Terse::Off);
+        assert_eq!(cfg_of(&["mcp", "--terse", "data"], None).expect("config").terse, Terse::Data);
+        assert_eq!(cfg_of(&["mcp", "--terse", "prose"], None).expect("config").terse, Terse::Prose);
+        assert_eq!(cfg_of(&["mcp"], Some("prose")).expect("config").terse, Terse::Prose);
+        assert_eq!(cfg_of(&["mcp", "--terse", "off"], Some("prose")).expect("config").terse, Terse::Off);
+        assert!(cfg_of(&["mcp"], Some("full")).expect_err("bad env").contains(TERSE_ENV));
+        assert!(parse(&["mcp", "--terse", "full"]).is_err());
     }
 
     #[test]
@@ -525,6 +566,7 @@ mod tests {
                     format: None,
                     placement: None,
                     mode: None,
+                    terse: None,
                     memory_mib: None,
                 })),
             };
@@ -547,6 +589,7 @@ mod tests {
                 format: None,
                 placement: None,
                 mode: None,
+                terse: None,
                 memory_mib: None,
             })),
         };

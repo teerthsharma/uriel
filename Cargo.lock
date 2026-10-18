@@ -1026,6 +1026,7 @@ dependencies = [
  "uriel-place",
  "uriel-query",
  "uriel-rag",
+ "uriel-terse",
  "uriel-topo",
 ]
 

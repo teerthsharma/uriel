@@ -3,11 +3,11 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value as Json};
 
 use crate::compact::{encode_table, Table};
-use crate::config::{Format, Mode};
+use crate::config::{Format, Mode, Terse};
 use crate::services::Services;
 use crate::session::Session;
 use crate::placement::PlaceState;
-use crate::{house_tools, memory, place_tools, rag_tools, research_tools, soul, view};
+use crate::{house_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
 use uriel_query::{AccessMode, Engine, QueryStats};
 
 pub type ToolResult = Result<String, String>;
@@ -16,6 +16,8 @@ pub struct Context {
     pub engine: Engine,
     pub read_only: bool,
     pub mode: Mode,
+    pub terse: Terse,
+    pub meter: terse::Meter,
     pub services: Services,
     pub format: Format,
     pub session: Session,
@@ -261,18 +263,31 @@ pub fn all() -> impl Iterator<Item = &'static ToolDef> {
         .chain(place_tools::TOOLS.iter())
         .chain(view::TOOLS.iter())
         .chain(soul::TOOLS.iter())
+        .chain(terse::TOOLS.iter())
 }
 
 pub fn house_only(name: &str) -> bool {
     name.starts_with("house_") || name.starts_with("research_")
 }
 
-pub fn visible(read_only: bool, mode: Mode) -> impl Iterator<Item = &'static ToolDef> {
-    all().filter(move |t| !(read_only && t.writes) && (mode == Mode::House || !house_only(t.name)))
+pub fn visible(
+    read_only: bool,
+    mode: Mode,
+    terse: Terse,
+) -> impl Iterator<Item = &'static ToolDef> {
+    all().filter(move |t| {
+        !(read_only && t.writes)
+            && (mode == Mode::House || !house_only(t.name))
+            && (terse != Terse::Off || t.name != terse::STATS)
+    })
 }
 
 pub fn list_json(read_only: bool, mode: Mode) -> Json {
-    let tools: Vec<Json> = visible(read_only, mode)
+    list_json_with(read_only, mode, Terse::Off)
+}
+
+pub fn list_json_with(read_only: bool, mode: Mode, terse: Terse) -> Json {
+    let tools: Vec<Json> = visible(read_only, mode, terse)
         .map(|t| {
             json!({
                 "name": t.name,
@@ -291,7 +306,15 @@ pub fn list_json(read_only: bool, mode: Mode) -> Json {
 }
 
 pub fn call(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
+    let outcome = dispatch(ctx, name, args)?;
+    Some(outcome.map(|text| terse::shape(ctx, name, text)))
+}
+
+fn dispatch(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
     let def = all().find(|t| t.name == name)?;
+    if def.name == terse::STATS && ctx.terse == Terse::Off {
+        return None;
+    }
     if house_only(def.name) && ctx.mode != Mode::House {
         return Some(Err(json!({
             "error": "wrong_mode",
@@ -323,6 +346,7 @@ pub fn call(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
         n if n.starts_with("research_") => research_tools::call(ctx, n, args),
         "view" => view::call(ctx, name, args),
         "soul" => soul::call(ctx, name, args),
+        terse::STATS => terse::stats(ctx),
         "calibrate" | "why_hot" | "pin" | "unpin" | "replay" | "tier_stats" => {
             place_tools::call(ctx, name, args)
         }

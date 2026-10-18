@@ -83,6 +83,46 @@ impl Mode {
     }
 }
 
+pub const TERSE_ENV: &str = "URIEL_TERSE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Terse {
+    #[default]
+    Off,
+    Data,
+    Prose,
+}
+
+impl Terse {
+    pub fn parse(s: &str) -> Option<Terse> {
+        match s {
+            "off" => Some(Terse::Off),
+            "data" => Some(Terse::Data),
+            "prose" => Some(Terse::Prose),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Terse::Off => "off",
+            Terse::Data => "data",
+            Terse::Prose => "prose",
+        }
+    }
+
+    pub fn resolve(flag: Option<Terse>, env: Option<&str>) -> Result<Terse, String> {
+        if let Some(terse) = flag {
+            return Ok(terse);
+        }
+        match env.filter(|v| !v.is_empty()) {
+            None => Ok(Terse::Off),
+            Some(v) => Terse::parse(v)
+                .ok_or_else(|| format!("{TERSE_ENV} expects off, data or prose, got '{v}'")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub db: PathBuf,
@@ -96,6 +136,7 @@ pub struct Config {
     pub placement: PlacementMode,
     pub memory: MemoryBudget,
     pub mode: Mode,
+    pub terse: Terse,
 }
 
 impl Config {
@@ -136,11 +177,17 @@ OPTIONS:
     --mode <M>           normal (default) or house: normal serves the cypher, memory, rag and view
                          tools; house adds the house_* tools and the research_* Caustic tools.
                          A normal server neither lists nor accepts a house_* or research_* tool
+    --terse <L>          off (default), data or prose: data returns JSON results in a lossless
+                         compact text encoding (decoded by the line the server adds to its
+                         instructions); prose also shortens the prose of returned findings and of
+                         documentation sections of the soul guide. Stored data is never altered.
+                         Adds the terse_stats tool
     -h, --help           Print this help
     -V, --version        Print version
 
 ENVIRONMENT:
     URIEL_MODE           normal or house; used when --mode is not given
+    URIEL_TERSE          off, data or prose; used when --terse is not given
     URIEL_STABLE_PREFIX  off (or 0, false) keeps the json result of view and soul in the plain
                          serialisation; by default it leads with a byte-stable scaffold preamble
                          and carries prefix_id and stable_prefix_bytes
@@ -163,7 +210,11 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    parse_args_env(args, std::env::var(MODE_ENV).ok().as_deref())
+    parse_args_envs(
+        args,
+        std::env::var(MODE_ENV).ok().as_deref(),
+        std::env::var(TERSE_ENV).ok().as_deref(),
+    )
 }
 
 pub fn parse_args_env<I, S>(args: I, mode_env: Option<&str>) -> Result<Cli, String>
@@ -171,7 +222,20 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
+    parse_args_envs(args, mode_env, None)
+}
+
+pub fn parse_args_envs<I, S>(
+    args: I,
+    mode_env: Option<&str>,
+    terse_env: Option<&str>,
+) -> Result<Cli, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
     let mut mode_flag = None;
+    let mut terse_flag = None;
     let mut cfg = Config {
         db: default_db_path(),
         read_only: false,
@@ -184,6 +248,7 @@ where
         placement: PlacementMode::Local,
         memory: MemoryBudget::mib(DEFAULT_MEMORY_MIB),
         mode: Mode::Normal,
+        terse: Terse::Off,
     };
     let mut it = args.into_iter().map(Into::into);
     while let Some(arg) = it.next() {
@@ -224,6 +289,12 @@ where
                         .ok_or_else(|| format!("--mode expects normal or house, got '{v}'"))?,
                 );
             }
+            "--terse" => {
+                let v = value(&flag, inline, &mut it)?;
+                terse_flag = Some(Terse::parse(&v).ok_or_else(|| {
+                    format!("--terse expects off, data or prose, got '{v}'")
+                })?);
+            }
             "--placement" => {
                 let v = value(&flag, inline, &mut it)?;
                 cfg.placement = PlacementMode::parse(&v)
@@ -247,6 +318,7 @@ where
         }
     }
     cfg.mode = Mode::resolve(mode_flag, mode_env)?;
+    cfg.terse = Terse::resolve(terse_flag, terse_env)?;
     Ok(Cli::Run(cfg))
 }
 

@@ -22,6 +22,7 @@ uriel-query = { path = "../uriel-query" }
 uriel-rag = { path = "../uriel-rag" }
 uriel-house = { path = "../uriel-house" }
 uriel-place = { path = "../uriel-place" }
+uriel-terse = { path = "../uriel-terse" }
 uriel-topo = { path = "../uriel-topo" }
 serde = "1"
 serde_json = { version = "1", features = ["float_roundtrip"] }
