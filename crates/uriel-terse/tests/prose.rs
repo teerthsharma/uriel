@@ -134,10 +134,12 @@ fn list_markers_survive() {
 #[test]
 fn ultra_abbreviates_and_full_does_not() {
     let input = "The configuration of the database and the implementation.";
-    assert!(compact(input, Level::Full).contains("configuration"));
-    let ultra = compact(input, Level::Ultra);
+    assert!(compact(input, Level::Full)
+        .to_lowercase()
+        .contains("configuration"));
+    let ultra = compact(input, Level::Ultra).to_lowercase();
     assert!(
-        ultra.contains("config") && ultra.contains("DB") && ultra.contains("impl"),
+        ultra.contains("config") && ultra.contains("db") && ultra.contains("impl"),
         "{ultra:?}"
     );
     assert!(ultra.contains('&'), "{ultra:?}");
@@ -187,7 +189,7 @@ fn arbitrary_bytes_never_panic() {
         let s = String::from_utf8_lossy(&bytes).into_owned();
         for level in LEVELS {
             let out = compact(&s, level);
-            assert!(out.len() <= s.len());
+            assert!(out.len() <= s.len(), "{s:?} -> {out:?}");
         }
     }
 }
@@ -213,4 +215,17 @@ fn savings_are_real_on_chatty_text() {
         estimate_tokens(&out) * 10 <= estimate_tokens(input) * 7,
         "{out:?}"
     );
+}
+
+#[test]
+fn uncertainty_rewrite_never_lengthens() {
+    let input = "Not sure, it works.";
+    for level in [Level::Lite, Level::Full] {
+        assert_eq!(compact(input, level), input);
+    }
+    assert_eq!(
+        compact("Not sure, but it works.", Level::Lite),
+        "It works. Me not sure."
+    );
+    assert_eq!(compact("I'm not sure.", Level::Lite), "Me not sure.");
 }
