@@ -91,7 +91,6 @@ pub(crate) struct TestRec {
     pub runs: Vec<RunRec>,
 }
 
-/// One Need and the state that belongs to it alone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct NeedState {
     pub id: GoalId,
