@@ -40,7 +40,17 @@ fn files_of(g: &Goal) -> Vec<&str> {
     g.written_files().map(String::as_str).collect()
 }
 
+#[cfg(test)]
 pub(crate) fn plan(state: &State, snap: SystemSnapshot, cfg: &HouseConfig) -> Plan {
+    plan_for(state, snap, cfg, None)
+}
+
+pub(crate) fn plan_for(
+    state: &State,
+    snap: SystemSnapshot,
+    cfg: &HouseConfig,
+    need: Option<usize>,
+) -> Plan {
     let free = snap.free_ram_mb;
     let total = snap.total_ram_mb;
     let reserve = reserve_mb(total, cfg);
@@ -102,7 +112,7 @@ pub(crate) fn plan(state: &State, snap: SystemSnapshot, cfg: &HouseConfig) -> Pl
     };
 
     for (id, rec) in &state.goals {
-        if rec.status != GoalStatus::Pending {
+        if rec.status != GoalStatus::Pending || need.is_some_and(|n| id.need_ordinal() != n) {
             continue;
         }
         let integration = !rec.goal.leaf;

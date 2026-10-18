@@ -25,6 +25,7 @@ use crate::types::*;
 use crate::validate::{validate_merged, Entry};
 
 pub(crate) struct MergeInput<'a> {
+    pub root: &'a GoalId,
     pub need: &'a NeedRec,
     pub charts: &'a BTreeMap<Fellow, Chart>,
     pub facts: &'a [Fact],
@@ -57,7 +58,7 @@ fn leaf_cost(g: &Goal, weight: f64) -> f64 {
 }
 
 pub(crate) fn merge(inp: &MergeInput<'_>) -> Result<MergeOutput, Vec<Violation>> {
-    let root = State::root_id();
+    let root = inp.root.clone();
     let cfg = inp.cfg;
     let Some(_) = inp.charts.get(&Fellow::Foreman) else {
         return Err(vec![viol(
@@ -86,7 +87,7 @@ pub(crate) fn merge(inp: &MergeInput<'_>) -> Result<MergeOutput, Vec<Violation>>
                     0,
                     fellow,
                     &g.id,
-                    "G0 is the need and cannot be charted",
+                    format!("{root} is the need and cannot be charted"),
                 ));
             } else if let Some((other, _)) = all.get(&g.id) {
                 violations.push(viol(

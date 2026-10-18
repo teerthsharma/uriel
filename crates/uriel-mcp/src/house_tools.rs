@@ -114,7 +114,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "house_need",
         title: "State the Need",
-        description: "Create the Need G0: what the patient (project) requires, with acceptance criteria. One Need per database.",
+        description: "Create a Need: what the patient (project) requires, with acceptance criteria. The first Need is G0; a later Need is N2.G0, N3.G0 and so on, and every goal id of that Need carries the same prefix (N2.G1, N2.G1.1). Several Needs share one database and one resource governor.",
         writes: true,
         schema: need_schema,
     },

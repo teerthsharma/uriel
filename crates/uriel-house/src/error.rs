@@ -17,9 +17,9 @@ pub enum HouseError {
     /// No Need exists yet.
     #[error("no need has been stated; call need() first")]
     NoNeed,
-    /// A Need already exists in this database.
-    #[error("a need already exists ({0})")]
-    NeedExists(GoalId),
+    /// No Need has this id.
+    #[error("unknown need {0}")]
+    UnknownNeed(GoalId),
     /// The merged chart does not exist yet.
     #[error("no merged chart; call merge() first")]
     NotMerged,

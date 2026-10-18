@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::HouseError;
 use crate::governor::CostModel;
 use crate::types::*;
 
@@ -90,6 +91,30 @@ pub(crate) struct TestRec {
     pub runs: Vec<RunRec>,
 }
 
+/// One Need and the state that belongs to it alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct NeedState {
+    pub id: GoalId,
+    pub rec: NeedRec,
+    pub charts: BTreeMap<Fellow, Chart>,
+    pub merged: bool,
+    pub merge_stale: bool,
+    pub rejections: BTreeMap<Fellow, u8>,
+}
+
+impl NeedState {
+    pub fn new(id: GoalId, rec: NeedRec) -> NeedState {
+        NeedState {
+            id,
+            rec,
+            charts: BTreeMap::new(),
+            merged: false,
+            merge_stale: false,
+            rejections: BTreeMap::new(),
+        }
+    }
+}
+
 /// What changed since the last flush.
 #[derive(Debug, Default)]
 pub(crate) struct Dirty {
@@ -107,17 +132,13 @@ pub(crate) struct Dirty {
 /// Everything the House knows.
 #[derive(Debug, Default)]
 pub(crate) struct State {
-    pub need: Option<NeedRec>,
-    pub charts: BTreeMap<Fellow, Chart>,
+    pub needs: Vec<NeedState>,
     pub facts: Vec<Fact>,
     pub goals: BTreeMap<GoalId, GoalRec>,
-    pub merged: bool,
-    pub merge_stale: bool,
     pub alt_groups: BTreeMap<GoalId, AltGroup>,
     pub pending: BTreeMap<GoalId, Pending>,
     pub leap: BTreeSet<GoalId>,
     pub leaps_used: BTreeSet<GoalId>,
-    pub rejections: BTreeMap<Fellow, u8>,
     pub tests: BTreeMap<String, TestRec>,
     pub cost: CostModel,
     pub seq: u64,
@@ -139,40 +160,68 @@ pub(crate) struct Meta {
     pub leaps_used: BTreeSet<GoalId>,
     pub rejections: BTreeMap<Fellow, u8>,
     pub seq: u64,
+    #[serde(default)]
+    pub more: Vec<NeedState>,
 }
 
 impl State {
-    pub fn root_id() -> GoalId {
-        GoalId::new("G0")
+    pub fn need_id(ordinal: usize) -> GoalId {
+        match ordinal {
+            0 | 1 => GoalId::new("G0"),
+            n => GoalId::new(format!("N{n}.G0")),
+        }
+    }
+
+    pub fn target(&self, sel: Option<&GoalId>) -> Result<usize, HouseError> {
+        match sel {
+            Some(id) => self
+                .needs
+                .iter()
+                .position(|n| n.id == *id)
+                .ok_or_else(|| HouseError::UnknownNeed(id.clone())),
+            None => self.needs.len().checked_sub(1).ok_or(HouseError::NoNeed),
+        }
     }
 
     pub fn meta(&self) -> Meta {
+        let first = self.needs.first();
         Meta {
-            need: self.need.clone(),
-            charts: self.charts.clone(),
+            need: first.map(|n| n.rec.clone()),
+            charts: first.map(|n| n.charts.clone()).unwrap_or_default(),
             facts: self.facts.clone(),
-            merged: self.merged,
-            merge_stale: self.merge_stale,
+            merged: first.is_some_and(|n| n.merged),
+            merge_stale: first.is_some_and(|n| n.merge_stale),
             alt_groups: self.alt_groups.clone(),
             pending: self.pending.clone(),
             leap: self.leap.clone(),
             leaps_used: self.leaps_used.clone(),
-            rejections: self.rejections.clone(),
+            rejections: first.map(|n| n.rejections.clone()).unwrap_or_default(),
             seq: self.seq,
+            more: self.needs.iter().skip(1).cloned().collect(),
         }
     }
 
     pub fn apply_meta(&mut self, m: Meta) {
-        self.need = m.need;
-        self.charts = m.charts;
+        let (charts, merged, merge_stale, rejections) =
+            (m.charts, m.merged, m.merge_stale, m.rejections);
+        self.needs = m
+            .need
+            .map(|rec| NeedState {
+                id: Self::need_id(1),
+                rec,
+                charts,
+                merged,
+                merge_stale,
+                rejections,
+            })
+            .into_iter()
+            .chain(m.more)
+            .collect();
         self.facts = m.facts;
-        self.merged = m.merged;
-        self.merge_stale = m.merge_stale;
         self.alt_groups = m.alt_groups;
         self.pending = m.pending;
         self.leap = m.leap;
         self.leaps_used = m.leaps_used;
-        self.rejections = m.rejections;
         self.seq = self.seq.max(m.seq);
     }
 

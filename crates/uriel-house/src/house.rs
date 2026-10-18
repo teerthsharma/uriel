@@ -36,11 +36,11 @@ pub struct House {
     inner: Mutex<Inner>,
 }
 
-fn rule0(fellow: Fellow, message: impl Into<String>) -> Vec<Violation> {
+fn rule0(fellow: Fellow, goal: GoalId, message: impl Into<String>) -> Vec<Violation> {
     vec![Violation {
         rule: 0,
         fellow,
-        goal: State::root_id(),
+        goal,
         message: message.into(),
     }]
 }
@@ -192,7 +192,8 @@ impl House {
         inner.store.flush(&mut inner.state, &self.cfg.project_root)
     }
 
-    /// Creates the Need `G0`. One Need per database.
+    /// Creates a Need. The first is `G0`; the n-th later one is `N<n>.G0`, and every goal id
+    /// of that Need lives under the same `N<n>.` prefix.
     pub fn need(
         &self,
         project: &str,
@@ -206,15 +207,15 @@ impl House {
             goal: goal.to_string(),
             acceptance: acceptance.to_vec(),
         });
-        if inner.state.need.is_some() {
-            return Err(HouseError::NeedExists(State::root_id()));
-        }
-        let root = State::root_id();
-        inner.state.need = Some(NeedRec {
-            project: project.to_string(),
-            goal: goal.to_string(),
-            acceptance: acceptance.to_vec(),
-        });
+        let root = State::need_id(inner.state.needs.len() + 1);
+        inner.state.needs.push(NeedState::new(
+            root.clone(),
+            NeedRec {
+                project: project.to_string(),
+                goal: goal.to_string(),
+                acceptance: acceptance.to_vec(),
+            },
+        ));
         inner.state.goals.insert(
             root.clone(),
             GoalRec {
@@ -246,27 +247,56 @@ impl House {
             fellow,
             chart: chart.clone(),
         });
-        if inner.state.need.is_none() {
-            return Err(rule0(fellow, "no need has been stated; call need() first"));
+        let first = State::need_id(1);
+        if inner.state.needs.is_empty() {
+            return Err(rule0(
+                fellow,
+                first,
+                "no need has been stated; call need() first",
+            ));
         }
         if chart.fellow != fellow {
             return Err(rule0(
                 fellow,
+                first,
                 format!("chart is signed {} but submitted as {fellow}", chart.fellow),
             ));
         }
-        if chart.need != State::root_id().as_str() {
+        let Some(idx) = inner
+            .state
+            .needs
+            .iter()
+            .position(|n| n.id.as_str() == chart.need)
+        else {
+            let known: Vec<&str> = inner.state.needs.iter().map(|n| n.id.as_str()).collect();
             return Err(rule0(
                 fellow,
-                format!("chart answers need {}, expected G0", chart.need),
+                first,
+                format!(
+                    "chart answers need {}, which does not exist; needs are {}",
+                    chart.need,
+                    known.join(", ")
+                ),
             ));
-        }
-        let violations = validate_chart(&chart, &self.cfg);
+        };
+        let root = inner.state.needs[idx].id.clone();
+        let mut violations: Vec<Violation> = chart
+            .goals
+            .iter()
+            .filter(|g| g.id.need_ordinal() != idx + 1)
+            .map(|g| Violation {
+                rule: 0,
+                fellow,
+                goal: g.id.clone(),
+                message: format!("goal id {} is outside the namespace of need {root}", g.id),
+            })
+            .collect();
+        violations.extend(validate_chart(&chart, &self.cfg));
         if !violations.is_empty() {
-            *inner.state.rejections.entry(fellow).or_default() += 1;
+            *inner.state.needs[idx].rejections.entry(fellow).or_default() += 1;
             inner.state.dirty.meta = true;
             self.flush(inner)
-                .map_err(|e| rule0(fellow, e.to_string()))?;
+                .map_err(|e| rule0(fellow, root.clone(), e.to_string()))?;
             return Err(violations);
         }
         let event = json!({
@@ -278,35 +308,56 @@ impl House {
                 "parent": g.parent.as_ref().or(g.guards.as_ref()).or(g.alt_of.as_ref()).map(GoalId::as_str),
             })).collect::<Vec<_>>(),
         });
-        inner.state.charts.insert(fellow, chart);
+        inner.state.needs[idx].charts.insert(fellow, chart);
         for p in inner
             .state
             .pending
-            .values_mut()
-            .filter(|p| p.fellow == fellow)
+            .iter_mut()
+            .filter(|(id, p)| id.need_ordinal() == idx + 1 && p.fellow == fellow)
+            .map(|(_, p)| p)
         {
             p.attempts = p.attempts.saturating_add(1);
         }
         inner.state.dirty.meta = true;
         self.flush(inner)
-            .map_err(|e| rule0(fellow, e.to_string()))?;
+            .map_err(|e| rule0(fellow, root, e.to_string()))?;
         self.sink.emit(event);
         Ok(())
     }
 
-    fn merge_inner(&self, inner: &mut Inner) -> Result<MergeReport, Vec<Violation>> {
-        let Some(need) = inner.state.need.clone() else {
-            return Err(rule0(
-                Fellow::Foreman,
-                "no need has been stated; call need() first",
-            ));
-        };
+    fn merge_inner(
+        &self,
+        inner: &mut Inner,
+        sel: Option<&GoalId>,
+    ) -> Result<MergeReport, Vec<Violation>> {
+        let idx = inner
+            .state
+            .target(sel)
+            .map_err(|e| rule0(Fellow::Foreman, State::need_id(1), e.to_string()))?;
+        let ns = idx + 1;
+        let need = inner.state.needs[idx].clone();
+        let root = need.id.clone();
+        let old: BTreeMap<GoalId, GoalRec> = inner
+            .state
+            .goals
+            .iter()
+            .filter(|(id, _)| id.need_ordinal() == ns)
+            .map(|(id, r)| (id.clone(), r.clone()))
+            .collect();
+        let old_pending: BTreeMap<GoalId, Pending> = inner
+            .state
+            .pending
+            .iter()
+            .filter(|(id, _)| id.need_ordinal() == ns)
+            .map(|(id, p)| (id.clone(), p.clone()))
+            .collect();
         let result = run_merge(&MergeInput {
-            need: &need,
-            charts: &inner.state.charts,
+            root: &root,
+            need: &need.rec,
+            charts: &need.charts,
             facts: &inner.state.facts,
-            old: &inner.state.goals,
-            old_pending: &inner.state.pending,
+            old: &old,
+            old_pending: &old_pending,
             cfg: &self.cfg,
         });
         let out = match result {
@@ -316,15 +367,14 @@ impl House {
                 blamed.sort();
                 blamed.dedup();
                 for f in blamed {
-                    *inner.state.rejections.entry(f).or_default() += 1;
+                    *inner.state.needs[idx].rejections.entry(f).or_default() += 1;
                 }
                 inner.state.dirty.meta = true;
                 self.flush(inner)
-                    .map_err(|e| rule0(Fellow::Foreman, e.to_string()))?;
+                    .map_err(|e| rule0(Fellow::Foreman, root.clone(), e.to_string()))?;
                 return Err(vs);
             }
         };
-        let old = std::mem::take(&mut inner.state.goals);
         let mut events: Vec<Value> = Vec::new();
 
         // board events for what this merge decided
@@ -386,19 +436,25 @@ impl House {
             }
         }
 
-        inner.state.goals = out.goals;
-        inner.state.alt_groups = out.alt_groups;
-        inner.state.pending = out.pending;
-        inner.state.leap = out.leap;
-        inner.state.merged = true;
-        inner.state.merge_stale = false;
-        inner.state.rejections.clear();
+        inner.state.goals.retain(|id, _| id.need_ordinal() != ns);
+        inner.state.goals.extend(out.goals);
+        inner.state.alt_groups.retain(|id, _| id.need_ordinal() != ns);
+        inner.state.alt_groups.extend(out.alt_groups);
+        inner.state.pending.retain(|id, _| id.need_ordinal() != ns);
+        inner.state.pending.extend(out.pending);
+        inner.state.leap.retain(|id| id.need_ordinal() != ns);
+        inner.state.leap.extend(out.leap);
+        let slot = &mut inner.state.needs[idx];
+        slot.merged = true;
+        slot.merge_stale = false;
+        slot.rejections.clear();
 
         // every leaf (and integration parent) test gets a record, keeping any history
         let specs: Vec<(TestSpec, GoalId)> = inner
             .state
             .goals
             .iter()
+            .filter(|(id, _)| id.need_ordinal() == ns)
             .filter_map(|(id, r)| r.goal.test.clone().map(|t| (t, id.clone())))
             .collect();
         for (spec, goal) in specs {
@@ -434,7 +490,7 @@ impl House {
         inner.state.dirty.structure = true;
         inner.state.dirty.meta = true;
         self.flush(inner)
-            .map_err(|e| rule0(Fellow::Foreman, e.to_string()))?;
+            .map_err(|e| rule0(Fellow::Foreman, root, e.to_string()))?;
         self.emit_all(events);
         Ok(out.report)
     }
@@ -444,7 +500,7 @@ impl House {
     pub fn merge(&self) -> Result<MergeReport, Vec<Violation>> {
         let mut g = self.lock();
         g.history.push(HouseCall::Merge);
-        self.merge_inner(&mut g)
+        self.merge_inner(&mut g, None)
     }
 
     /// Records a verified fact. A fact that `refutes` a goal takes effect immediately when a
@@ -471,10 +527,17 @@ impl House {
         inner.state.dirty.meta = true;
         self.flush(inner)?;
         self.sink.emit(ev);
-        if inner.state.merged && self.merge_inner(inner).is_err() {
-            inner.state.merge_stale = true;
-            inner.state.dirty.meta = true;
-            self.flush(inner)?;
+        let merged = inner
+            .state
+            .target(None)
+            .ok()
+            .filter(|i| inner.state.needs[*i].merged);
+        if let Some(idx) = merged {
+            if self.merge_inner(inner, None).is_err() {
+                inner.state.needs[idx].merge_stale = true;
+                inner.state.dirty.meta = true;
+                self.flush(inner)?;
+            }
         }
         Ok(())
     }
@@ -485,12 +548,14 @@ impl House {
         let mut g = self.lock();
         let inner = &mut *g;
         inner.history.push(HouseCall::Next);
-        if !inner.state.merged {
+        let idx = inner.state.target(None)?;
+        if !inner.state.needs[idx].merged {
             return Err(HouseError::NotMerged);
         }
-        let need = inner.state.need.clone().ok_or(HouseError::NoNeed)?;
+        let root = inner.state.needs[idx].id.clone();
+        let need = inner.state.needs[idx].rec.clone();
         let snap = self.probe.snapshot();
-        let plan = sched::plan(&inner.state, snap, &self.cfg);
+        let plan = sched::plan_for(&inner.state, snap, &self.cfg, Some(idx + 1));
         let mut dispatches = Vec::new();
         let mut events = Vec::new();
         for p in &plan.planned {
@@ -506,7 +571,7 @@ impl House {
                 .state
                 .ancestors(&p.goal)
                 .iter()
-                .filter(|a| **a != State::root_id())
+                .filter(|a| **a != root)
                 .filter_map(|a| inner.state.goals.get(a).map(|r| r.goal.text.clone()))
                 .collect();
             let env: BTreeMap<String, String> = BTreeMap::from([(
@@ -573,7 +638,7 @@ impl House {
         let complete = inner
             .state
             .goals
-            .get(&State::root_id())
+            .get(&root)
             .is_some_and(|r| r.status == GoalStatus::Reached);
         Ok(Batch {
             dispatches,
@@ -790,10 +855,11 @@ impl House {
         let all_done = inner
             .state
             .goals
-            .get(&State::root_id())
+            .get(&State::need_id(goal.need_ordinal()))
             .is_some_and(|r| r.status == GoalStatus::Reached);
         if all_done {
-            for f in inner.state.charts.keys() {
+            let owner = inner.state.needs.get(goal.need_ordinal() - 1);
+            for f in owner.into_iter().flat_map(|n| n.charts.keys()) {
                 events.push(json!({"t":"done","agent":f.name()}));
             }
         }
@@ -895,9 +961,21 @@ impl House {
 
     /// A JSON snapshot for the board and the MCP `house_status` tool.
     pub fn status(&self) -> Result<Value, HouseError> {
+        self.status_in(None)
+    }
+
+    #[allow(missing_docs)]
+    pub fn status_in(&self, sel: Option<&GoalId>) -> Result<Value, HouseError> {
         let g = self.lock();
         let st = &g.state;
-        let root = State::root_id();
+        let idx = match sel {
+            None if st.needs.is_empty() => None,
+            _ => Some(st.target(sel)?),
+        };
+        let need = idx.map(|i| &st.needs[i]);
+        let ns = idx.map_or(0, |i| i + 1);
+        let root = need.map_or_else(|| State::need_id(1), |n| n.id.clone());
+        let mine = |id: &GoalId| id.need_ordinal() == ns;
         let mut counts = BTreeMap::from([
             ("pending", 0u64),
             ("active", 0),
@@ -907,7 +985,7 @@ impl House {
         ]);
         let mut total = 0u64;
         let mut list = Vec::new();
-        for (id, r) in &st.goals {
+        for (id, r) in st.goals.iter().filter(|(id, _)| mine(id)) {
             if *id != root {
                 total += 1;
                 *counts.entry(sched::status_name(r.status)).or_default() += 1;
@@ -927,12 +1005,13 @@ impl House {
         let active: Vec<&str> = st
             .goals
             .iter()
-            .filter(|(_, r)| r.status == GoalStatus::Active)
+            .filter(|(id, r)| mine(id) && r.status == GoalStatus::Active)
             .map(|(id, _)| id.as_str())
             .collect();
         let retired: Vec<Value> = st
             .goals
             .iter()
+            .filter(|(id, _)| mine(id))
             .filter_map(|(id, r)| {
                 r.retired
                     .as_ref()
@@ -942,24 +1021,31 @@ impl House {
         let pending: Vec<Value> = st
             .pending
             .iter()
+            .filter(|(id, _)| mine(id))
             .map(|(id, p)| json!({"goal": id.as_str(), "fellow": p.fellow.name(), "attempts": p.attempts}))
             .collect();
-        let leaps: Vec<&str> = st.leap.iter().map(GoalId::as_str).collect();
+        let leaps: Vec<&str> = st
+            .leap
+            .iter()
+            .filter(|id| mine(id))
+            .map(GoalId::as_str)
+            .collect();
         let quarantined: Vec<&str> = st
             .tests
             .iter()
-            .filter(|(_, t)| t.quarantined)
+            .filter(|(_, t)| t.quarantined && mine(&t.goal))
             .map(|(n, _)| n.as_str())
             .collect();
-        let escalated: Vec<&str> = st
-            .rejections
-            .iter()
+        let escalated: Vec<&str> = need
+            .into_iter()
+            .flat_map(|n| n.rejections.iter())
             .filter(|(_, n)| **n >= 3)
             .map(|(f, _)| f.name())
             .collect();
         let alt: Vec<Value> = st
             .alt_groups
             .iter()
+            .filter(|(id, _)| mine(id))
             .map(|(t, g)| {
                 json!({
                     "target": t.as_str(),
@@ -969,11 +1055,12 @@ impl House {
             })
             .collect();
         Ok(json!({
-            "need": st.need.as_ref().map(|n| json!({
-                "id": "G0", "project": n.project, "goal": n.goal, "acceptance": n.acceptance,
+            "need": need.map(|n| json!({
+                "id": n.id.as_str(), "project": n.rec.project, "goal": n.rec.goal,
+                "acceptance": n.rec.acceptance,
             })),
-            "merged": st.merged,
-            "merge_stale": st.merge_stale,
+            "merged": need.is_some_and(|n| n.merged),
+            "merge_stale": need.is_some_and(|n| n.merge_stale),
             "complete": st.goals.get(&root).is_some_and(|r| r.status == GoalStatus::Reached),
             "goals": {
                 "total": total,

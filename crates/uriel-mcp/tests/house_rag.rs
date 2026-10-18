@@ -676,7 +676,7 @@ fn house_chart_signed_by_another_fellow_is_rejected() {
 }
 
 #[test]
-fn house_need_twice_and_next_before_merge_are_errors() {
+fn house_next_before_merge_and_a_need_without_arguments_are_errors() {
     let p = Proj::new();
     let mut s = p.session(&[], &[]);
     s.err("house_next", json!({}));
@@ -684,11 +684,18 @@ fn house_need_twice_and_next_before_merge_are_errors() {
     s.err("house_need", json!({"project": "p"}));
     need(&mut s);
     s.err("house_next", json!({}));
-    let e = s.err(
+}
+
+#[test]
+fn house_need_twice_gives_the_second_need_the_root_n2_g0() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    need(&mut s);
+    let second = s.ok(
         "house_need",
         json!({"project": "p", "goal": "g", "acceptance": []}),
     );
-    assert!(e.contains("already exists"), "{e}");
+    assert_eq!(second["goal"], "N2.G0", "{second}");
 }
 
 #[test]
