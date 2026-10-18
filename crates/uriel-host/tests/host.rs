@@ -347,6 +347,48 @@ fn tcp_server_answers_an_oversized_declared_frame_with_too_large_and_closes() {
 }
 
 #[test]
+fn tcp_server_delivers_too_large_on_every_fresh_connection() {
+    const ROUNDS: usize = 200;
+    const TRAILING: usize = 4_096;
+    let (_dir, host) = open_host("tcp-oversized-repeat");
+    host.serve(ServeConfig {
+        max_frame: 1_024,
+        ..ServeConfig::default()
+    })
+    .expect("serve");
+    let addr = host.listen_tcp().expect("listen");
+
+    for round in 0..ROUNDS {
+        let stream = TcpStream::connect(addr).expect("dial");
+        let mut raw = TcpTransport::new(stream, DEFAULT_MAX_FRAME).expect("raw");
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(1u32 << 30).to_le_bytes());
+        frame.push(0x01);
+        frame.resize(frame.len() + TRAILING, 0xAB);
+        raw.send(&frame).expect("send header");
+
+        let mut reply = Vec::new();
+        let received = raw.recv(&mut reply, WAIT);
+        assert!(received.is_ok(), "round {round}: reply lost: {received:?}");
+        let response = Response::decode(&reply, DEFAULT_MAX_FRAME).expect("decode");
+        assert!(
+            matches!(
+                response,
+                Response::Error {
+                    code: ErrorCode::TooLarge,
+                    ..
+                }
+            ),
+            "round {round}: wrong reply"
+        );
+        assert!(
+            matches!(raw.recv(&mut reply, WAIT), Err(HostError::Closed)),
+            "round {round}: connection not closed"
+        );
+    }
+}
+
+#[test]
 fn channel_server_rejects_an_oversized_frame_and_keeps_the_connection() {
     let (_dir, host) = open_host("channel-oversized");
     host.serve(ServeConfig {
