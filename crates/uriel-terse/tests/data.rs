@@ -75,6 +75,21 @@ fn uniform_array_becomes_header_plus_rows() {
 }
 
 #[test]
+fn constant_columns_move_into_the_header() {
+    let enc = roundtrip(
+        "{\"hits\":[{\"a\":1,\"v\":\"direct\",\"r\":false},{\"a\":2,\"v\":\"direct\",\"r\":false},{\"a\":3,\"v\":\"direct\",\"r\":false}]}",
+    );
+    assert_eq!(enc, "hits[3]{a,v=direct,r=false}:
+ 1
+ 2
+ 3");
+    let all_same = roundtrip("[{\"k\":1},{\"k\":1}]");
+    assert!(all_same.contains('1'), "{all_same}");
+    roundtrip("[{\"k\":\"a,b\",\"n\":null},{\"k\":\"a,b\",\"n\":null},{\"k\":\"a,b\",\"n\":1}]");
+    roundtrip("[{\"k\":\"x=y\",\"=\":\"\"},{\"k\":\"x=y\",\"=\":\"\"}]");
+}
+
+#[test]
 fn scalar_arrays_are_inline() {
     assert_eq!(roundtrip("{\"k\":[1,\"two\",null,true]}"), "k[4]: 1,two,null,true");
     assert_eq!(roundtrip("{\"k\":[]}"), "k[0]:");
@@ -280,16 +295,23 @@ fn random_value(rng: &mut SplitMix, depth: usize) -> Value {
             let n = 1 + rng.below(5);
             let cols: Vec<&str> = (0..1 + rng.below(4)).map(|_| *rng.pick(KEYS)).collect();
             let strings = rng.below(2) == 0;
+            let fixed: Vec<Option<Value>> = cols
+                .iter()
+                .map(|_| (rng.below(3) == 0).then(|| random_scalar(rng)))
+                .collect();
             Value::Array(
                 (0..n)
                     .map(|_| {
                         Value::Object(
                             cols.iter()
-                                .map(|c| {
-                                    let cell = if strings {
-                                        Value::String(rng.pick(STRS).to_string())
-                                    } else {
-                                        random_scalar(rng)
+                                .zip(&fixed)
+                                .map(|(c, fix)| {
+                                    let cell = match fix {
+                                        Some(v) => v.clone(),
+                                        None if strings => {
+                                            Value::String(rng.pick(STRS).to_string())
+                                        }
+                                        None => random_scalar(rng),
                                     };
                                     (c.to_string(), cell)
                                 })
