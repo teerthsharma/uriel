@@ -1086,6 +1086,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "uriel-terse"
+version = "0.1.0"
+
+[[package]]
 name = "uriel-tier"
 version = "0.1.0"
 dependencies = [

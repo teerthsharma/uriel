@@ -1,0 +1,25 @@
+The user prefers that I make a worktree for every change and never touch the main checkout directly, because several other agents are building in the same repository and a stray edit in the shared tree has already caused one lost afternoon. I should check `git worktree list` before creating a new one so that I do not collide with a branch that already exists.
+
+I think the flaky test in the tokenizer module is probably caused by the seeded generator being shared between two threads, but I am not certain. It should be verified by running the suite with `--test-threads=1` and comparing the failure rate over 200 runs before anyone changes the code.
+
+The build on the Windows box needs about 2 GB of RAM per large crate, so it is important to note that no more than 6 heavy builds should run at the same time. Additionally, the target directory must be cleaned from finished worktrees, otherwise the disk fills up and the next build fails with a confusing linker error.
+
+Please note that the benchmark numbers in the README were measured on commit 20123e2 with the default features, and they have not been reproduced on the CI machine. If the numbers are quoted anywhere else, the commit and the machine must be quoted with them.
+
+We decided to use a chars divided by 4 proxy for the token estimate instead of a real tokenizer, because the proxy is deterministic, has no dependencies, and is already used by the budget logic in `uriel-mcp`. The decision can be revisited if the error against a real tokenizer exceeds 15% on code-heavy text.
+
+The reviewer asked that every PR body open on what the subsystem currently does and that all caveats are collected in a single paragraph at the end. He does not want first person prose in PR descriptions, and he will not merge anything that says it was written in a hurry.
+
+It is really not a good idea to commit the generated site directory. The deploy job rebuilds it from the sources, and a committed copy makes every diff unreadable. The `.gitignore` already lists it, so if it shows up in `git status` something is wrong with the local configuration.
+
+I am not sure whether the memory index handles duplicate keys correctly. In order to find out, a failing test should be written first, then the behaviour confirmed on the current main branch, and only then should a fix be attempted. Basically the question is whether the second insert overwrites or appends.
+
+The deploy to the staging cluster takes approximately 12 minutes and it cannot be cancelled once the migration step has started. Therefore the migration must never be started late on a Friday, and the on-call engineer has to be told in advance when it is going to run.
+
+Sorry for the confusion earlier. The correct path to the config file is `~/.config/uriel/config.toml`, not the repository root, and the environment variable `URIEL_DB_PATH` overrides it. I hope this helps, and let me know if you have any other questions.
+
+The user wants the final report to start with the verdict in his own words, then the evidence with exact counts, and then the next decision with a default already chosen. A reply that ends with a question handed back to him is considered unfinished, unless proceeding would be unsafe.
+
+Perhaps the simplest explanation is that the cache is stale because the invalidation hook runs before the write is flushed. It seems that the order of the two calls in `flush_and_notify` was swapped during the refactor, which would explain why the problem only appears under load and never in the unit tests.
+
+When the agent team is requested, every named agent has to be staffed, and none may be left idle. A subset run is considered a failure of the instruction even if the result looks correct, and it is not acceptable to argue that the remaining agents would not have added anything.

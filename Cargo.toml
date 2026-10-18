@@ -18,6 +18,7 @@ members = [
     "crates/uriel-host",
     "crates/uriel-bench",
     "crates/uriel-cli",
+    "crates/uriel-terse",
 ]
 
 [workspace.package]
