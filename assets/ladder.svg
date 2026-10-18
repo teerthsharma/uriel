@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 250" width="720" height="250" role="img" aria-labelledby="t d">
+  <title id="t">Resolution ladder: size of one chunk at each level</title>
+  <desc id="d">Four horizontal bars on a linear scale. L0 is the original text at size 1. L1 is one quarter. L2 is one sixteenth. L3 is a gist of about twelve tokens.</desc>
+  <style>
+    .ink { fill: #1b2236; font: 13px ui-monospace, Consolas, monospace; }
+    .dim { fill: #5b6b91; font: 12px ui-monospace, Consolas, monospace; }
+    .bar { fill: #1b2236; }
+    .axis { stroke: #5b6b91; stroke-width: 1; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #f5f1e8; }
+      .dim { fill: #9aa7c7; }
+      .bar { fill: #f5f1e8; }
+      .axis { stroke: #9aa7c7; }
+    }
+  </style>
+  <text class="ink" x="20" y="24">one chunk, four resolutions (linear scale, share of the original)</text>
+  <line class="axis" x1="90" y1="40" x2="90" y2="226"/>
+  <text class="ink" x="20" y="72">L0</text>
+  <rect class="bar" x="90" y="56" width="560" height="26" opacity="1"/>
+  <text class="dim" x="660" y="74">1</text>
+  <text class="ink" x="20" y="118">L1</text>
+  <rect class="bar" x="90" y="102" width="140" height="26" opacity="0.7"/>
+  <text class="dim" x="240" y="120">1/4</text>
+  <text class="ink" x="20" y="164">L2</text>
+  <rect class="bar" x="90" y="148" width="35" height="26" opacity="0.45"/>
+  <text class="dim" x="135" y="166">1/16, the stored memory</text>
+  <text class="ink" x="20" y="210">L3</text>
+  <rect class="bar" x="90" y="194" width="6" height="26" opacity="0.3"/>
+  <text class="dim" x="106" y="212">about 12 tokens: kind, name, signature</text>
+</svg>

@@ -1,5 +1,8 @@
 # seal: design
 
+Historical. This is the original wave plan under the working name seal; `seal-vector`
+and `seal-bolt` were never built. The current crate map is in the README.
+
 seal is an embedded, single-binary property-graph database in Rust. It targets the
 workloads people run Neo4j for (Cypher queries, indexes, constraints, graph algorithms,
 vector search, transactions, clustering) in tens of MB of RAM, with no JVM and no Docker.

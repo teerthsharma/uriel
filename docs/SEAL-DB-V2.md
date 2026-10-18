@@ -101,9 +101,15 @@ CockroachDB's layering, kept honest to what a small Rust crate can verify:
   leader, a new one is elected and no committed entry is lost; partition and
   heal, logs converge; a restarted replica catches up.
 
-**What this is not (yet).** It does not carry the graph: the property graph in
-`uriel-core` still runs single node. `uriel-kv` is the verified resilient core;
-wiring the graph onto ranges is the next wave. No claim of CockroachDB
+**What exists.** Sans-IO Raft (PreVote, check-quorum, snapshots, single-step
+membership, ReadIndex) over a file-backed CRC-32C log, HLC, MVCC, range
+descriptors with split, merge and a lease table, and a seeded cluster simulator.
+`uriel-core` records each commit as a checksummed command batch, and `uriel-repl`
+applies those batches on every replica of one Raft group under the simulator.
+
+**What this is not (yet).** The shipped server runs the property graph on a
+single node. Ranges are not wired to Raft groups, there are no distributed
+transactions, and Raft has run in simulation only. No claim of CockroachDB
 compatibility or performance.
 
 ## Success numbers (set before building, to be measured)
