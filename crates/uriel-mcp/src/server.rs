@@ -56,6 +56,10 @@ impl Server {
         Self { ctx, token_limit }
     }
 
+    pub fn scaffold_fingerprint(&self) -> Result<String, String> {
+        crate::prefix::scaffold(&self.ctx).map(|s| s.id)
+    }
+
     pub fn handle_line(&self, line: &str) -> Option<String> {
         let parsed: Json = match serde_json::from_str(line) {
             Ok(v) => v,
