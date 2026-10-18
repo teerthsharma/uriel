@@ -1,6 +1,7 @@
 use serde_json::{json, Value as Json};
-use uriel_rag::{Soul, SoulOptions, SoulSection};
+use uriel_rag::{Soul, SoulOptions, SoulSection, MEMORY_PREFIX};
 
+use crate::compact::{encode_pack, Pack, PackHit};
 use crate::config::Format;
 use crate::tools::{format_arg, format_prop, object, str_prop, Context, ToolDef, ToolResult};
 
@@ -25,7 +26,7 @@ fn soul_schema() -> Json {
 pub const TOOLS: &[ToolDef] = &[ToolDef {
     name: "soul",
     title: "Soul of the idea guide",
-    description: "Return a small reference guide to the indexed codebase, the soul of the idea: many short sections ranked by query-free salience (documentation density, definitions, rare vocabulary) and refined by seeded deterministic score diffusion along next-chunk and definition-to-mention links, then packed under a hard token budget through the resolution ladder (top sections at higher resolution, the rest one-line L3 gists). Each section carries its address `// file:start-end #chunk_id`; rag_expand with that chunk_id returns the exact original. Compact by default (the guide text, most important section first); format=json returns the sections, counts, seed, digest and `cached`. `sections` returns only the listed sections. No model, no GPU: the same index and arguments return the same bytes, and a computed guide is cached in the graph (not written on a --read-only server).",
+    description: "Return a small reference guide to the indexed codebase, the soul of the idea: many short sections ranked by query-free salience (documentation density, definitions, rare vocabulary) and refined by seeded deterministic score diffusion along next-chunk and definition-to-mention links, then packed under a hard token budget through the resolution ladder (top sections at higher resolution, the rest one-line L3 gists). Each section carries its address `file:start-end#chunk_id`; rag_expand with that chunk_id returns the exact original. Compact v3 by default (the encoding of rag_search, most important section first); format=json returns the sections, the v1 `text` with `// file:start-end #chunk_id` addresses, counts, seed, digest and `cached`. `sections` returns only the listed sections. No model, no GPU: the same index and arguments return the same bytes, and a computed guide is cached in the graph (not written on a --read-only server).",
     writes: false,
     schema: soul_schema,
 }];
@@ -116,25 +117,51 @@ fn soul(ctx: &Context, args: &Json) -> ToolResult {
         })
         .map_err(|e| e.to_string())?;
     let (chosen, changed) = crate::terse::prose_sections(ctx, pick(&guide, &ids, budget)?);
-    let text: String = if ids.is_empty() && !changed {
-        guide.text.clone()
-    } else {
-        chosen.iter().map(SoulSection::render).collect()
-    };
     match format {
-        Format::Compact => Ok(if text.is_empty() { EMPTY.to_string() } else { text }),
-        Format::Json => crate::prefix::lead_json(ctx, json!({
-            "tokens": text.chars().count().div_ceil(4),
-            "text": text,
-            "sections": chosen.iter().map(listed).collect::<Vec<_>>(),
-            "budget_tokens": budget,
-            "omitted": guide.omitted,
-            "rounds": guide.rounds,
-            "seed": format!("{:016x}", guide.seed),
-            "digest": guide.digest,
-            "cached": guide.cache.hit,
-        })
-        .to_string(),
-        ),
+        Format::Compact => Ok(if chosen.is_empty() {
+            EMPTY.to_string()
+        } else {
+            pack_sections(&chosen, guide.omitted)
+        }),
+        Format::Json => {
+            let text: String = if ids.is_empty() && !changed {
+                guide.text.clone()
+            } else {
+                chosen.iter().map(SoulSection::render).collect()
+            };
+            crate::prefix::lead_json(ctx, json!({
+                "tokens": text.chars().count().div_ceil(4),
+                "text": text,
+                "sections": chosen.iter().map(listed).collect::<Vec<_>>(),
+                "budget_tokens": budget,
+                "omitted": guide.omitted,
+                "rounds": guide.rounds,
+                "seed": format!("{:016x}", guide.seed),
+                "digest": guide.digest,
+                "cached": guide.cache.hit,
+            })
+            .to_string(),
+            )
+        }
     }
+}
+
+fn pack_sections(sections: &[SoulSection], omitted: usize) -> String {
+    encode_pack(&Pack {
+        hits: sections
+            .iter()
+            .map(|s| PackHit {
+                chunk_id: s.chunk_id,
+                file: s.file.clone(),
+                start: s.start_line,
+                end: s.end_line,
+                level: s.level.number(),
+                graph: false,
+                remembered: s.file.starts_with(MEMORY_PREFIX),
+                changed: false,
+                body: Some(s.text.clone()),
+            })
+            .collect(),
+        omitted,
+    })
 }

@@ -694,6 +694,9 @@ pub struct Pack {
 }
 
 const PACK_LEVEL: u8 = 3;
+const GRAPH_ON: &str = "=g";
+const GRAPH_OFF: &str = "=";
+const RUN_TOGGLE_TOKENS: usize = 2;
 
 fn escape_path_into(s: &str, out: &mut String) {
     for c in s.chars() {
@@ -745,7 +748,7 @@ fn encode_file(file: &str, aliases: &[String], out: &mut String) {
         }
         return;
     }
-    if file.starts_with(['@', '\'']) {
+    if file.starts_with(['@', '\'']) || (!file.is_empty() && file.bytes().all(|b| b.is_ascii_digit())) {
         out.push('\'');
     }
     escape_path_into(file, out);
@@ -856,29 +859,61 @@ fn split_header(line: &str) -> (&str, Option<&str>) {
     }
 }
 
+fn graph_runs(hits: &[PackHit]) -> Vec<bool> {
+    let mut in_run = vec![false; hits.len()];
+    let mut i = 0;
+    while i < hits.len() {
+        if !hits[i].graph {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < hits.len() && hits[j].graph {
+            j += 1;
+        }
+        let toggles = if j < hits.len() { 2 * RUN_TOGGLE_TOKENS } else { RUN_TOGGLE_TOKENS };
+        if toggles < j - i {
+            in_run[i..j].fill(true);
+        }
+        i = j;
+    }
+    in_run
+}
+
 pub fn encode_pack(pack: &Pack) -> String {
     let mut out = format!("#{}", pack.hits.len());
     if pack.omitted > 0 {
         out.push_str(&format!(" omit={}", pack.omitted));
     }
     out.push('\n');
-    let mut written: Vec<&str> = Vec::new();
-    let mut prev_file: Option<&str> = None;
+    let mut first_seen: Vec<&str> = Vec::new();
     for h in pack.hits.iter().filter(|h| h.body.is_some()) {
-        if prev_file != Some(h.file.as_str()) {
-            written.push(h.file.as_str());
+        if !first_seen.contains(&h.file.as_str()) {
+            first_seen.push(h.file.as_str());
         }
-        prev_file = Some(h.file.as_str());
     }
-    let aliases = plan_aliases(written.into_iter());
+    let aliases = plan_aliases(first_seen.iter().copied());
     write_aliases(&aliases, &mut out);
+    let in_run = graph_runs(&pack.hits);
+    let mut introduced: HashMap<&str, usize> = HashMap::new();
     let mut prev_file: Option<&str> = None;
     let mut last_end: HashMap<&str, u32> = HashMap::new();
-    for h in &pack.hits {
-        out.push('>');
+    let mut run_open = false;
+    for (h, runs) in pack.hits.iter().zip(&in_run) {
+        if *runs != run_open {
+            out.push_str(if *runs { GRAPH_ON } else { GRAPH_OFF });
+            out.push('\n');
+            run_open = *runs;
+        }
         if h.body.is_some() {
             if prev_file != Some(h.file.as_str()) {
-                encode_file(&h.file, &aliases, &mut out);
+                match introduced.get(h.file.as_str()) {
+                    Some(n) => out.push_str(&n.to_string()),
+                    None => {
+                        encode_file(&h.file, &aliases, &mut out);
+                        introduced.insert(h.file.as_str(), introduced.len());
+                    }
+                }
                 out.push(':');
             }
             out.push_str(&encode_range(h.start, h.end, last_end.get(h.file.as_str()).copied()));
@@ -890,7 +925,7 @@ pub fn encode_pack(pack: &Pack) -> String {
         if h.level != PACK_LEVEL {
             out.push_str(&format!("L{}", h.level));
         }
-        if h.graph {
+        if h.graph && !runs {
             out.push('g');
         }
         if h.remembered {
@@ -968,6 +1003,22 @@ fn parse_flags(s: &str, line: usize) -> Result<Flags, DecodeError> {
     Ok(f)
 }
 
+fn resolve_file(
+    field: &str,
+    aliases: &[String],
+    introduced: &[String],
+    line: usize,
+) -> Result<String, DecodeError> {
+    if !field.is_empty() && field.bytes().all(|b| b.is_ascii_digit()) {
+        let n: usize = parse_digits(field, line, "file index")?;
+        return introduced
+            .get(n)
+            .cloned()
+            .ok_or_else(|| bad(line, format!("file index {n} is not introduced yet")));
+    }
+    decode_file(field, aliases, line)
+}
+
 pub fn decode_pack(text: &str) -> Result<Pack, DecodeError> {
     let text = text.strip_suffix('\n').unwrap_or(text);
     let lines: Vec<&str> = text.split('\n').collect();
@@ -983,16 +1034,21 @@ pub fn decode_pack(text: &str) -> Result<Pack, DecodeError> {
     let mut pos = 1;
     let aliases = read_aliases(&lines, &mut pos)?;
     let mut hits = Vec::with_capacity(count.min(lines.len()));
+    let mut introduced: Vec<String> = Vec::new();
     let mut prev_file: Option<String> = None;
     let mut last_end: HashMap<String, u32> = HashMap::new();
-    for _ in 0..count {
+    let mut run_open = false;
+    while hits.len() < count {
         let line_no = pos + 1;
-        let line = lines
+        let raw = *lines
             .get(pos)
-            .and_then(|l| l.strip_prefix('>'))
-            .ok_or_else(|| bad(line_no, "expected a `>` citation line"))?;
+            .ok_or_else(|| bad(line_no, "truncated: fewer citations than announced"))?;
         pos += 1;
-        let (header, inline) = split_header(line);
+        if raw == GRAPH_ON || raw == GRAPH_OFF {
+            run_open = raw == GRAPH_ON;
+            continue;
+        }
+        let (header, inline) = split_header(raw);
         let (loc, tail) = header
             .rsplit_once('#')
             .ok_or_else(|| bad(line_no, "citation lacks `#<id>`"))?;
@@ -1009,7 +1065,7 @@ pub fn decode_pack(text: &str) -> Result<Pack, DecodeError> {
                 start: 0,
                 end: 0,
                 level: flags.level,
-                graph: flags.graph,
+                graph: flags.graph || run_open,
                 remembered: flags.remembered,
                 changed: flags.changed,
                 body: None,
@@ -1020,7 +1076,13 @@ pub fn decode_pack(text: &str) -> Result<Pack, DecodeError> {
             return Err(bad(line_no, "a reference carries no location"));
         }
         let (file, range) = match loc.rsplit_once(':') {
-            Some((f, r)) => (decode_file(f, &aliases, line_no)?, r),
+            Some((f, r)) => {
+                let file = resolve_file(f, &aliases, &introduced, line_no)?;
+                if !introduced.contains(&file) {
+                    introduced.push(file.clone());
+                }
+                (file, r)
+            }
             None => (
                 prev_file
                     .clone()
@@ -1050,7 +1112,7 @@ pub fn decode_pack(text: &str) -> Result<Pack, DecodeError> {
             start,
             end,
             level: flags.level,
-            graph: flags.graph,
+            graph: flags.graph || run_open,
             remembered: flags.remembered,
             changed: flags.changed,
             body: Some(body),
@@ -1568,7 +1630,7 @@ mod tests {
         for bad in ["", "x", "#x", "#2\na\n1", "#1\na\n1\t2", "#1\n@b=x\na\n1", "#1\na\n\\q"] {
             assert!(decode_table(bad).is_err(), "{bad:?}");
         }
-        for bad in ["", "#1", "#1\nfile:1-2 #3", "#1\n>f:1-2 #3 z\nx", "#1\n>f:1-2 #3 +3\nx", "#1\n>#3", "#1\n>#x r"] {
+        for bad in ["", "#1", "#1\nfile:1-2 #3", "#1\nf:1-2 #3 z\nx", "#1\nf:1-2 #3 +3\nx", "#1\n#3", "#1\n#x r"] {
             assert!(decode_pack(bad).is_err(), "{bad:?}");
         }
     }
@@ -1616,7 +1678,7 @@ mod tests {
         let text = encode_pack(&pack);
         assert_eq!(
             text,
-            "#3 omit=2\n@a=crates/uriel-house/src/\n>@a validate.rs:32-36#1547L1+2\nfn a() {\n}\n>#12L2gr\n>@a gate.rs:3-4#13 fn gate\n"
+            "#3 omit=2\n@a=crates/uriel-house/src/\n@a validate.rs:32-36#1547L1+2\nfn a() {\n}\n#12L2gr\n@a gate.rs:3-4#13 fn gate\n"
         );
         assert_eq!(decode_pack(&text).expect("decode"), pack);
     }
@@ -1650,14 +1712,14 @@ mod tests {
         let text = encode_pack(&pack);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "#5", "{text}");
-        assert_eq!(lines[1], ">uriel-house/src/sched.rs:179-218#2229 fn defer()", "{text}");
-        assert_eq!(lines[2], ">214-253#2230 let over = heavy", "{text}");
-        assert_eq!(lines[3], ">uriel-mcp/src/compact.rs:1343+15#2875 fn table_example()", "{text}");
-        assert_eq!(lines[4], ">1421+46#2880 fn pack_example()", "{text}");
-        assert_eq!(lines[5], ">uriel-house/src/probe.rs:249-285#2231 }", "{text}");
+        assert_eq!(lines[1], "uriel-house/src/sched.rs:179-218#2229 fn defer()", "{text}");
+        assert_eq!(lines[2], "214-253#2230 let over = heavy", "{text}");
+        assert_eq!(lines[3], "uriel-mcp/src/compact.rs:1343+15#2875 fn table_example()", "{text}");
+        assert_eq!(lines[4], "1421+46#2880 fn pack_example()", "{text}");
+        assert_eq!(lines[5], "uriel-house/src/probe.rs:249-285#2231 }", "{text}");
         assert_eq!(lines.len(), 6, "every gist shares its citation line: {text}");
         assert_eq!(decode_pack(&text).expect("decode"), pack);
-        let relative = decode_pack("#4\n>f:10-20#1 x\n>+5+3#2 y\n>g:7#3 z\n>f:-4-30#4 w").expect("relative");
+        let relative = decode_pack("#4\nf:10-20#1 x\n+5+3#2 y\ng:7#3 z\nf:-4-30#4 w").expect("relative");
         let spans: Vec<(&str, u32, u32)> = relative.hits.iter().map(|h| (h.file.as_str(), h.start, h.end)).collect();
         assert_eq!(spans, [("f", 10, 20), ("f", 25, 28), ("g", 7, 7), ("f", 24, 30)]);
     }
@@ -1681,7 +1743,7 @@ mod tests {
         let text = encode_pack(&pack);
         assert_eq!(
             text,
-            "#3\n>a\\sb/c.rs:3#5   spaced # body : 1-2#3\n>1-9#7L1+2\nx\ny\n>'@odd:4-2#6 \n"
+            "#3\na\\sb/c.rs:3#5   spaced # body : 1-2#3\n1-9#7L1+2\nx\ny\n'@odd:4-2#6 \n"
         );
         assert_eq!(decode_pack(&text).expect("decode"), pack);
     }
@@ -1689,21 +1751,93 @@ mod tests {
     #[test]
     fn the_compact_citation_decoder_rejects_dangling_shortcuts() {
         for bad in [
-            "#1\n>1-2#3 x",
-            "#1\n>f:+1-2#3 x",
-            "#2\n>f:1-2#3 x\n>g:-5#4 x",
-            "#1\n>f:1-2#3+1 x\ny",
-            "#1\n>f:1-2#3r",
-            "#1\n>f:1-2#3",
-            "#1\n>#3r x",
-            "#1\n>f:1-+2#3 x",
-            "#1\n>f:1x#3 x",
-            "#1\n>f:4294967295+1#3 x",
-            "#2\n>f:1-2#3 x\n>-3#4 x",
-            "#1\n>@a x:1-2#3 y",
+            "#1\n1-2#3 x",
+            "#1\nf:+1-2#3 x",
+            "#2\nf:1-2#3 x\ng:-5#4 x",
+            "#1\nf:1-2#3+1 x\ny",
+            "#1\nf:1-2#3r",
+            "#1\nf:1-2#3",
+            "#1\n#3r x",
+            "#1\nf:1-+2#3 x",
+            "#1\nf:1x#3 x",
+            "#1\nf:4294967295+1#3 x",
+            "#2\nf:1-2#3 x\n-3#4 x",
+            "#1\n@a x:1-2#3 y",
+            "#1\n5:1-2#3 x",
+            "#2\nf:1-2#3 x\n1:1-2#4 y",
+            "#0\n=g",
+            "#1\n=g\n=\n",
         ] {
             assert!(decode_pack(bad).is_err(), "{bad:?}");
         }
+    }
+
+    fn located(chunk_id: u64, file: &str, graph: bool) -> PackHit {
+        PackHit {
+            graph,
+            ..gist(chunk_id, file, 1, 2, "x")
+        }
+    }
+
+    #[test]
+    fn a_file_seen_before_is_cited_by_its_number() {
+        let pack = Pack {
+            hits: vec![
+                gist(1, "dir/a.rs", 1, 2, "x"),
+                gist(2, "dir/b.rs", 3, 4, "y"),
+                gist(3, "dir/a.rs", 5, 6, "z"),
+                gist(4, "dir/c.rs", 7, 8, "w"),
+                gist(5, "dir/b.rs", 9, 9, "v"),
+                gist(6, "dir/b.rs", 10, 11, "u"),
+                gist(7, "dir/a.rs", 12, 13, "t"),
+            ],
+            omitted: 0,
+        };
+        let text = encode_pack(&pack);
+        assert_eq!(
+            text,
+            "#7\ndir/a.rs:1-2#1 x\ndir/b.rs:3-4#2 y\n0:5-6#3 z\ndir/c.rs:7-8#4 w\n1:9#5 v\n10-11#6 u\n0:12-13#7 t\n"
+        );
+        assert_eq!(decode_pack(&text).expect("decode"), pack);
+    }
+
+    #[test]
+    fn a_path_made_of_digits_is_quoted_so_it_is_not_a_file_number() {
+        let pack = Pack {
+            hits: vec![gist(1, "7", 1, 2, "x"), gist(2, "dir/a.rs", 1, 2, "y"), gist(3, "7", 3, 4, "z"), gist(4, "", 1, 1, "e")],
+            omitted: 0,
+        };
+        let text = encode_pack(&pack);
+        assert_eq!(text, "#4\n'7:1-2#1 x\ndir/a.rs:1-2#2 y\n0:3-4#3 z\n:1#4 e\n");
+        assert_eq!(decode_pack(&text).expect("decode"), pack);
+    }
+
+    #[test]
+    fn a_long_run_of_graph_hits_is_one_toggle_pair_and_a_short_one_keeps_its_flags() {
+        let run = |n: usize, tail: bool| {
+            let mut hits = vec![located(1, "a.rs", false)];
+            hits.extend((0..n).map(|i| located(10 + i as u64, "a.rs", true)));
+            if tail {
+                hits.push(located(99, "a.rs", false));
+            }
+            Pack { hits, omitted: 0 }
+        };
+        let flags = |text: &str| text.lines().filter(|l| l.contains("#") && l.contains('g')).count();
+        for (n, tail, toggled) in [(4, true, false), (5, true, true), (2, false, false), (3, false, true), (6, false, true)] {
+            let p = run(n, tail);
+            let text = encode_pack(&p);
+            assert_eq!(text.lines().any(|l| l == "=g"), toggled, "{n} {tail}: {text}");
+            assert_eq!(text.lines().any(|l| l == "="), toggled && tail, "{n} {tail}: {text}");
+            assert_eq!(flags(&text), if toggled { 0 } else { n }, "{n} {tail}: {text}");
+            assert_eq!(decode_pack(&text).expect("decode"), p, "{n} {tail}: {text}");
+        }
+        let reopened = Pack {
+            hits: (0..14).map(|i| located(i, "a.rs", (3..8).contains(&i) || i >= 10)).collect(),
+            omitted: 0,
+        };
+        let text = encode_pack(&reopened);
+        assert_eq!(text.lines().filter(|l| *l == "=g").count(), 2, "{text}");
+        assert_eq!(decode_pack(&text).expect("decode"), reopened);
     }
 
     fn mutate(r: &mut Rng, s: &str, edits: usize) -> String {

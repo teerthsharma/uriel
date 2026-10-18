@@ -148,7 +148,7 @@ fn a_repeat_search_is_at_least_5x_smaller_and_reset_restores_the_text() {
         assert_eq!(x.chunk_id, y.chunk_id, "same hits, same order");
         assert!(y.body.is_none(), "a repeat is a reference: {again}");
     }
-    let bare = format!(">#{}", p1.hits[0].chunk_id);
+    let bare = format!("#{}", p1.hits[0].chunk_id);
     assert!(
         again.lines().any(|l| l.strip_prefix(bare.as_str()).is_some_and(|rest| rest.ends_with('r') && !rest.starts_with(|c: char| c.is_ascii_digit()))),
         "{again}"

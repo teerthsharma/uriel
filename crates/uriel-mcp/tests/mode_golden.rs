@@ -4,8 +4,8 @@ use common::{Proj, Session};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-const TOOLS_WITHOUT_HOUSE: &str = "d99ad326e8962a3b55df7ed0fdeae51b1973f42668024e0015d6e325be64aa16";
-const RAG_RESULTS: &str = "39f85b0277d0161aef02703c1f4c7891611326bc5f9893c728f0fb4322694ba9";
+const TOOLS_WITHOUT_HOUSE: &str = "429d3876967b5ff16660fe7c5eb19182bb9307d2d9514d69de8e1c5221dd0485";
+const RAG_RESULTS: &str = "6e9c48a3f9c1fb1b3bc483e3461c1f1ab43934580dc3a92bffa83bce09137782";
 
 fn digest(text: &str) -> String {
     Sha256::digest(text.as_bytes())

@@ -6,6 +6,7 @@ use std::path::Path;
 use common::Session;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use uriel_mcp::compact::decode_pack;
 
 const WORDS: [&str; 12] = [
     "routes", "frames", "ledger", "window", "cursor", "digest", "packet", "socket", "buffer",
@@ -53,6 +54,31 @@ fn render(x: &Value) -> String {
 {}
 ", x["text"].as_str().expect("text"))
     }
+}
+
+fn cited(compact: &str) -> Vec<(u64, String, u32, u32)> {
+    decode_pack(compact)
+        .expect("a compact pack")
+        .hits
+        .into_iter()
+        .map(|h| (h.chunk_id, h.file, h.start, h.end))
+        .collect()
+}
+
+fn cited_json(sections: &Value) -> Vec<(u64, String, u32, u32)> {
+    sections
+        .as_array()
+        .expect("sections")
+        .iter()
+        .map(|x| {
+            (
+                x["chunk_id"].as_u64().expect("id"),
+                x["file"].as_str().expect("file").to_string(),
+                x["start_line"].as_u64().expect("start") as u32,
+                x["end_line"].as_u64().expect("end") as u32,
+            )
+        })
+        .collect()
 }
 
 fn proxy(text: &str) -> usize {
@@ -113,9 +139,9 @@ fn the_default_call_returns_a_guide_under_the_default_budget_with_an_address_per
     assert!(!compact.is_empty());
     assert!(proxy(&compact) <= 1200, "{}", proxy(&compact));
     let v = s.ok("soul", json!({}));
-    assert_eq!(v["text"], json!(compact));
     let rebuilt: String = v["sections"].as_array().expect("sections").iter().map(render).collect();
-    assert_eq!(rebuilt, compact);
+    assert_eq!(v["text"], json!(rebuilt));
+    assert_eq!(cited(&compact), cited_json(&v["sections"]));
     assert_eq!(v["budget_tokens"], 1200);
     assert!(v["tokens"].as_u64().expect("tokens") <= 1200);
     let sections = v["sections"].as_array().expect("sections");
@@ -128,7 +154,7 @@ fn the_default_call_returns_a_guide_under_the_default_budget_with_an_address_per
             sec["chunk_id"].as_u64().expect("id"),
         );
         assert!(
-            compact.contains(&format!("// {file}:{start}-{end} #{id}")),
+            cited(&compact).contains(&(id, file.to_string(), start as u32, end as u32)),
             "{file}:{start}"
         );
         let expanded = s.text("rag_expand", json!({"chunk_id": id, "level": 0}));
@@ -199,8 +225,9 @@ fn sections_returns_only_the_requested_guide_sections_in_guide_order() {
     assert!(all.len() >= 4);
     let pick = [all[2]["chunk_id"].as_u64().expect("id"), all[0]["chunk_id"].as_u64().expect("id")];
     let compact = s.text("soul", json!({"budget_tokens": 600, "sections": pick}));
-    let want: String = [&all[0], &all[2]].iter().map(|x| render(x)).collect();
-    assert_eq!(compact, want);
+    assert_eq!(cited(&compact), cited_json(&json!([all[0], all[2]])));
+    let bodies: Vec<String> = decode_pack(&compact).expect("pack").hits.into_iter().filter_map(|h| h.body).collect();
+    assert_eq!(bodies, [&all[0], &all[2]].iter().map(|x| x["text"].as_str().expect("text").to_string()).collect::<Vec<_>>());
     let one = s.ok("soul", json!({"budget_tokens": 600, "sections": [pick[0]]}));
     let listed = one["sections"].as_array().expect("sections");
     assert_eq!(listed.len(), 1);
