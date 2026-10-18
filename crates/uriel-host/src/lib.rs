@@ -22,7 +22,7 @@ pub use message::{
 };
 pub use uriel_core::Value;
 pub use uriel_query::{AccessMode, QueryResult, QueryStats};
-pub use uriel_rag::{ContextPack, Hit, HitVia, SearchOptions};
+pub use uriel_rag::{ContextPack, Hit, HitVia, IndexReport, SearchOptions};
 pub use stats::{BufferGauge, HostStats};
 #[cfg(windows)]
 pub use pipe::{pipe_path, PipeTransport};

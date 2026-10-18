@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 
 use uriel_core::{MemoryBudget, Value};
 use uriel_query::{AccessMode, Engine, QueryResult};
-use uriel_rag::{ContextPack, IndexOptions, Rag, RagConfig, SearchOptions};
+use uriel_rag::{ContextPack, IndexOptions, IndexReport, Rag, RagConfig, SearchOptions};
 use uriel_sys::{Arena, Slab, Width};
 
 use crate::codec::DEFAULT_MAX_FRAME;
@@ -80,6 +80,9 @@ struct Counters {
 pub(crate) struct HostInner {
     engine: Engine,
     rag: Rag,
+    root: PathBuf,
+    indexed: Mutex<bool>,
+    index_passes: AtomicU64,
     arena: Mutex<Arena>,
     port_file: PathBuf,
     counters: Counters,
@@ -165,7 +168,7 @@ impl HostInner {
                 Ok(result) => Response::Query(result),
                 Err(e) => Response::error(ErrorCode::Query, e.to_string()),
             },
-            Request::Search { query, opts } => match self.rag.pack(query, opts) {
+            Request::Search { query, opts } => match self.search(query, opts) {
                 Ok(pack) => Response::Search(pack),
                 Err(e) => Response::error(ErrorCode::Search, e.to_string()),
             },
@@ -175,6 +178,22 @@ impl HostInner {
             },
             Request::Ping { nonce } => Response::Pong { nonce: *nonce },
         }
+    }
+
+    fn search(&self, query: &str, opts: &SearchOptions) -> Result<ContextPack, HostError> {
+        self.index_pass(true)?;
+        Ok(self.rag.pack(query, opts)?)
+    }
+
+    fn index_pass(&self, only_if_pending: bool) -> Result<Option<IndexReport>, HostError> {
+        let mut indexed = lock(&self.indexed);
+        if only_if_pending && *indexed {
+            return Ok(None);
+        }
+        let report = self.rag.index_dir(&self.root, &IndexOptions::default())?;
+        self.index_passes.fetch_add(1, Ordering::SeqCst);
+        *indexed = true;
+        Ok(Some(report))
     }
 
     fn stats(&self) -> Result<HostStats, HostError> {
@@ -331,12 +350,14 @@ impl Host {
         let arena = Arena::with_cap(cfg.hot_cap_bytes)?;
         let engine = Engine::open(&cfg.db_path, cfg.memory)?;
         let rag = Rag::open(engine.graph().clone(), RagConfig::default())?;
-        rag.index_dir(&cfg.root, &IndexOptions::default())?;
         let port_file = port_file_for(&cfg);
         Ok(Host {
             inner: Arc::new(HostInner {
                 engine,
                 rag,
+                root: cfg.root.clone(),
+                indexed: Mutex::new(false),
+                index_passes: AtomicU64::new(0),
                 arena: Mutex::new(arena),
                 port_file,
                 counters: Counters::default(),
@@ -366,11 +387,22 @@ impl Host {
     }
 
     pub fn search(&self, query: &str, opts: &SearchOptions) -> Result<ContextPack, HostError> {
-        Ok(self.inner.rag.pack(query, opts)?)
+        self.inner.search(query, opts)
     }
 
     pub fn stats(&self) -> Result<HostStats, HostError> {
         self.inner.stats()
+    }
+
+    pub fn index(&self) -> Result<IndexReport, HostError> {
+        match self.inner.index_pass(false)? {
+            Some(report) => Ok(report),
+            None => Err(HostError::Unexpected("index pass skipped")),
+        }
+    }
+
+    pub fn index_passes(&self) -> u64 {
+        self.inner.index_passes.load(Ordering::SeqCst)
     }
 
     pub fn shutdown(&self) {
