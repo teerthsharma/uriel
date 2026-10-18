@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use uriel_core::{ConstraintKind, NodeId, Props, Value};
-use uriel_rag::{Hit, HitVia, IndexOptions, Level, Rag, SearchOptions};
+use uriel_rag::{Hit, HitVia, IndexOptions, Level, Rag, SearchOptions, MEMORY_PREFIX};
 use serde_json::{json, Value as Json};
 
 use crate::compact::{encode_pack, Pack, PackHit};
@@ -12,7 +12,6 @@ use crate::tools::{
     str_prop, Context, ToolDef, ToolResult,
 };
 
-const MEMORY_PREFIX: &str = "memory/";
 const DEFAULT_K: usize = 8;
 const DEFAULT_BUDGET: usize = 2000;
 

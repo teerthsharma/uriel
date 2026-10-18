@@ -541,3 +541,36 @@ fn invalid_options_are_errors() {
     };
     assert!(Rag::open(Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("g"), cfg).is_err());
 }
+
+const FINDING: &str = "Decision: cap payment gateway retries at five because the rate limiter bursts after ten seconds.";
+
+fn text_rag() -> Rag {
+    Rag::open(
+        Graph::open_in_memory(uriel_core::MemoryBudget::mib(80)).expect("graph"),
+        RagConfig::default(),
+    )
+    .expect("rag")
+}
+
+#[test]
+fn a_remembered_finding_keeps_its_whole_text_in_the_memory() {
+    let rag = text_rag();
+    rag.index_text(&format!("{}finding-1.md", uriel_rag::MEMORY_PREFIX), FINDING)
+        .expect("index");
+    let hits = rag
+        .search("why cap payment gateway retries", &SearchOptions::default())
+        .expect("search");
+    assert_eq!(hits[0].memory, FINDING);
+    let text = rag.expand_level(hits[0].chunk_id, uriel_rag::Level::L1).expect("l1");
+    assert_eq!(text, FINDING);
+}
+
+#[test]
+fn the_same_text_outside_the_memory_prefix_is_still_compressed() {
+    let rag = text_rag();
+    rag.index_text("notes/finding-1.md", FINDING).expect("index");
+    let hits = rag
+        .search("why cap payment gateway retries", &SearchOptions::default())
+        .expect("search");
+    assert!(hits[0].memory.chars().count() * 4 <= FINDING.chars().count(), "{:?}", hits[0].memory);
+}

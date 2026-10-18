@@ -153,9 +153,9 @@ fn a_grown_transcript_adds_the_new_tail_and_keeps_the_old_head() {
     assert_eq!(stderr_lines(&second), 0, "{}", String::from_utf8_lossy(&second.stderr));
     let rag = open_rag(&db);
     let late = rag
-        .search("zeppelin handshake dusk", &SearchOptions::default())
+        .search("ctx turns 41 50", &SearchOptions::default())
         .expect("search");
-    assert!(late.first().is_some_and(|h| h.file.starts_with("ctx/sess-1/")), "{late:?}");
+    assert!(late.first().is_some_and(|h| h.file.ends_with("/2.md")), "{late:?}");
     drop(rag);
     assert!(needle_files(&db).first().is_some_and(|f| f.starts_with("ctx/sess-1/")));
 }

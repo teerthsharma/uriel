@@ -79,9 +79,9 @@ fn view(rag: &Rag, format: Format, budget: usize, islands: bool) -> String {
     run_view(rag, &request(format, budget, islands)).expect("view")
 }
 
-const GOLDEN_COMPACT_600: &str = "#5 omit=3\n>orphan.txt:1-4#8L1 orphan entry number 1 records the orphan state for orphan audit\n>cursor.txt:1-4#5L2 cursor entry number 1 records the cursor state\n>5-8#6L2 cursor entry number 5 records the cursor state\n>vault.txt:1-4#10L2 vault entry number 1 records the vault state\n>tally.txt:1-4#12 tally entry number 1 records the tally state for tally audit -- tally entry number 2 records\n";
-const GOLDEN_COMPACT_40: &str = "#2 omit=6\n>cursor.txt:1-4#5L1 cursor entry number 1 records the cursor state for cursor audit\n>vault.txt:1-4#10L2 vault entry number 1 records the vault state\n";
-const GOLDEN_JSON_600: &str = r##"{"budget_tokens":600,"candidates":8,"hits":[{"chunk_id":8,"end_line":4,"file":"orphan.txt","level":1,"score":0.032786883413791656,"start_line":1},{"chunk_id":5,"end_line":4,"file":"cursor.txt","level":2,"score":0.0317540317773819,"start_line":1},{"chunk_id":6,"end_line":8,"file":"cursor.txt","level":2,"score":0.03125763311982155,"start_line":5},{"chunk_id":10,"end_line":4,"file":"vault.txt","level":2,"score":0.03083491325378418,"start_line":1},{"chunk_id":12,"end_line":4,"file":"tally.txt","level":3,"score":0.03079839050769806,"start_line":1}],"omitted":3,"selected":5,"text":"// orphan.txt:1-4 #8\norphan entry number 1 records the orphan state for orphan audit\n// cursor.txt:1-4 #5\ncursor entry number 1 records the cursor state\n// cursor.txt:5-8 #6\ncursor entry number 5 records the cursor state\n// vault.txt:1-4 #10\nvault entry number 1 records the vault state\n// tally.txt:1-4 #12 tally entry number 1 records the tally state for tally audit -- tally entry number 2 records\n","tokens":101}"##;
+const GOLDEN_COMPACT_600: &str = "#6 omit=2\n>orphan.txt:1-4#8L1 orphan entry number 1 records the orphan state for orphan audit\n>vault.txt:1-4#10L2 vault entry\n>tally.txt:1-4#12L2 tally entry\n>cursor.txt:1-4#5L2 cursor entry\n>ledger.txt:1-4#1 ledger entry number 1 records the ledger state for ledger audit -- ledger entry number 2\n>5-8#2 ledger entry number 5 records the ledger state for ledger audit -- ledger entry number 6\n";
+const GOLDEN_COMPACT_40: &str = "#4 omit=4\n>orphan.txt:1-4#8L2 orphan entry\n>vault.txt:1-4#10L2 vault entry\n>tally.txt:1-4#12L2 tally entry\n>cursor.txt:1-4#5L2 cursor entry\n";
+const GOLDEN_JSON_600: &str = r##"{"budget_tokens":600,"candidates":8,"hits":[{"chunk_id":8,"end_line":4,"file":"orphan.txt","level":1,"score":1.5,"start_line":1},{"chunk_id":10,"end_line":4,"file":"vault.txt","level":2,"score":1.4765625,"start_line":1},{"chunk_id":12,"end_line":4,"file":"tally.txt","level":2,"score":1.4692307710647583,"start_line":1},{"chunk_id":5,"end_line":4,"file":"cursor.txt","level":2,"score":1.2068383693695068,"start_line":1},{"chunk_id":1,"end_line":4,"file":"ledger.txt","level":3,"score":0.9892352819442749,"start_line":1},{"chunk_id":2,"end_line":8,"file":"ledger.txt","level":3,"score":0.9823379516601562,"start_line":5}],"omitted":2,"selected":6,"text":"// orphan.txt:1-4 #8\norphan entry number 1 records the orphan state for orphan audit\n// vault.txt:1-4 #10\nvault entry\n// tally.txt:1-4 #12\ntally entry\n// cursor.txt:1-4 #5\ncursor entry\n// ledger.txt:1-4 #1 ledger entry number 1 records the ledger state for ledger audit -- ledger entry number 2\n// ledger.txt:5-8 #2 ledger entry number 5 records the ledger state for ledger audit -- ledger entry number 6\n","tokens":102}"##;
 
 fn sections(compact: &str) -> Vec<&str> {
     let bytes = compact.as_bytes();
@@ -290,5 +290,22 @@ fn budget_shares_are_proportional_to_the_summed_hit_scores_in_integer_arithmetic
         .iter()
         .map(|i| i["budget_tokens"].as_u64().expect("budget"))
         .collect();
-    assert_eq!(shares, [228, 152, 220]);
+    let island_of = |file: &str| match file {
+        "orphan.txt" | "vault.txt" | "tally.txt" => 0,
+        "cursor.txt" => 1,
+        _ => 2,
+    };
+    let mut weights = [0u128; 3];
+    for h in candidates(&rag) {
+        weights[island_of(&h.file)] += u128::from(((h.score.max(0.0) * 1_000_000.0) as u64).max(1));
+    }
+    let total: u128 = weights.iter().sum();
+    let mut want: Vec<u64> = weights.iter().map(|w| (600 * w / total) as u64).collect();
+    let mut order: Vec<usize> = (0..3).collect();
+    order.sort_by_key(|&i| (std::cmp::Reverse(600 * weights[i] % total), i));
+    for &i in order.iter().take(600 - want.iter().sum::<u64>() as usize) {
+        want[i] += 1;
+    }
+    assert_eq!(shares, want);
+    assert_eq!(shares.iter().sum::<u64>(), 600);
 }

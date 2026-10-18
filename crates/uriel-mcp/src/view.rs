@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use uriel_algo::{bucket_islands, island_labels, Projection};
-use uriel_rag::{Embedder, HashEmbedder, Hit, HitVia, LadderPack, Rag, SearchOptions};
+use uriel_rag::{
+    Embedder, HashEmbedder, Hit, HitVia, LadderPack, Rag, SearchOptions, MEMORY_PREFIX,
+};
 use uriel_topo::persistence::Metric;
 use uriel_topo::schedule::{schedule_row, select_row, Blocks, ScheduleParams};
 use serde_json::{json, Value as Json};
@@ -12,7 +14,6 @@ use crate::tools::{
     format_arg, format_prop, object, opt_bool, req_str, str_prop, Context, ToolDef, ToolResult,
 };
 
-const MEMORY_PREFIX: &str = "memory/";
 const DEFAULT_K: u64 = 12;
 const MAX_K: u64 = 256;
 const SINK_BLOCKS: usize = 1;

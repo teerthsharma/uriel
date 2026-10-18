@@ -11,10 +11,8 @@ use std::time::Duration;
 use common::{fixture, wait_until};
 use uriel_host::{Client, Host, PipeTransport, Request, ServeConfig, DEFAULT_MAX_FRAME};
 
-const UTIL_PY: &str = "import json
-
-
-def parse_config(path):
+const UTIL_PY: &str = "def parse_config(path):
+    import json
     with open(path) as handle:
         return json.load(handle)
 ";
