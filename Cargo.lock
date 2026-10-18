@@ -983,6 +983,7 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "thiserror",
+ "tokio",
  "uriel-core",
  "uriel-query",
  "uriel-rag",

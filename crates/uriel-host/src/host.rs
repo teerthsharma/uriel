@@ -85,6 +85,10 @@ pub(crate) struct HostInner {
     counters: Counters,
     stopping: AtomicBool,
     listening: AtomicBool,
+    #[cfg(windows)]
+    pipe_listening: AtomicBool,
+    #[cfg(windows)]
+    pipe_path: String,
     dispatcher: Mutex<Option<Arc<Dispatcher>>>,
     hook: RwLock<Option<HandlerHook>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -282,6 +286,24 @@ impl HostInner {
         }
     }
 
+    #[cfg(windows)]
+    fn listen_pipe(self: &Arc<Self>) -> Result<String, HostError> {
+        let dispatcher = self.dispatcher()?;
+        if self.pipe_listening.swap(true, Ordering::SeqCst) {
+            return Err(HostError::AlreadyServing);
+        }
+        match crate::pipe::start(self, self.pipe_path.clone(), dispatcher.max_frame()) {
+            Ok(handle) => {
+                lock(&self.threads).push(handle);
+                Ok(self.pipe_path.clone())
+            }
+            Err(e) => {
+                self.pipe_listening.store(false, Ordering::SeqCst);
+                Err(e)
+            }
+        }
+    }
+
     fn shutdown(&self) {
         let _gate = lock(&self.shutdown_gate);
         self.stopping.store(true, Ordering::SeqCst);
@@ -320,6 +342,10 @@ impl Host {
                 counters: Counters::default(),
                 stopping: AtomicBool::new(false),
                 listening: AtomicBool::new(false),
+                #[cfg(windows)]
+                pipe_listening: AtomicBool::new(false),
+                #[cfg(windows)]
+                pipe_path: crate::pipe::pipe_path(&cfg.sock_name),
                 dispatcher: Mutex::new(None),
                 hook: RwLock::new(None),
                 threads: Mutex::new(Vec::new()),
@@ -373,6 +399,16 @@ impl Host {
 
     pub fn listen_tcp(&self) -> Result<SocketAddr, HostError> {
         self.inner.listen_tcp()
+    }
+
+    #[cfg(windows)]
+    pub fn listen_pipe(&self) -> Result<String, HostError> {
+        self.inner.listen_pipe()
+    }
+
+    #[cfg(windows)]
+    pub fn pipe_path(&self) -> String {
+        self.inner.pipe_path.clone()
     }
 
     pub fn port_file(&self) -> PathBuf {

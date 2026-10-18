@@ -87,7 +87,7 @@ fn is_disconnect(kind: ErrorKind) -> bool {
     )
 }
 
-fn map_io(e: std::io::Error) -> HostError {
+pub(crate) fn map_io(e: std::io::Error) -> HostError {
     if is_disconnect(e.kind()) {
         HostError::Closed
     } else {
