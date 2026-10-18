@@ -395,3 +395,38 @@ fn dropping_the_host_with_clients_attached_returns() {
     probe.expect_closed();
     drop(dir);
 }
+
+fn python_on_path() -> bool {
+    std::process::Command::new("python")
+        .arg("--version")
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn the_python_reference_client_round_trips_against_a_live_pipe() {
+    if !python_on_path() {
+        eprintln!("SKIPPED: `python` is not on PATH, the reference client was not exercised");
+        return;
+    }
+    let (_dir, _host, path) = gate_host("python");
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("clients")
+        .join("uriel_client.py");
+    let output = within(60, move || {
+        std::process::Command::new("python")
+            .arg("-I")
+            .arg(script)
+            .arg(path)
+            .arg("rolling sum over a byte buffer")
+            .output()
+            .expect("run python client")
+    });
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "python client failed: {stderr}");
+    assert!(stdout.contains("\"pong\": true"), "{stdout}");
+    assert!(stdout.contains("\"top_file\": \"a.rs\""), "{stdout}");
+    assert!(stdout.contains("\"files\": 2"), "{stdout}");
+}
