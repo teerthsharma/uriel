@@ -8,6 +8,7 @@ mod error;
 pub mod eval;
 mod index;
 mod ladder;
+mod links;
 mod scan;
 mod tokenize;
 
