@@ -4,7 +4,11 @@ fn reference(values: &[u8], need: usize, cap: usize) -> Vec<Stop> {
     let mut out = Vec::new();
     let mut streak = 0;
     for (i, v) in values.iter().enumerate() {
-        streak = if i > 0 && values[i - 1] == *v { streak + 1 } else { 1 };
+        streak = if i > 0 && values[i - 1] == *v {
+            streak + 1
+        } else {
+            1
+        };
         out.push(if streak >= need {
             Stop::Converged
         } else if i + 1 >= cap {
@@ -31,10 +35,7 @@ fn two_equal_observations_in_a_row_converge_on_the_second() {
 
 #[test]
 fn equal_observations_that_are_not_consecutive_do_not_converge() {
-    assert_eq!(
-        drive(&[1, 2, 1, 2, 1], 2, 10),
-        vec![Stop::Continue; 5]
-    );
+    assert_eq!(drive(&[1, 2, 1, 2, 1], 2, 10), vec![Stop::Continue; 5]);
 }
 
 #[test]
@@ -58,7 +59,10 @@ fn convergence_on_the_cap_th_observation_wins_over_the_cap() {
 #[test]
 fn a_zero_need_or_cap_behaves_as_one() {
     assert_eq!(drive(&[1], 0, 5), vec![Stop::Converged]);
-    assert_eq!(drive(&[1, 2], 2, 0), vec![Stop::CapReached, Stop::CapReached]);
+    assert_eq!(
+        drive(&[1, 2], 2, 0),
+        vec![Stop::CapReached, Stop::CapReached]
+    );
 }
 
 #[test]
@@ -67,7 +71,9 @@ fn observing_agrees_with_the_reference_on_random_sequences() {
     for _ in 0..4000 {
         let len = 1 + (rng.next_u64() % 16) as usize;
         let alphabet = 1 + rng.next_u64() % 3;
-        let values: Vec<u8> = (0..len).map(|_| (rng.next_u64() % alphabet) as u8).collect();
+        let values: Vec<u8> = (0..len)
+            .map(|_| (rng.next_u64() % alphabet) as u8)
+            .collect();
         let need = 1 + (rng.next_u64() % 4) as usize;
         let cap = 1 + (rng.next_u64() % 12) as usize;
         assert_eq!(
