@@ -7,7 +7,7 @@ use std::thread::{self, JoinHandle};
 
 use uriel_core::{MemoryBudget, Value};
 use uriel_query::{AccessMode, Engine, QueryResult};
-use uriel_rag::{ContextPack, IndexOptions, Rag, RagConfig, SearchOptions};
+use uriel_rag::{ContextPack, IndexOptions, IndexReport, Rag, RagConfig, SearchOptions};
 use uriel_sys::{Arena, Slab, Width};
 
 use crate::codec::DEFAULT_MAX_FRAME;
@@ -80,11 +80,18 @@ struct Counters {
 pub(crate) struct HostInner {
     engine: Engine,
     rag: Rag,
+    root: PathBuf,
+    indexed: Mutex<bool>,
+    index_passes: AtomicU64,
     arena: Mutex<Arena>,
     port_file: PathBuf,
     counters: Counters,
     stopping: AtomicBool,
     listening: AtomicBool,
+    #[cfg(windows)]
+    pipe_listening: AtomicBool,
+    #[cfg(windows)]
+    pipe_path: String,
     dispatcher: Mutex<Option<Arc<Dispatcher>>>,
     hook: RwLock<Option<HandlerHook>>,
     threads: Mutex<Vec<JoinHandle<()>>>,
@@ -161,7 +168,7 @@ impl HostInner {
                 Ok(result) => Response::Query(result),
                 Err(e) => Response::error(ErrorCode::Query, e.to_string()),
             },
-            Request::Search { query, opts } => match self.rag.pack(query, opts) {
+            Request::Search { query, opts } => match self.search(query, opts) {
                 Ok(pack) => Response::Search(pack),
                 Err(e) => Response::error(ErrorCode::Search, e.to_string()),
             },
@@ -171,6 +178,22 @@ impl HostInner {
             },
             Request::Ping { nonce } => Response::Pong { nonce: *nonce },
         }
+    }
+
+    fn search(&self, query: &str, opts: &SearchOptions) -> Result<ContextPack, HostError> {
+        self.index_pass(true)?;
+        Ok(self.rag.pack(query, opts)?)
+    }
+
+    fn index_pass(&self, only_if_pending: bool) -> Result<Option<IndexReport>, HostError> {
+        let mut indexed = lock(&self.indexed);
+        if only_if_pending && *indexed {
+            return Ok(None);
+        }
+        let report = self.rag.index_dir(&self.root, &IndexOptions::default())?;
+        self.index_passes.fetch_add(1, Ordering::SeqCst);
+        *indexed = true;
+        Ok(Some(report))
     }
 
     fn stats(&self) -> Result<HostStats, HostError> {
@@ -282,6 +305,24 @@ impl HostInner {
         }
     }
 
+    #[cfg(windows)]
+    fn listen_pipe(self: &Arc<Self>) -> Result<String, HostError> {
+        let dispatcher = self.dispatcher()?;
+        if self.pipe_listening.swap(true, Ordering::SeqCst) {
+            return Err(HostError::AlreadyServing);
+        }
+        match crate::pipe::start(self, self.pipe_path.clone(), dispatcher.max_frame()) {
+            Ok(handle) => {
+                lock(&self.threads).push(handle);
+                Ok(self.pipe_path.clone())
+            }
+            Err(e) => {
+                self.pipe_listening.store(false, Ordering::SeqCst);
+                Err(e)
+            }
+        }
+    }
+
     fn shutdown(&self) {
         let _gate = lock(&self.shutdown_gate);
         self.stopping.store(true, Ordering::SeqCst);
@@ -309,17 +350,23 @@ impl Host {
         let arena = Arena::with_cap(cfg.hot_cap_bytes)?;
         let engine = Engine::open(&cfg.db_path, cfg.memory)?;
         let rag = Rag::open(engine.graph().clone(), RagConfig::default())?;
-        rag.index_dir(&cfg.root, &IndexOptions::default())?;
         let port_file = port_file_for(&cfg);
         Ok(Host {
             inner: Arc::new(HostInner {
                 engine,
                 rag,
+                root: cfg.root.clone(),
+                indexed: Mutex::new(false),
+                index_passes: AtomicU64::new(0),
                 arena: Mutex::new(arena),
                 port_file,
                 counters: Counters::default(),
                 stopping: AtomicBool::new(false),
                 listening: AtomicBool::new(false),
+                #[cfg(windows)]
+                pipe_listening: AtomicBool::new(false),
+                #[cfg(windows)]
+                pipe_path: crate::pipe::pipe_path(&cfg.sock_name),
                 dispatcher: Mutex::new(None),
                 hook: RwLock::new(None),
                 threads: Mutex::new(Vec::new()),
@@ -340,11 +387,22 @@ impl Host {
     }
 
     pub fn search(&self, query: &str, opts: &SearchOptions) -> Result<ContextPack, HostError> {
-        Ok(self.inner.rag.pack(query, opts)?)
+        self.inner.search(query, opts)
     }
 
     pub fn stats(&self) -> Result<HostStats, HostError> {
         self.inner.stats()
+    }
+
+    pub fn index(&self) -> Result<IndexReport, HostError> {
+        match self.inner.index_pass(false)? {
+            Some(report) => Ok(report),
+            None => Err(HostError::Unexpected("index pass skipped")),
+        }
+    }
+
+    pub fn index_passes(&self) -> u64 {
+        self.inner.index_passes.load(Ordering::SeqCst)
     }
 
     pub fn shutdown(&self) {
@@ -373,6 +431,16 @@ impl Host {
 
     pub fn listen_tcp(&self) -> Result<SocketAddr, HostError> {
         self.inner.listen_tcp()
+    }
+
+    #[cfg(windows)]
+    pub fn listen_pipe(&self) -> Result<String, HostError> {
+        self.inner.listen_pipe()
+    }
+
+    #[cfg(windows)]
+    pub fn pipe_path(&self) -> String {
+        self.inner.pipe_path.clone()
     }
 
     pub fn port_file(&self) -> PathBuf {

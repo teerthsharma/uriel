@@ -507,3 +507,65 @@ fn shutdown_is_idempotent_and_runs_on_drop() {
     assert!(Host::open(again).is_ok());
 }
 
+
+#[test]
+fn open_leaves_the_root_alone_and_the_first_search_indexes_once() {
+    let (_dir, host) = open_host("lazy-search");
+    assert_eq!(host.index_passes(), 0);
+    let before = host.stats().expect("stats before");
+    assert_eq!((before.files, before.chunks), (0, 0));
+
+    let opts = SearchOptions::default();
+    let pack = host
+        .search("rolling sum over a byte buffer", &opts)
+        .expect("first search");
+    assert_eq!(pack.hits[0].file, "a.rs");
+    assert_eq!(host.index_passes(), 1);
+    assert_eq!(host.stats().expect("stats after").files, 2);
+
+    host.search("rolling sum over a byte buffer", &opts)
+        .expect("second search");
+    assert_eq!(host.index_passes(), 1);
+}
+
+#[test]
+fn first_remote_search_triggers_the_index_pass() {
+    let (_dir, host) = open_host("lazy-remote");
+    let mut client = channel_client(&host);
+    assert_eq!(client.stats().expect("stats").files, 0);
+    assert_eq!(host.index_passes(), 0);
+    let pack = client
+        .search("rolling sum over a byte buffer", &SearchOptions::default())
+        .expect("search");
+    assert_eq!(pack.hits[0].file, "a.rs");
+    assert_eq!(host.index_passes(), 1);
+}
+
+#[test]
+fn explicit_index_reports_the_files_read_and_spares_the_first_search() {
+    let (_dir, host) = open_host("lazy-explicit");
+    let report = host.index().expect("index");
+    assert_eq!(report.files_scanned, 2);
+    assert_eq!(report.files_indexed, 2);
+    assert_eq!(host.index_passes(), 1);
+    host.search("rolling sum over a byte buffer", &SearchOptions::default())
+        .expect("search");
+    assert_eq!(host.index_passes(), 1);
+    let again = host.index().expect("second index");
+    assert_eq!(again.files_unchanged, 2);
+    assert_eq!(host.index_passes(), 2);
+}
+
+#[test]
+fn a_failed_index_pass_is_retried_by_the_next_search() {
+    let (dir, host) = open_host("lazy-retry");
+    let root = dir.path().join("src");
+    let moved = dir.path().join("moved");
+    std::fs::rename(&root, &moved).expect("move root away");
+    assert!(host.search("rolling sum", &SearchOptions::default()).is_err());
+    assert_eq!(host.index_passes(), 0);
+    std::fs::rename(&moved, &root).expect("restore root");
+    host.search("rolling sum", &SearchOptions::default())
+        .expect("search after restore");
+    assert_eq!(host.index_passes(), 1);
+}

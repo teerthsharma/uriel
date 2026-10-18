@@ -1,6 +1,6 @@
 [package]
 name = "uriel-host"
-description = "Embedding API for host processes: engine in-process, framed binary protocol over loopback TCP or in-process channels"
+description = "Embedding API for host processes: engine in-process, framed binary protocol over loopback TCP, a Windows named pipe or in-process channels"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,9 @@ uriel-query = { path = "../uriel-query" }
 uriel-rag = { path = "../uriel-rag" }
 uriel-sys = { path = "../uriel-sys" }
 thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "io-util"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
