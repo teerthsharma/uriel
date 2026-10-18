@@ -233,6 +233,7 @@ impl House {
         inner.store.flush(&mut inner.state, &self.cfg.project_root)
     }
 
+    #[allow(missing_docs)]
     pub fn need(
         &self,
         project: &str,
