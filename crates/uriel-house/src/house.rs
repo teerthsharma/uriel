@@ -233,8 +233,6 @@ impl House {
         inner.store.flush(&mut inner.state, &self.cfg.project_root)
     }
 
-    /// Creates a Need. The first is `G0`; the n-th later one is `N<n>.G0`, and every goal id
-    /// of that Need lives under the same `N<n>.` prefix.
     pub fn need(
         &self,
         project: &str,
