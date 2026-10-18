@@ -10,6 +10,7 @@ mod index;
 mod ladder;
 mod links;
 mod scan;
+mod soul;
 mod tokenize;
 
 use std::collections::{BTreeMap, HashSet};
@@ -31,6 +32,7 @@ use crate::tokenize::token_estimate;
 pub use crate::embed::{Embedder, HashEmbedder};
 pub use crate::error::RagError;
 pub use crate::ladder::Level;
+pub use crate::soul::{Soul, SoulOptions, SoulSection};
 
 const SKIP_DIRS: &[&str] = &[".git", "target", "node_modules"];
 const UTILITY_ALPHA: f32 = 0.3;

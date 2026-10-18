@@ -1056,6 +1056,7 @@ dependencies = [
 name = "uriel-rag"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
