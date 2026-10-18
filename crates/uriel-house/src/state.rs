@@ -172,6 +172,20 @@ impl State {
         }
     }
 
+    pub fn owns(&self, sel: Option<&GoalId>, goal: &GoalId) -> Result<(), HouseError> {
+        if self.needs.is_empty() {
+            return Ok(());
+        }
+        let idx = self.target(sel)?;
+        if goal.need_ordinal() == idx + 1 {
+            return Ok(());
+        }
+        Err(HouseError::Invalid(format!(
+            "{goal} does not belong to need {}; pass the `need` it belongs to",
+            self.needs[idx].id
+        )))
+    }
+
     pub fn is_complete(&self, idx: usize) -> bool {
         self.goals
             .get(&self.needs[idx].id)

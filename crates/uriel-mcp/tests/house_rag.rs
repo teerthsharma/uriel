@@ -1359,3 +1359,72 @@ fn house_status_with_a_need_argument_describes_that_need() {
     let newest = s.ok("house_status", json!({}));
     assert_eq!(newest["need"]["id"], "N2.G0", "{newest}");
 }
+
+#[test]
+fn house_report_for_a_goal_of_another_need_is_a_tool_error_unless_the_need_is_named() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    two_needs_merged(&mut s);
+    s.ok("house_next", json!({"need": "G0"}));
+    let e = s.err("house_report", json!({"goal": "G1", "status": "blocked"}));
+    assert!(e.contains("does not belong"), "{e}");
+    let e = s.err(
+        "house_report",
+        json!({"goal": "G1", "status": "blocked", "need": "N2.G0"}),
+    );
+    assert!(e.contains("does not belong"), "{e}");
+    let r = s.ok(
+        "house_report",
+        json!({"goal": "G1", "status": "blocked", "need": "G0"}),
+    );
+    assert_eq!(r["outcome"], "Recorded", "{r}");
+}
+
+#[test]
+fn house_test_run_and_leap_take_the_need_of_their_goal() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    two_needs_merged(&mut s);
+    let e = s.err("house_test_run", json!({"test": "t_G1", "status": "red"}));
+    assert!(e.contains("does not belong"), "{e}");
+    s.ok(
+        "house_test_run",
+        json!({"test": "t_G1", "status": "red", "need": "G0"}),
+    );
+    let e = s.err("house_leap", json!({"goal": "G1", "cause": "x"}));
+    assert!(e.contains("does not belong"), "{e}");
+    let r = s.ok("house_leap", json!({"goal": "G1", "cause": "x", "need": "G0"}));
+    assert_eq!(r["leap"], false, "{r}");
+}
+
+#[test]
+fn house_select_tests_defaults_to_the_newest_need_and_takes_a_need_argument() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    two_needs_merged(&mut s);
+    let names = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .expect("picks")
+            .iter()
+            .map(|x| x["test"].as_str().expect("test").to_string())
+            .collect()
+    };
+    let newest = s.ok("house_select_tests", json!({"files": ["src/a.rs"]}));
+    assert_eq!(names(&newest), ["t_N2_G1", "t_N2_G2"], "{newest}");
+    let first = s.ok(
+        "house_select_tests",
+        json!({"files": ["src/a.rs"], "need": "G0"}),
+    );
+    assert_eq!(names(&first), ["t_G1", "t_G2"], "{first}");
+}
+
+#[test]
+fn house_fact_refuting_a_goal_of_another_need_is_a_tool_error() {
+    let p = Proj::new();
+    let mut s = p.session(&[], &[]);
+    two_needs_merged(&mut s);
+    let fact = json!({"refutes": "G1", "source": "x:1", "text": "dead"});
+    let e = s.err("house_fact", json!({"fact": fact}));
+    assert!(e.contains("does not belong"), "{e}");
+    s.ok("house_fact", json!({"fact": fact, "need": "G0"}));
+}

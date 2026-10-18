@@ -57,8 +57,10 @@ pub enum HouseCall {
         goal: GoalId,
         status: GoalStatus,
         evidence: TestEvidence,
+        need: Option<GoalId>,
     },
     RecordTestRun {
+        need: Option<GoalId>,
         test: String,
         status: TestStatus,
         secs: f64,

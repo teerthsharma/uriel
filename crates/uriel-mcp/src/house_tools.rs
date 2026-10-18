@@ -71,6 +71,7 @@ fn report_schema() -> Json {
     object(
         json!({
             "goal": str_prop("Goal id."),
+            "need": need_prop(),
             "status": {"type": "string", "enum": ["reached", "blocked", "pending"],
                 "description": "`reached` is accepted only if the bound test's first recorded run was RED."},
             "evidence": {
@@ -93,6 +94,7 @@ fn test_run_schema() -> Json {
     object(
         json!({
             "test": str_prop("Name of a bound test."),
+            "need": need_prop(),
             "status": {"type": "string", "enum": ["red", "green"]},
             "secs": {"type": "number", "minimum": 0, "description": "Wall-clock seconds."},
             "peak_ram_mb": {"type": "integer", "minimum": 0, "description": "Measured peak RSS in MB; feeds the cost model."},
@@ -106,6 +108,7 @@ fn leap_schema() -> Json {
     object(
         json!({
             "goal": str_prop("A leap-candidate goal id (see house_status.leap_candidates)."),
+            "need": need_prop(),
             "cause": str_prop("Cause of death of the theory.")
         }),
         &["goal", "cause"],
@@ -114,7 +117,7 @@ fn leap_schema() -> Json {
 
 fn select_schema() -> Json {
     object(
-        json!({"files": str_list("Files that changed.")}),
+        json!({"need": need_prop(), "files": str_list("Files that changed.")}),
         &["files"],
     )
 }
@@ -408,7 +411,7 @@ fn report(ctx: &Context, args: &Json) -> ToolResult {
         }
     };
     let out = house(ctx)?
-        .report(&goal, status, evidence)
+        .report_in(need_arg(args)?.as_ref(), &goal, status, evidence)
         .map_err(|e| e.to_string())?;
     let body = to_json(&out)?.to_string();
     match out.outcome {
@@ -435,7 +438,7 @@ fn test_run(ctx: &Context, args: &Json) -> ToolResult {
     };
     let covered = opt_strings(args, "covered_files")?;
     house(ctx)?
-        .record_test_run(test, status, secs, ram, &covered)
+        .record_test_run_in(need_arg(args)?.as_ref(), test, status, secs, ram, &covered)
         .map_err(|e| e.to_string())?;
     Ok(json!({"recorded": true, "test": test, "status": status.name()}).to_string())
 }
@@ -443,7 +446,11 @@ fn test_run(ctx: &Context, args: &Json) -> ToolResult {
 fn leap(ctx: &Context, args: &Json) -> ToolResult {
     let goal = goal_arg(args)?;
     let cause = req_str(args, "cause")?;
-    match house(ctx)?.leap(&goal, cause).map_err(|e| e.to_string())? {
+    let need = need_arg(args)?;
+    match house(ctx)?
+        .leap_in(need.as_ref(), &goal, cause)
+        .map_err(|e| e.to_string())?
+    {
         Some(dispatch) => Ok(to_json(&dispatch)?.to_string()),
         None => Ok(json!({
             "leap": false,
@@ -460,7 +467,7 @@ fn select_tests(ctx: &Context, args: &Json) -> ToolResult {
         return Err("'files' must name at least one file".into());
     }
     let picks = house(ctx)?
-        .select_tests(&files)
+        .select_tests_in(need_arg(args)?.as_ref(), &files)
         .map_err(|e| e.to_string())?;
     Ok(to_json(&picks)?.to_string())
 }

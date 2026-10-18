@@ -190,8 +190,8 @@ fn a_call_without_a_need_falls_back_to_the_newest_need_when_every_need_is_comple
     two_open_needs(&e);
     e.house.next_in(Some(&gid("G0"))).expect("next one");
     e.house.next_in(Some(&gid("N2.G0"))).expect("next two");
-    for g in ["G1", "G2", "N2.G1", "N2.G2"] {
-        prove(&e, g);
+    for (need, g) in [("G0", "G1"), ("G0", "G2"), ("N2.G0", "N2.G1"), ("N2.G0", "N2.G2")] {
+        prove_in(&e, need, g);
     }
     let b = e.house.next().expect("next");
     assert!(b.complete);
@@ -269,4 +269,329 @@ fn status_in_describes_only_the_named_need_and_rejects_an_unknown_one() {
         e.house.status_in(Some(&gid("N9.G0"))),
         Err(HouseError::UnknownNeed(_))
     ));
+}
+
+fn prove_in(e: &Env, need: &str, goal: &str) {
+    let need = gid(need);
+    let test = format!("t_{goal}");
+    for status in [TestStatus::Red, TestStatus::Green] {
+        e.house
+            .record_test_run_in(Some(&need), &test, status, 1.0, 100, &[])
+            .expect("run");
+    }
+    let out = e
+        .house
+        .report_in(
+            Some(&need),
+            &gid(goal),
+            GoalStatus::Reached,
+            evidence(&test, TestStatus::Green),
+        )
+        .expect("report");
+    assert_eq!(out.outcome, Outcome::Accepted, "{out:?}");
+}
+
+fn status_in_of(e: &Env, need: &str, id: &str) -> String {
+    e.house.status_in(Some(&gid(need))).expect("status")["goal_list"]
+        .as_array()
+        .expect("goal_list")
+        .iter()
+        .find(|g| g["id"] == id)
+        .unwrap_or_else(|| panic!("goal {id} not in status"))["status"]
+        .as_str()
+        .expect("status str")
+        .to_string()
+}
+
+fn writing(mut g: Goal, file: &str) -> Goal {
+    g.writes = vec![file.to_string()];
+    g
+}
+
+fn tests_of(picks: &[TestPick]) -> Vec<&str> {
+    picks.iter().map(|p| p.test.as_str()).collect()
+}
+
+fn blocked_evidence() -> TestEvidence {
+    evidence("", TestStatus::Green)
+}
+
+#[test]
+fn a_report_for_a_goal_of_another_need_is_refused_and_leaves_that_goal_untouched() {
+    let e = env();
+    two_open_needs(&e);
+    e.house.next_in(Some(&gid("G0"))).expect("dispatch one");
+    let by_default = e
+        .house
+        .report(&gid("G1"), GoalStatus::Blocked, blocked_evidence());
+    assert!(
+        matches!(by_default, Err(HouseError::Invalid(_))),
+        "{by_default:?}"
+    );
+    let by_name = e.house.report_in(
+        Some(&gid("N2.G0")),
+        &gid("G1"),
+        GoalStatus::Blocked,
+        blocked_evidence(),
+    );
+    assert!(matches!(by_name, Err(HouseError::Invalid(_))), "{by_name:?}");
+    assert_eq!(status_in_of(&e, "G0", "G1"), "active");
+    let ok = e
+        .house
+        .report_in(
+            Some(&gid("G0")),
+            &gid("G1"),
+            GoalStatus::Blocked,
+            blocked_evidence(),
+        )
+        .expect("report in its own need");
+    assert_eq!(ok.outcome, Outcome::Recorded);
+}
+
+#[test]
+fn a_test_run_for_a_test_of_another_need_is_refused() {
+    let e = env();
+    two_open_needs(&e);
+    let by_default = e
+        .house
+        .record_test_run("t_G1", TestStatus::Red, 1.0, 10, &[]);
+    assert!(
+        matches!(by_default, Err(HouseError::Invalid(_))),
+        "{by_default:?}"
+    );
+    e.house
+        .record_test_run_in(Some(&gid("G0")), "t_G1", TestStatus::Red, 1.0, 10, &[])
+        .expect("run in its own need");
+}
+
+#[test]
+fn a_fact_refuting_a_goal_of_another_need_is_refused() {
+    let e = env();
+    two_open_needs(&e);
+    let fact = |id: &str| Fact {
+        id: id.into(),
+        by: "Wilson".into(),
+        refutes: Some(gid("G1")),
+        source: "x:1".into(),
+        text: "G1 is dead".into(),
+    };
+    let by_default = e.house.add_fact(fact("F1"));
+    assert!(
+        matches!(by_default, Err(HouseError::Invalid(_))),
+        "{by_default:?}"
+    );
+    assert_eq!(status_of(&e, "N2.G1"), "pending");
+    e.house
+        .add_fact_in(Some(&gid("G0")), fact("F1"))
+        .expect("fact in its own need");
+}
+
+#[test]
+fn a_leap_for_a_goal_of_another_need_is_refused() {
+    let e = env();
+    two_open_needs(&e);
+    let r = e.house.leap_in(Some(&gid("N2.G0")), &gid("G1"), "dead");
+    assert!(matches!(r, Err(HouseError::Invalid(_))), "{r:?}");
+}
+
+#[test]
+fn a_test_name_already_bound_in_another_need_is_rejected_at_merge() {
+    let e = env();
+    two_open_needs(&e);
+    let mut clash = leaf("N2.G3", "N2.G0");
+    clash.test.as_mut().expect("test").name = "t_G1".into();
+    let mut goals = flat("N2.G0", &["N2.G1", "N2.G2"]);
+    goals.push(clash);
+    e.house
+        .submit_chart(Fellow::Foreman, chart_of("N2.G0", Fellow::Foreman, goals))
+        .expect("chart");
+    let v = e.house.merge().expect_err("clashing test name");
+    assert!(
+        v.iter()
+            .any(|v| v.rule == 8 && v.goal.as_str() == "N2.G3" && v.message.contains("t_G1")),
+        "{v:?}"
+    );
+}
+
+#[test]
+fn select_tests_in_returns_only_the_tests_of_the_named_need() {
+    let e = env();
+    e.house.need("p", "one", &[]).expect("need one");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart(
+                Fellow::Foreman,
+                vec![
+                    writing(leaf("G1", "G0"), "src/a.rs"),
+                    writing(leaf("G2", "G0"), "src/b.rs"),
+                ],
+            ),
+        )
+        .expect("chart one");
+    e.house.merge().expect("merge one");
+    e.house.need("p", "two", &[]).expect("need two");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart_of(
+                "N2.G0",
+                Fellow::Foreman,
+                vec![
+                    writing(leaf("N2.G1", "N2.G0"), "src/a.rs"),
+                    leaf("N2.G2", "N2.G0"),
+                ],
+            ),
+        )
+        .expect("chart two");
+    e.house.merge().expect("merge two");
+    let touched = vec!["src/a.rs".to_string()];
+    let one = e
+        .house
+        .select_tests_in(Some(&gid("G0")), &touched)
+        .expect("select one");
+    assert_eq!(tests_of(&one), ["t_G1"]);
+    let newest = e.house.select_tests(&touched).expect("select default");
+    assert_eq!(tests_of(&newest), ["t_N2.G1"]);
+}
+
+#[test]
+fn merging_another_need_leaves_the_first_needs_status_identical() {
+    let e = env();
+    e.house.need("p", "one", &[]).expect("need one");
+    e.house
+        .submit_chart(Fellow::Foreman, chart(Fellow::Foreman, base_goals()))
+        .expect("chart one");
+    e.house.merge().expect("merge one");
+    e.house.next().expect("dispatch one");
+    let before = e.house.status_in(Some(&gid("G0"))).expect("before");
+    e.house.need("p", "two", &[]).expect("need two");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart_of("N2.G0", Fellow::Foreman, flat("N2.G0", &["N2.G1", "N2.G2"])),
+        )
+        .expect("chart two");
+    e.house.merge().expect("merge two");
+    e.house.next().expect("dispatch two");
+    assert_eq!(e.house.status_in(Some(&gid("G0"))).expect("after"), before);
+}
+
+#[test]
+fn a_completed_need_keeps_its_dead_theory_and_fact_and_never_enters_the_next_batch() {
+    let e = env();
+    e.house.need("p", "one", &[]).expect("need one");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart(Fellow::Foreman, flat("G0", &["G1", "G2"])),
+        )
+        .expect("chart one");
+    let mut alt = leaf("A1", "G0");
+    alt.parent = None;
+    alt.alt_of = Some(gid("G1"));
+    alt.est = Some(Est {
+        ram_mb: 800,
+        secs: 60.0,
+        tokens: 20_000,
+    });
+    e.house
+        .submit_chart(Fellow::Cameron, chart(Fellow::Cameron, vec![alt]))
+        .expect("cameron");
+    e.house.merge().expect("merge one");
+    e.house
+        .add_fact(Fact {
+            id: "F1".into(),
+            by: "Wilson".into(),
+            refutes: Some(gid("G1")),
+            source: "x:1".into(),
+            text: "G1 is a dead theory".into(),
+        })
+        .expect("fact");
+    let first = e.house.next().expect("dispatch one");
+    assert_eq!(ids(&first), ["A1", "G2"]);
+    prove(&e, "A1");
+    prove(&e, "G2");
+    assert!(e.house.next_in(Some(&gid("G0"))).expect("done").complete);
+    e.house.need("p", "two", &[]).expect("need two");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart_of("N2.G0", Fellow::Foreman, flat("N2.G0", &["N2.G1", "N2.G2"])),
+        )
+        .expect("chart two");
+    e.house.merge().expect("merge two");
+    let second = e.house.next().expect("dispatch two");
+    assert_eq!(ids(&second), ["N2.G1", "N2.G2"]);
+    let memory = e.house.status_in(Some(&gid("G0"))).expect("memory");
+    assert_eq!(memory["complete"], true);
+    assert_eq!(memory["retired"][0]["goal"], "G1");
+    assert_eq!(memory["facts"][0]["refutes"], "G1");
+}
+
+#[test]
+fn two_leaves_of_different_needs_writing_one_file_are_serialised_by_the_file_lock() {
+    let e = env();
+    e.house.need("p", "one", &[]).expect("need one");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart(
+                Fellow::Foreman,
+                vec![
+                    writing(leaf("G1", "G0"), "src/a.rs"),
+                    writing(leaf("G2", "G0"), "src/b.rs"),
+                ],
+            ),
+        )
+        .expect("chart one");
+    e.house.merge().expect("merge one");
+    e.house.need("p", "two", &[]).expect("need two");
+    e.house
+        .submit_chart(
+            Fellow::Foreman,
+            chart_of(
+                "N2.G0",
+                Fellow::Foreman,
+                vec![
+                    writing(leaf("N2.G1", "N2.G0"), "src/a.rs"),
+                    writing(leaf("N2.G2", "N2.G0"), "src/c.rs"),
+                ],
+            ),
+        )
+        .expect("chart two");
+    e.house.merge().expect("merge two");
+    let first = e.house.next_in(Some(&gid("G0"))).expect("dispatch one");
+    assert_eq!(ids(&first), ["G1", "G2"]);
+    let second = e.house.next().expect("dispatch two");
+    assert_eq!(ids(&second), ["N2.G2"]);
+    let held = second
+        .governor
+        .deferrals
+        .iter()
+        .find(|d| d.goal.as_str() == "N2.G1")
+        .expect("N2.G1 deferred");
+    assert_eq!(held.reason, DeferReason::FileLock);
+    assert!(
+        held.detail.contains("src/a.rs") && held.detail.contains("G1"),
+        "{held:?}"
+    );
+    prove_in(&e, "G0", "G1");
+    let third = e.house.next().expect("dispatch after release");
+    assert_eq!(ids(&third), ["N2.G1"]);
+}
+
+#[test]
+fn the_heavy_cap_counts_active_goals_of_every_need() {
+    let e = env_with(16_000, 16_000, |c| c.heavy_cap = 1);
+    two_open_needs(&e);
+    let first = e.house.next_in(Some(&gid("G0"))).expect("dispatch one");
+    assert_eq!(ids(&first).len(), 1);
+    let second = e.house.next().expect("dispatch two");
+    assert!(second.dispatches.is_empty(), "{:?}", ids(&second));
+    assert!(second
+        .governor
+        .deferrals
+        .iter()
+        .any(|d| d.reason == DeferReason::HeavyCap));
 }

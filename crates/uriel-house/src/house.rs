@@ -168,10 +168,12 @@ impl House {
                 goal,
                 status,
                 evidence,
+                need,
             } => {
-                let _ = self.report(&goal, status, evidence);
+                let _ = self.report_in(need.as_ref(), &goal, status, evidence);
             }
             HouseCall::RecordTestRun {
+                need,
                 test,
                 status,
                 secs,
@@ -179,7 +181,15 @@ impl House {
                 covered_files,
                 key,
             } => {
-                let _ = self.record_run(&test, status, secs, peak_ram_mb, &covered_files, key);
+                let _ = self.record_run(
+                    need.as_ref(),
+                    &test,
+                    status,
+                    secs,
+                    peak_ram_mb,
+                    &covered_files,
+                    key,
+                );
             }
         }
     }
@@ -365,6 +375,30 @@ impl House {
             old: &old,
             old_pending: &old_pending,
             cfg: &self.cfg,
+        })
+        .and_then(|out| {
+            let clashes: Vec<Violation> = out
+                .goals
+                .iter()
+                .filter_map(|(id, r)| {
+                    let name = &r.goal.test.as_ref()?.name;
+                    let bound = inner.state.tests.get(name)?;
+                    (bound.goal.need_ordinal() != ns).then(|| Violation {
+                        rule: 8,
+                        fellow: r.owner,
+                        goal: id.clone(),
+                        message: format!(
+                            "test name `{name}` is already bound to {} in another need",
+                            bound.goal
+                        ),
+                    })
+                })
+                .collect();
+            if clashes.is_empty() {
+                Ok(out)
+            } else {
+                Err(clashes)
+            }
         });
         let out = match result {
             Ok(o) => o,
@@ -534,6 +568,9 @@ impl House {
         if need.is_some() {
             inner.state.target(need)?;
         }
+        if let Some(r) = &fact.refutes {
+            inner.state.owns(need, r)?;
+        }
         if inner.state.facts.iter().any(|f| f.id == fact.id) {
             return Err(HouseError::Invalid(format!(
                 "fact {} already recorded",
@@ -686,13 +723,26 @@ impl House {
         status: GoalStatus,
         evidence: TestEvidence,
     ) -> Result<ReportOutcome, HouseError> {
+        self.report_in(None, goal, status, evidence)
+    }
+
+    #[allow(missing_docs)]
+    pub fn report_in(
+        &self,
+        need: Option<&GoalId>,
+        goal: &GoalId,
+        status: GoalStatus,
+        evidence: TestEvidence,
+    ) -> Result<ReportOutcome, HouseError> {
         let mut g = self.lock();
         let inner = &mut *g;
         inner.history.push(HouseCall::Report {
             goal: goal.clone(),
             status,
             evidence: evidence.clone(),
+            need: need.cloned(),
         });
+        inner.state.owns(need, goal)?;
         let rec = inner
             .state
             .goals
@@ -914,11 +964,26 @@ impl House {
         peak_ram_mb: u64,
         covered_files: &[String],
     ) -> Result<(), HouseError> {
-        self.record_run(test, status, secs, peak_ram_mb, covered_files, None)
+        self.record_test_run_in(None, test, status, secs, peak_ram_mb, covered_files)
     }
 
+    #[allow(missing_docs)]
+    pub fn record_test_run_in(
+        &self,
+        need: Option<&GoalId>,
+        test: &str,
+        status: TestStatus,
+        secs: f64,
+        peak_ram_mb: u64,
+        covered_files: &[String],
+    ) -> Result<(), HouseError> {
+        self.record_run(need, test, status, secs, peak_ram_mb, covered_files, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn record_run(
         &self,
+        need: Option<&GoalId>,
         test: &str,
         status: TestStatus,
         secs: f64,
@@ -930,6 +995,7 @@ impl House {
         let inner = &mut *g;
         let slot = inner.history.len();
         inner.history.push(HouseCall::RecordTestRun {
+            need: need.cloned(),
             test: test.to_string(),
             status,
             secs,
@@ -937,6 +1003,9 @@ impl House {
             covered_files: covered_files.to_vec(),
             key: None,
         });
+        if let Some(bound) = inner.state.tests.get(test) {
+            inner.state.owns(need, &bound.goal)?;
+        }
         let seq = inner.state.next_seq();
         let st = &mut inner.state;
         let t = st
@@ -1124,9 +1193,20 @@ impl House {
         goal: &GoalId,
         cause_of_death: &str,
     ) -> Result<Option<LeapDispatch>, HouseError> {
+        self.leap_in(None, goal, cause_of_death)
+    }
+
+    #[allow(missing_docs)]
+    pub fn leap_in(
+        &self,
+        need: Option<&GoalId>,
+        goal: &GoalId,
+        cause_of_death: &str,
+    ) -> Result<Option<LeapDispatch>, HouseError> {
         const TIMEOUT_SECS: u64 = 300;
         let mut g = self.lock();
         let inner = &mut *g;
+        inner.state.owns(need, goal)?;
         let rec = inner
             .state
             .goals
@@ -1201,7 +1281,21 @@ impl House {
     /// Tests to run after `touched_files` changed, in order: L0 then L1 then (only if
     /// `allow_full_suite`) L2; within a level recently failed first, then cheapest.
     pub fn select_tests(&self, touched_files: &[String]) -> Result<Vec<TestPick>, HouseError> {
+        self.select_tests_in(None, touched_files)
+    }
+
+    #[allow(missing_docs)]
+    pub fn select_tests_in(
+        &self,
+        need: Option<&GoalId>,
+        touched_files: &[String],
+    ) -> Result<Vec<TestPick>, HouseError> {
         let g = self.lock();
-        Ok(smart::select(&g.state, touched_files, &self.cfg))
+        let scope = match g.state.target(need) {
+            Ok(idx) => Some(idx + 1),
+            Err(HouseError::NoNeed) => None,
+            Err(e) => return Err(e),
+        };
+        Ok(smart::select(&g.state, touched_files, &self.cfg, scope))
     }
 }
