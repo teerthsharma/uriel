@@ -51,6 +51,7 @@ impl Session {
             .env("HOME", home.path())
             .env_remove("SEAL_DR_HOUSE_MODEL")
             .env_remove("URIEL_MODE")
+            .env_remove("URIEL_TERSE")
             .env_remove("SEAL_MCP_FAKE_PROBE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

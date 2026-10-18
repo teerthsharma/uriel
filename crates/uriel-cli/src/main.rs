@@ -13,7 +13,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use uriel_core::MemoryBudget;
 use uriel_mcp::config::{
     default_db_path, Config, Format, Mode as ServerMode, PlacementMode, DEFAULT_MEMORY_MIB, DEFAULT_TOKEN_LIMIT,
-    MODE_ENV,
+    Terse, MODE_ENV, TERSE_ENV,
 };
 
 use banner::{mode_from_env, render_banner, Mode};
@@ -131,6 +131,11 @@ impl McpArgs {
     }
 
     fn to_config_env(&self, mode_env: Option<&str>) -> Result<Config, String> {
+        self.to_config_envs(mode_env, None)
+    }
+
+    fn to_config_envs(&self, mode_env: Option<&str>, terse_env: Option<&str>) -> Result<Config, String> {
+        let _ = terse_env;
         let mode_flag = self.mode.map(|m| match m {
             ModeArg::Normal => ServerMode::Normal,
             ModeArg::House => ServerMode::House,
@@ -159,6 +164,7 @@ impl McpArgs {
                     .map_or(DEFAULT_MEMORY_MIB, |m| usize::try_from(m).unwrap_or(DEFAULT_MEMORY_MIB)),
             ),
             mode: ServerMode::resolve(mode_flag, mode_env)?,
+            terse: Terse::Off,
         })
     }
 }
@@ -372,6 +378,23 @@ mod tests {
         );
         assert!(cfg_of(&["mcp"], Some("warp")).expect_err("bad env").contains(MODE_ENV));
         assert!(parse(&["mcp", "--mode", "warp"]).is_err());
+    }
+
+    #[test]
+    fn mcp_terse_flag_maps_into_the_server_config_and_the_default_is_off() {
+        let cfg_of = |argv: &[&str], env: Option<&str>| {
+            let Some(Command::Mcp(args)) = command(argv) else {
+                panic!("expected mcp");
+            };
+            args.to_config_envs(None, env)
+        };
+        assert_eq!(cfg_of(&["mcp"], None).expect("config").terse, Terse::Off);
+        assert_eq!(cfg_of(&["mcp", "--terse", "data"], None).expect("config").terse, Terse::Data);
+        assert_eq!(cfg_of(&["mcp", "--terse", "prose"], None).expect("config").terse, Terse::Prose);
+        assert_eq!(cfg_of(&["mcp"], Some("prose")).expect("config").terse, Terse::Prose);
+        assert_eq!(cfg_of(&["mcp", "--terse", "off"], Some("prose")).expect("config").terse, Terse::Off);
+        assert!(cfg_of(&["mcp"], Some("full")).expect_err("bad env").contains(TERSE_ENV));
+        assert!(parse(&["mcp", "--terse", "full"]).is_err());
     }
 
     #[test]
