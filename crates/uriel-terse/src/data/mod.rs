@@ -1,9 +1,6 @@
-use crate::{Error, Value};
+mod dec;
+mod enc;
+mod rules;
 
-pub fn encode(_value: &Value) -> Result<String, Error> {
-    unimplemented!()
-}
-
-pub fn decode(_text: &str) -> Result<Value, Error> {
-    unimplemented!()
-}
+pub use dec::decode;
+pub use enc::encode;

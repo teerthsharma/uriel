@@ -83,8 +83,16 @@ fn scalar_arrays_are_inline() {
 
 #[test]
 fn nested_objects_and_lists() {
-    let enc = roundtrip("{\"a\":{\"b\":{\"c\":1}},\"l\":[{\"x\":1},[1,2],\"s\",{}]}");
-    assert!(enc.starts_with("a:\n b:\n  c: 1\n"), "{enc}");
+    let enc = roundtrip(
+        "{\"alpha\":{\"beta\":{\"gamma\":\"one\",\"delta\":\"two\"},\"epsilon\":\"three\"},\"items\":[{\"identifier\":\"xray\",\"labels\":[\"a\",\"b\"]},{\"identifier\":\"yankee\",\"labels\":[\"c\"]},[\"p\",\"q\"],\"s\",{}]}",
+    );
+    assert!(enc.contains("\nalpha:\n beta:\n  gamma: one\n"), "{enc}");
+    assert!(
+        enc.contains("\n - $0: xray\n   labels[2]: a,b\n"),
+        "{enc}"
+    );
+    assert!(enc.contains("\n - [2]: p,q\n"), "{enc}");
+    assert!(enc.ends_with("\n - s\n - {}"), "{enc}");
 }
 
 #[test]

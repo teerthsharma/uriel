@@ -31,7 +31,7 @@ pub fn neg_count(s: &str) -> usize {
     let lower = s.to_lowercase();
     let mut total = 0;
     let mut run = String::new();
-    let mut flush = |run: &mut String, total: &mut usize| {
+    let flush = |run: &mut String, total: &mut usize| {
         if !run.is_empty() {
             let norm = run.replace('\u{2019}', "'");
             if NEG_WORDS.contains(&norm.as_str()) {

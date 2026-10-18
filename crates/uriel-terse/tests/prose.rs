@@ -134,7 +134,7 @@ fn list_markers_survive() {
 #[test]
 fn ultra_abbreviates_and_full_does_not() {
     let input = "The configuration of the database and the implementation.";
-    assert!(!compact(input, Level::Full).contains("config"));
+    assert!(compact(input, Level::Full).contains("configuration"));
     let ultra = compact(input, Level::Ultra);
     assert!(
         ultra.contains("config") && ultra.contains("DB") && ultra.contains("impl"),
