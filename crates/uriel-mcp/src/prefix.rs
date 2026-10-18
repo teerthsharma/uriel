@@ -1,3 +1,4 @@
+use serde_json::Value as Json;
 use sha2::{Digest, Sha256};
 use uriel_rag::SoulOptions;
 
@@ -32,6 +33,10 @@ pub fn fingerprint_of(tool_schemas: &str, contract: u32, soul_digest: &str) -> S
 }
 
 pub fn scaffold(ctx: &Context) -> Result<Scaffold, String> {
+    ctx.services.scaffold_with(|| compute(ctx))
+}
+
+fn compute(ctx: &Context) -> Result<Scaffold, String> {
     let rag = ctx.services.rag(ctx.engine.graph())?;
     let guide = rag
         .soul(&SoulOptions::default())
@@ -43,4 +48,27 @@ pub fn scaffold(ctx: &Context) -> Result<Scaffold, String> {
         guide.digest
     );
     Ok(Scaffold { id, preamble })
+}
+
+pub fn lead_json(ctx: &Context, body: String) -> Result<String, String> {
+    if !ctx.services.stable_prefix {
+        return Ok(body);
+    }
+    Ok(assemble(&scaffold(ctx)?, &body))
+}
+
+pub fn assemble(scaffold: &Scaffold, body: &str) -> String {
+    let Some(rest) = body.strip_prefix("{\"") else {
+        return body.to_string();
+    };
+    let preamble = Json::String(scaffold.preamble.clone()).to_string();
+    let base = format!(
+        "{{\"prefix_id\":\"{}\",\"preamble\":{preamble},\"stable_prefix_bytes\":",
+        scaffold.id
+    );
+    let len = (1..=20)
+        .map(|digits| base.len() + digits + 1)
+        .find(|n| n.to_string().len() + base.len() + 1 == *n)
+        .unwrap_or(base.len());
+    format!("{base}{len},\"{rest}")
 }

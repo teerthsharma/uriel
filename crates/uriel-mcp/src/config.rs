@@ -4,6 +4,7 @@ use uriel_core::MemoryBudget;
 
 pub const DEFAULT_TOKEN_LIMIT: usize = 20_000;
 pub const DEFAULT_MEMORY_MIB: usize = 50;
+pub const STABLE_PREFIX_DEFAULT: bool = true;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
@@ -58,6 +59,7 @@ pub struct Config {
     pub format: Format,
     pub placement: PlacementMode,
     pub memory: MemoryBudget,
+    pub stable_prefix: bool,
 }
 
 impl Config {
@@ -93,6 +95,8 @@ OPTIONS:
                          compact (default; fewer tokens) or json (exact v1 output)
     --memory-mib <N>     Memory budget in MiB split between the page cache, the node tiers, the
                          query cache and the RAG index (default: 50, minimum: 16)
+    --stable-prefix <S>  on (default) or off: on puts a byte-stable scaffold preamble first in the json
+                         result of view and soul and adds prefix_id and stable_prefix_bytes
     --placement <M>      local (default) or planned: planned keeps a placement model fed by the
                          nodes the tools read, which why_hot and pin explain and steer
     -h, --help           Print this help
@@ -127,6 +131,7 @@ where
         format: Format::Compact,
         placement: PlacementMode::Local,
         memory: MemoryBudget::mib(DEFAULT_MEMORY_MIB),
+        stable_prefix: STABLE_PREFIX_DEFAULT,
     };
     let mut it = args.into_iter().map(Into::into);
     while let Some(arg) = it.next() {
@@ -164,6 +169,14 @@ where
                 let v = value(&flag, inline, &mut it)?;
                 cfg.placement = PlacementMode::parse(&v)
                     .ok_or_else(|| format!("--placement expects local or planned, got '{v}'"))?;
+            }
+            "--stable-prefix" => {
+                let v = value(&flag, inline, &mut it)?;
+                cfg.stable_prefix = match v.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(format!("--stable-prefix expects on or off, got '{v}'")),
+                };
             }
             "--memory-mib" => {
                 let v = value(&flag, inline, &mut it)?;

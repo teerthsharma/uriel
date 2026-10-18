@@ -405,11 +405,19 @@ fn id_list(args: &Json, key: &str) -> Result<Vec<u64>, String> {
 
 pub fn call(ctx: &Context, name: &str, args: &Json) -> ToolResult {
     match name {
-        "rag_index" => rag_index(ctx, args),
+        "rag_index" => {
+            let out = rag_index(ctx, args);
+            ctx.services.forget_scaffold();
+            out
+        }
         "rag_search" => rag_search(ctx, args),
         "rag_expand" => rag_expand(ctx, args),
         "rag_feedback" => rag_feedback(ctx, args),
-        "seal_remember" => seal_remember(ctx, args),
+        "seal_remember" => {
+            let out = seal_remember(ctx, args);
+            ctx.services.forget_scaffold();
+            out
+        }
         "seal_recall" => seal_recall(ctx, args),
         "session_reset" => Ok(json!({"cleared": ctx.session.reset()}).to_string()),
         other => Err(format!("unknown tool '{other}'")),
