@@ -1,6 +1,7 @@
 use uriel_place::replay::SplitMix;
 use uriel_place::{
-    lower_bound, plan_append_only, plan_arena, plan_first_fit, plan_offsets, ArenaError, Buffer, Plan,
+    lower_bound, plan_append_only, plan_arena, plan_first_fit, plan_offsets, ArenaError, Buffer,
+    Plan,
 };
 
 fn buf(id: u32, size: u64, align: u64, first_use: u64, last_use: u64) -> Buffer {
@@ -181,7 +182,9 @@ fn zero_size_buffers_get_offset_zero_and_never_block() {
 
 #[test]
 fn disjoint_lifetimes_share_one_slot() {
-    let bufs: Vec<Buffer> = (0..8).map(|i| unit(i, 100 + i as u64, i as u64 * 2, i as u64 * 2 + 1)).collect();
+    let bufs: Vec<Buffer> = (0..8)
+        .map(|i| unit(i, 100 + i as u64, i as u64 * 2, i as u64 * 2 + 1))
+        .collect();
     let plan = plan_offsets(&bufs).unwrap();
     assert!(plan.offsets.iter().all(|&(_, o)| o == 0));
     assert_eq!(plan.peak, 107);
@@ -235,7 +238,12 @@ fn offset_overflow_is_rejected_instead_of_wrapping() {
 
 #[test]
 fn lower_bound_is_the_largest_sum_of_simultaneously_live_sizes() {
-    let bufs = [unit(0, 5, 0, 2), unit(1, 7, 2, 4), unit(2, 3, 5, 6), unit(3, 11, 3, 3)];
+    let bufs = [
+        unit(0, 5, 0, 2),
+        unit(1, 7, 2, 4),
+        unit(2, 3, 5, 6),
+        unit(3, 11, 3, 3),
+    ];
     assert_eq!(lower_bound(&bufs), 7 + 11);
     let more = [bufs[0], bufs[1], bufs[3], unit(9, 1, 2, 3)];
     assert_eq!(lower_bound(&more), 7 + 11 + 1);
@@ -304,14 +312,24 @@ fn identical_lifetimes_and_sizes_tie_break_by_id_not_input_order() {
     rev.reverse();
     assert_eq!(plan_offsets(&bufs).unwrap(), plan_offsets(&rev).unwrap());
     let plan = plan_offsets(&bufs).unwrap();
-    assert_eq!(plan.offsets, (0..6).map(|i| (i, 32 * i as u64)).collect::<Vec<_>>());
+    assert_eq!(
+        plan.offsets,
+        (0..6).map(|i| (i, 32 * i as u64)).collect::<Vec<_>>()
+    );
 }
 
 const MIB_F32: u64 = 4;
 
 fn mobilenet_like(seed: u64) -> Vec<Buffer> {
     let mut rng = SplitMix(seed ^ 0x30b1);
-    let stages: [(u64, u64); 6] = [(112, 32), (112, 64), (56, 128), (28, 256), (14, 512), (7, 1024)];
+    let stages: [(u64, u64); 6] = [
+        (112, 32),
+        (112, 64),
+        (56, 128),
+        (28, 256),
+        (14, 512),
+        (7, 1024),
+    ];
     let mut out = Vec::new();
     let mut t = 0u64;
     let mut id = 0u32;
@@ -341,7 +359,15 @@ fn inception_like(seed: u64) -> Vec<Buffer> {
     let mut out = Vec::new();
     let mut id = 0u32;
     let mut t = 0u64;
-    let blocks = [(35u64, 288u64), (35, 288), (17, 768), (17, 768), (17, 768), (8, 1280), (8, 2048)];
+    let blocks = [
+        (35u64, 288u64),
+        (35, 288),
+        (17, 768),
+        (17, 768),
+        (17, 768),
+        (8, 1280),
+        (8, 2048),
+    ];
     let mut input = buf(id, 35 * 35 * 192 * 4, 64, t, t);
     id += 1;
     for (hw, c) in blocks {

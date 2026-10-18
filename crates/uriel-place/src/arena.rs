@@ -191,7 +191,10 @@ pub fn plan_append_only(buffers: &[Buffer]) -> Result<Plan, ArenaError> {
 
 pub fn lower_bound(buffers: &[Buffer]) -> u64 {
     let mut events: Vec<(u64, i128)> = Vec::with_capacity(buffers.len() * 2);
-    for b in buffers.iter().filter(|b| b.size > 0 && b.last_use >= b.first_use) {
+    for b in buffers
+        .iter()
+        .filter(|b| b.size > 0 && b.last_use >= b.first_use)
+    {
         events.push((b.first_use, i128::from(b.size)));
         if let Some(end) = b.last_use.checked_add(1) {
             events.push((end, -i128::from(b.size)));
