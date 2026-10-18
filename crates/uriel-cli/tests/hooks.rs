@@ -148,12 +148,14 @@ fn a_grown_transcript_adds_the_new_tail_and_keeps_the_old_head() {
     grown.extend(filler(30..50));
     grown.push(assistant("The late zeppelin handshake arrives at dusk."));
     write_transcript(&t, &grown);
-    assert!(run(&["capture", "--db", &arg], &p).status.success());
+    let second = run(&["capture", "--db", &arg], &p);
+    assert!(second.status.success());
+    assert_eq!(stderr_lines(&second), 0, "{}", String::from_utf8_lossy(&second.stderr));
     let rag = open_rag(&db);
     let late = rag
         .search("zeppelin handshake dusk", &SearchOptions::default())
         .expect("search");
-    assert!(late.first().is_some_and(|h| h.file.starts_with("ctx/sess-1/")));
+    assert!(late.first().is_some_and(|h| h.file.starts_with("ctx/sess-1/")), "{late:?}");
     drop(rag);
     assert!(needle_files(&db).first().is_some_and(|f| f.starts_with("ctx/sess-1/")));
 }

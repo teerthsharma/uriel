@@ -160,7 +160,7 @@ fn entry_renders_tool_use_name_and_capped_input() {
     let text = entry_of(long.as_bytes()).expect("entry").text;
     assert!(text.starts_with("[tool_use] Write "));
     assert!(text.chars().count() <= "[tool_use] Write ".len() + TOOL_INPUT_CAP_CHARS + 3);
-    assert_eq!(text.matches('y').count() <= TOOL_INPUT_CAP_CHARS, true);
+    assert!(text.matches('y').count() <= TOOL_INPUT_CAP_CHARS);
 }
 
 #[test]
@@ -330,24 +330,50 @@ fn fractions_are_bounded_contiguous_and_overlap() {
     for (i, f) in sc.fractions.iter().enumerate() {
         assert_eq!(f.index, i);
         assert!(body(f).chars().count() <= CAP, "fraction {i} too wide");
-        assert!(f.text.starts_with(&format!("# ctx session=s1 turns={}-{}", f.first_turn, f.last_turn)));
+        assert!(f.text.starts_with(&format!("# ctx turns={}-{} ", f.first_turn, f.last_turn)));
+        assert!(f.text.lines().next().expect("header").ends_with("session=s1"));
     }
     for pair in sc.fractions.windows(2) {
         assert_eq!(pair[1].first_turn, pair[0].last_turn);
     }
 }
 
+fn shared_overlap(prev: &str, next: &str) -> usize {
+    (1..=OVERLAP)
+        .rev()
+        .find(|&k| {
+            let head: String = next.chars().take(k).collect();
+            head.chars().count() == k && prev.ends_with(&head)
+        })
+        .unwrap_or(0)
+}
+
 #[test]
-fn consecutive_fractions_share_the_overlap_tail() {
+fn consecutive_fractions_share_a_bounded_overlap() {
     let sc = scan_str(&jsonl(&conversation(80)));
     for pair in sc.fractions.windows(2) {
-        let prev = body(&pair[0]);
-        let tail: String = {
-            let mut chars: Vec<char> = prev.chars().rev().take(OVERLAP).collect();
-            chars.reverse();
-            chars.into_iter().collect()
-        };
-        assert!(body(&pair[1]).starts_with(&tail), "overlap missing between {} and {}", pair[0].index, pair[1].index);
+        let k = shared_overlap(body(&pair[0]), body(&pair[1]));
+        assert!((1..=OVERLAP).contains(&k),"overlap {k} between {} and {}", pair[0].index, pair[1].index);
+    }
+}
+
+#[test]
+fn the_overlap_is_whole_lines_when_lines_fit() {
+    let short: Vec<String> = (0..200)
+        .map(|i| {
+            let text = format!("turn {i}: {}", words(i).split(' ').take(10).collect::<Vec<_>>().join(" "));
+            if i % 2 == 0 {
+                user(&text)
+            } else {
+                assistant(&text)
+            }
+        })
+        .collect();
+    let sc = scan_str(&jsonl(&short));
+    assert!(sc.fractions.len() >= 3);
+    for f in sc.fractions.iter().skip(1) {
+        let first = body(f).lines().next().expect("line");
+        assert!(first.starts_with("[user]") || first.starts_with("[assistant]"), "{first:.40}");
     }
 }
 
@@ -355,11 +381,9 @@ fn consecutive_fractions_share_the_overlap_tail() {
 fn cuts_fall_on_turn_boundaries_when_turns_are_small() {
     let sc = scan_str(&jsonl(&conversation(80)));
     for pair in sc.fractions.windows(2) {
-        let carry = body(&pair[0]).chars().count().min(OVERLAP);
-        let rest: String = body(&pair[1]).chars().skip(carry).collect();
-        assert!(rest.starts_with("
-[user]") || rest.starts_with("
-[assistant]"), "{rest:.40}");
+        let k = shared_overlap(body(&pair[0]), body(&pair[1]));
+        let rest: String = body(&pair[1]).chars().skip(k).collect();
+        assert!(rest.starts_with("\n[user]") || rest.starts_with("\n[assistant]"), "{rest:.40}");
     }
 }
 
@@ -399,9 +423,9 @@ fn header_carries_the_record_timestamp_or_a_dash() {
     let ts = line("user", json!("stamped"), Some("2026-03-04T05:06:07.000Z"));
     let sc = scan_str(&jsonl(&[ts, assistant("plain")]));
     let header = sc.fractions[0].text.lines().next().expect("header");
-    assert_eq!(header, "# ctx session=s1 turns=0-1 ts=2026-03-04T05:06:07.000Z");
+    assert_eq!(header, "# ctx turns=0-1 ts=2026-03-04T05:06:07.000Z session=s1");
     let none = scan_str(&jsonl(&[user("a"), assistant("b")]));
-    assert_eq!(none.fractions[0].text.lines().next().expect("header"), "# ctx session=s1 turns=0-1 ts=-");
+    assert_eq!(none.fractions[0].text.lines().next().expect("header"), "# ctx turns=0-1 ts=- session=s1");
 }
 
 #[test]
@@ -412,7 +436,7 @@ fn compaction_summary_is_split_out_of_the_fractions() {
     let sc = scan_str(&s);
     assert_eq!(sc.summaries.len(), 1);
     assert_eq!(sc.summaries[0].n, 1);
-    assert!(sc.summaries[0].text.starts_with("# ctx-summary session=s1 n=1"));
+    assert!(sc.summaries[0].text.starts_with("# ctx-summary n=1 "));
     assert!(sc.summaries[0].text.contains("zebra crossing"));
     let all: String = sc.fractions.iter().map(|f| f.text.as_str()).collect();
     assert!(!all.contains("zebra"));
