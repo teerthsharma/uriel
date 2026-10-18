@@ -60,7 +60,16 @@ fn scan_str(s: &str) -> Scan {
 }
 
 fn body(f: &Fraction) -> &str {
-    f.text.split_once('\n').map_or("", |x| x.1)
+    let (_, rest) = f.text.split_once('\n').unwrap_or_default();
+    rest.split_once('\n').map_or("", |x| x.1)
+}
+
+fn meta(f: &Fraction) -> &str {
+    f.text.lines().nth(1).expect("meta line")
+}
+
+fn topic(f: &Fraction) -> &str {
+    f.text.lines().next().expect("first line").strip_prefix("# ").expect("heading")
 }
 
 fn mem_rag() -> Rag {
@@ -330,8 +339,8 @@ fn fractions_are_bounded_contiguous_and_overlap() {
     for (i, f) in sc.fractions.iter().enumerate() {
         assert_eq!(f.index, i);
         assert!(body(f).chars().count() <= CAP, "fraction {i} too wide");
-        assert!(f.text.starts_with(&format!("# ctx turns={}-{} ", f.first_turn, f.last_turn)));
-        assert!(f.text.lines().next().expect("header").ends_with("session=s1"));
+        assert!(meta(f).starts_with(&format!("ctx turns={}-{} ", f.first_turn, f.last_turn)));
+        assert!(meta(f).ends_with("session=s1"));
     }
     for pair in sc.fractions.windows(2) {
         assert_eq!(pair[1].first_turn, pair[0].last_turn);
@@ -419,24 +428,24 @@ fn growth_keeps_every_closed_fraction_byte_identical() {
 }
 
 #[test]
-fn header_carries_the_record_timestamp_or_a_dash() {
+fn the_meta_line_carries_the_record_timestamp_or_a_dash() {
     let ts = line("user", json!("stamped"), Some("2026-03-04T05:06:07.000Z"));
     let sc = scan_str(&jsonl(&[ts, assistant("plain")]));
-    let header = sc.fractions[0].text.lines().next().expect("header");
-    assert_eq!(header, "# ctx turns=0-1 ts=2026-03-04T05:06:07.000Z session=s1");
+    assert_eq!(meta(&sc.fractions[0]), "ctx turns=0-1 ts=2026-03-04T05:06:07.000Z session=s1");
     let none = scan_str(&jsonl(&[user("a"), assistant("b")]));
-    assert_eq!(none.fractions[0].text.lines().next().expect("header"), "# ctx turns=0-1 ts=- session=s1");
+    assert_eq!(meta(&none.fractions[0]), "ctx turns=0-1 ts=- session=s1");
 }
 
 #[test]
 fn compaction_summary_is_split_out_of_the_fractions() {
-    let mut summary: Value = serde_json::from_str(&user(&format!("{SUMMARY_PREFIX}. Summary: zebra crossing"))).expect("json");
+    let mut summary: Value = serde_json::from_str(&user(&format!("{SUMMARY_PREFIX}. Summary: zebra crossing at the old harbor"))).expect("json");
     summary["isCompactSummary"] = json!(true);
     let s = jsonl(&[user("hello"), assistant("hi"), summary.to_string(), user("next")]);
     let sc = scan_str(&s);
     assert_eq!(sc.summaries.len(), 1);
     assert_eq!(sc.summaries[0].n, 1);
-    assert!(sc.summaries[0].text.starts_with("# ctx-summary n=1 "));
+    assert_eq!(sc.summaries[0].text.lines().next(), Some("# zebra crossing at the old harbor"));
+    assert!(sc.summaries[0].text.lines().nth(1).expect("meta").starts_with("ctx-summary n=1 "));
     assert!(sc.summaries[0].text.contains("zebra crossing"));
     let all: String = sc.fractions.iter().map(|f| f.text.as_str()).collect();
     assert!(!all.contains("zebra"));
@@ -554,4 +563,206 @@ fn the_window_is_six_hundred_tokens_at_four_chars_each() {
     let sc = scan_str(&jsonl(&conversation(80)));
     assert!(sc.fractions.iter().all(|f| body(f).chars().count() <= 2400));
     assert!(sc.fractions.iter().any(|f| body(f).chars().count() > 1800));
+}
+
+fn tag(i: usize) -> String {
+    let c = |n: usize| char::from(b'a' + u8::try_from(n % 26).expect("letter"));
+    format!("{}{}{}{}", c(i), c(i / 26), c(i / 676 + 3), c(i * 7 + 1))
+}
+
+fn tagged(turns: usize) -> Vec<String> {
+    (0..turns)
+        .map(|i| {
+            let body = format!("The {}x subsystem needs attention at step {i}. {}", tag(i), words(i));
+            if i % 2 == 0 {
+                user(&body)
+            } else {
+                assistant(&body)
+            }
+        })
+        .collect()
+}
+
+fn tool_only() -> String {
+    line(
+        "assistant",
+        json!([{"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "ls -la"}}]),
+        None,
+    )
+}
+
+fn mem_pair() -> (Rag, Graph) {
+    let graph = Graph::open_in_memory(MemoryBudget::mib(16)).expect("graph");
+    let rag = Rag::open(graph.clone(), RagConfig::default()).expect("rag");
+    (rag, graph)
+}
+
+#[test]
+fn the_first_line_is_the_topic_of_the_first_text() {
+    let s = jsonl(&[
+        user("  Please   migrate\nthe pangolin store to the new schema before friday  "),
+        assistant("ok"),
+    ]);
+    let sc = scan_str(&s);
+    assert_eq!(topic(&sc.fractions[0]), "Please migrate the pangolin store to the new schema before friday");
+    assert!(!sc.fractions[0].text.lines().next().expect("first").contains("ctx turns"));
+}
+
+#[test]
+fn the_topic_is_bounded_and_cut_on_a_word() {
+    let words_only = scan_str(&jsonl(&[user(&"wordy ".repeat(100))]));
+    let t = topic(&words_only.fractions[0]);
+    assert!(t.chars().count() <= TOPIC_CHARS, "{}", t.chars().count());
+    assert!(t.chars().count() > TOPIC_CHARS - 8);
+    assert!(t.ends_with("wordy"));
+    let unbroken = scan_str(&jsonl(&[user(&"x".repeat(500))]));
+    assert_eq!(topic(&unbroken.fractions[0]).chars().count(), TOPIC_CHARS);
+    let wide = scan_str(&jsonl(&[user(&"\u{1F600}".repeat(500))]));
+    assert_eq!(topic(&wide.fractions[0]).chars().count(), TOPIC_CHARS);
+}
+
+#[test]
+fn the_topic_skips_trivial_tagged_and_tool_text() {
+    let s = jsonl(&[
+        user("ok"),
+        user("<task-notification><task-id>abc</task-id> finished a long running job</task-notification>"),
+        tool_only(),
+        assistant("The kestrel scheduler needs a new ledger"),
+    ]);
+    let sc = scan_str(&s);
+    assert_eq!(topic(&sc.fractions[0]), "The kestrel scheduler needs a new ledger");
+}
+
+#[test]
+fn the_topic_falls_back_to_the_first_body_line_when_there_is_no_text() {
+    let sc = scan_str(&jsonl(&[tool_only(), user("ok")]));
+    assert!(topic(&sc.fractions[0]).starts_with("[tool_use] Bash"), "{}", topic(&sc.fractions[0]));
+}
+
+#[test]
+fn the_topic_comes_from_new_entries_not_the_overlap() {
+    let sc = scan_str(&jsonl(&tagged(80)));
+    assert!(sc.fractions.len() >= 4);
+    for f in sc.fractions.iter().skip(1) {
+        let step: u64 = topic(f)
+            .split("at step ")
+            .nth(1)
+            .and_then(|x| x.split('.').next())
+            .and_then(|x| x.parse().ok())
+            .expect("step number");
+        assert!(step > f.first_turn, "fraction {} topic step {step} first_turn {}", f.index, f.first_turn);
+        assert!(step <= f.last_turn);
+    }
+}
+
+#[test]
+fn a_split_turn_gives_every_piece_a_topic_from_its_own_text() {
+    let long = format!("Alpha opening sentence of a very long answer. {}", "filler words keep going ".repeat(400));
+    let sc = scan_str(&jsonl(&[user("Explain the whole design please"), assistant(&long)]));
+    assert!(sc.fractions.len() >= 3);
+    assert_eq!(topic(&sc.fractions[0]), "Explain the whole design please");
+    for f in &sc.fractions[1..] {
+        assert!(topic(f).len() >= MIN_TOPIC_CHARS, "{}", topic(f));
+    }
+}
+
+#[test]
+fn the_l3_gist_of_every_fraction_names_its_topic() {
+    let sc = scan_str(&jsonl(&tagged(60)));
+    let (rag, _) = mem_pair();
+    capture_into(&rag, "s1", &sc, MAX_WRITES).expect("capture");
+    for f in &sc.fractions {
+        let lead: String = topic(f).split(' ').take(4).collect::<Vec<_>>().join(" ");
+        let hits = rag
+            .search(topic(f), &SearchOptions { k: 20, ..SearchOptions::default() })
+            .expect("search");
+        let hit = hits
+            .iter()
+            .find(|h| h.file == fraction_source("s1", f.index) && h.start_line == 1)
+            .unwrap_or_else(|| panic!("no hit for fraction {}", f.index));
+        let gist = rag.expand_level(hit.chunk_id, uriel_rag::Level::L3).expect("gist");
+        assert!(gist.contains(&lead), "gist {gist:?} lacks {lead:?}");
+        assert!(!gist.starts_with("# ctx"), "{gist}");
+    }
+}
+
+#[test]
+fn recapturing_an_old_format_database_replaces_fractions_without_duplicates() {
+    let sc = scan_str(&jsonl(&tagged(60)));
+    let (old, _) = mem_pair();
+    for f in &sc.fractions {
+        let legacy = format!("# {}\n{}", meta(f), body(f));
+        old.index_text(&fraction_source("s1", f.index), &legacy).expect("legacy");
+    }
+    let report = capture_into(&old, "s1", &sc, MAX_WRITES).expect("recapture");
+    assert_eq!(report.written, sc.fractions.len());
+    let (fresh, _) = mem_pair();
+    capture_into(&fresh, "s1", &sc, MAX_WRITES).expect("fresh");
+    let (a, b) = (old.stats().expect("old"), fresh.stats().expect("fresh"));
+    assert_eq!((a.chunks, a.files, a.text_bytes), (b.chunks, b.files, b.text_bytes));
+    let query = SearchOptions { k: 40, ..SearchOptions::default() };
+    let shape = |rag: &Rag| {
+        rag.search("subsystem needs attention", &query)
+            .expect("search")
+            .into_iter()
+            .map(|h| (h.file, h.start_line, h.end_line, h.memory))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(shape(&old), shape(&fresh));
+}
+
+#[test]
+fn a_shorter_transcript_prunes_the_stale_tail_of_its_session_only() {
+    let (rag, graph) = mem_pair();
+    let big = scan_str(&jsonl(&tagged(80)));
+    capture_into(&rag, "s1", &big, MAX_WRITES).expect("big");
+    let other = scan(Cursor::new(jsonl(&tagged(30)).into_bytes()), "s2");
+    capture_into(&rag, "s2", &other, MAX_WRITES).expect("other");
+    let small = scan_str(&jsonl(&tagged(40)));
+    capture_into(&rag, "s1", &small, MAX_WRITES).expect("small");
+    let pruned = prune_stale(&rag, &graph, "s1", &small).expect("prune");
+    assert_eq!(pruned, big.fractions.len() - small.fractions.len());
+    let hits = rag
+        .search("subsystem needs attention", &SearchOptions { k: 200, ..SearchOptions::default() })
+        .expect("search");
+    let s1: Vec<&str> = hits.iter().map(|h| h.file.as_str()).filter(|f| f.starts_with("ctx/s1/")).collect();
+    assert!(!s1.is_empty());
+    let kept: Vec<String> = small.fractions.iter().map(|f| fraction_source("s1", f.index)).collect();
+    assert!(s1.iter().all(|f| kept.iter().any(|k| k == f)), "{s1:?}");
+    assert!(hits.iter().any(|h| h.file.starts_with("ctx/s2/")));
+    assert_eq!(prune_stale(&rag, &graph, "s1", &small).expect("again"), 0);
+}
+
+#[test]
+fn pruning_never_runs_on_a_truncated_scan() {
+    let (rag, graph) = mem_pair();
+    let s = jsonl(&tagged(80));
+    let full = scan_str(&s);
+    capture_into(&rag, "s1", &full, MAX_WRITES).expect("full");
+    let ring = scan_bounded(Cursor::new(s.as_bytes()), "s1", 3, MAX_READ_BYTES);
+    assert!(ring.truncated);
+    assert_eq!(prune_stale(&rag, &graph, "s1", &ring).expect("ring"), 0);
+    let cut = scan_bounded(Cursor::new(s.as_bytes()), "s1", MAX_FRACTIONS, 4000);
+    assert!(cut.truncated);
+    assert_eq!(prune_stale(&rag, &graph, "s1", &cut).expect("cut"), 0);
+    let hits = rag
+        .search("subsystem needs attention", &SearchOptions { k: 200, ..SearchOptions::default() })
+        .expect("search");
+    assert!(hits.iter().any(|h| h.file == fraction_source("s1", 0)));
+}
+
+#[test]
+fn stale_summaries_are_pruned_too() {
+    let (rag, graph) = mem_pair();
+    let mut one: Value = serde_json::from_str(&user(&format!("{SUMMARY_PREFIX}. Summary: first zebra"))).expect("json");
+    one["isCompactSummary"] = json!(true);
+    let mut two = one.clone();
+    two["message"]["content"] = json!(format!("{SUMMARY_PREFIX}. Summary: second giraffe"));
+    let both = scan_str(&jsonl(&[user("hello"), one.to_string(), assistant("hi"), two.to_string()]));
+    capture_into(&rag, "s1", &both, MAX_WRITES).expect("both");
+    let single = scan_str(&jsonl(&[user("hello"), one.to_string(), assistant("hi")]));
+    capture_into(&rag, "s1", &single, MAX_WRITES).expect("single");
+    assert_eq!(prune_stale(&rag, &graph, "s1", &single).expect("prune"), 1);
+    assert!(files_for(&rag, "second giraffe").iter().all(|f| f != &summary_source("s1", 2)));
+    assert!(files_for(&rag, "first zebra").contains(&summary_source("s1", 1)));
 }

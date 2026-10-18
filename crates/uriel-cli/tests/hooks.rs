@@ -340,3 +340,130 @@ fn recall_with_capture_stores_the_compaction_summary_and_shows_it() {
         .expect("search");
     assert!(hits.iter().any(|h| h.file == "ctx/sess-1/summary-1.md"));
 }
+
+fn captured_db(dir: &Path, lines: &[String]) -> (PathBuf, String) {
+    let t = dir.join("t.jsonl");
+    write_transcript(&t, lines);
+    let (db, arg) = db_arg(dir);
+    let p = payload("PreCompact", "sess-1", &t, json!({}));
+    assert!(run(&["capture", "--db", &arg], &p).status.success());
+    (db, arg)
+}
+
+#[test]
+fn recall_prints_citations_and_leaves_the_database_bytes_untouched() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let (db, arg) = captured_db(dir.path(), &conversation(60));
+    let before = std::fs::read(&db).expect("read db");
+    let out = run(&["recall", "--db", &arg, "vermilion", "gasket", "resonates"], b"");
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(text.starts_with("// ctx/sess-1/"), "{text}");
+    assert!(text.contains(" #"));
+    assert!(!text.contains("hookSpecificOutput") && !text.starts_with('{'));
+    assert_eq!(stderr_lines(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(std::fs::read(&db).expect("read db"), before);
+    let again = run(&["recall", "--db", &arg, "vermilion", "gasket", "resonates"], b"");
+    assert_eq!(again.stdout, out.stdout);
+}
+
+#[test]
+fn recall_honours_budget_and_k_and_does_not_read_stdin() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let (_, arg) = captured_db(dir.path(), &conversation(120));
+    let small = run(&["recall", "--db", &arg, "--budget", "40", "scheduler", "ledger"], b"ignored");
+    assert!(small.status.success());
+    assert!(String::from_utf8_lossy(&small.stdout).chars().count().div_ceil(4) <= 40);
+    let one = run(&["recall", "--db", &arg, "--k", "1", "--budget", "4000", "scheduler", "ledger"], b"");
+    let text = String::from_utf8_lossy(&one.stdout).to_string();
+    assert_eq!(text.lines().filter(|l| l.starts_with("// ")).count(), 1, "{text}");
+}
+
+#[test]
+fn recall_on_a_missing_database_exits_zero_with_one_diagnostic_and_creates_nothing() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let (db, arg) = db_arg(dir.path());
+    let out = run(&["recall", "--db", &arg, "anything"], b"");
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+    assert_eq!(stderr_lines(&out), 1);
+    assert!(!db.exists());
+}
+
+#[test]
+fn recall_with_no_match_prints_nothing_on_stdout() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let (_, arg) = captured_db(dir.path(), &conversation(10));
+    let out = run(&["recall", "--db", &arg, "   "], b"");
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn recall_on_a_database_held_by_a_writer_exits_zero_with_one_diagnostic() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let (db, arg) = captured_db(dir.path(), &conversation(30));
+    let held = open_rag(&db);
+    let out = run(&["recall", "--db", &arg, "vermilion", "gasket", "resonates"], b"");
+    assert!(out.status.success());
+    assert!(out.stdout.is_empty());
+    assert_eq!(stderr_lines(&out), 1, "{}", String::from_utf8_lossy(&out.stderr));
+    drop(held);
+    let free = run(&["recall", "--db", &arg, "vermilion", "gasket", "resonates"], b"");
+    assert!(String::from_utf8_lossy(&free.stdout).starts_with("// ctx/sess-1/"));
+}
+
+#[test]
+fn recall_expand_prints_the_whole_chunk_and_the_hook_header_points_at_it() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let (_, arg) = captured_db(dir.path(), &conversation(30));
+    let found = run(&["recall", "--db", &arg, "vermilion", "gasket", "resonates"], b"");
+    let text = String::from_utf8_lossy(&found.stdout).to_string();
+    let id: u64 = text
+        .lines()
+        .next()
+        .and_then(|l| l.rsplit_once(" #"))
+        .and_then(|(_, id)| id.split_whitespace().next())
+        .and_then(|id| id.parse().ok())
+        .expect("chunk id");
+    let full = run(&["recall", "--db", &arg, "--expand", &id.to_string()], b"");
+    assert!(full.status.success());
+    assert!(String::from_utf8_lossy(&full.stdout).contains(NEEDLE));
+    assert_eq!(stderr_lines(&full), 0);
+    let gone = run(&["recall", "--db", &arg, "--expand", "999999999"], b"");
+    assert!(gone.status.success());
+    assert!(gone.stdout.is_empty());
+    assert_eq!(stderr_lines(&gone), 1);
+    let t = dir.path().join("t.jsonl");
+    let p = payload("SessionStart", "sess-1", &t, json!({"source": "compact"}));
+    let hook = run(&["recall-context", "--db", &arg], &p);
+    let v: Value = serde_json::from_slice(&hook.stdout).expect("json");
+    let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().expect("context");
+    assert!(ctx.lines().next().expect("header").contains(&format!("uriel recall --db {arg} --expand <chunk_id>")), "{ctx}");
+}
+
+#[test]
+fn capturing_a_shorter_transcript_prunes_the_stale_fractions_through_the_binary() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let t = dir.path().join("t.jsonl");
+    let (db, arg) = db_arg(dir.path());
+    let p = payload("PreCompact", "sess-1", &t, json!({}));
+    let last_index = |db: &Path| {
+        let rag = open_rag(db);
+        let hits = rag
+            .search("scheduler ledger orbit", &SearchOptions { k: 100, ..SearchOptions::default() })
+            .expect("search");
+        hits.iter()
+            .filter_map(|h| h.file.strip_prefix("ctx/sess-1/")?.strip_suffix(".md")?.parse::<usize>().ok())
+            .max()
+    };
+    write_transcript(&t, &conversation(120));
+    assert!(run(&["capture", "--db", &arg], &p).status.success());
+    let long = last_index(&db).expect("long");
+    assert!(long >= 4, "{long}");
+    write_transcript(&t, &conversation(40));
+    assert!(run(&["capture", "--db", &arg], &p).status.success());
+    let short = last_index(&db).expect("short");
+    assert!(short < long && short <= 2, "{short} {long}");
+    assert!(needle_files(&db).first().is_some_and(|f| f.starts_with("ctx/sess-1/")));
+}
