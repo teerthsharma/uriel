@@ -457,3 +457,37 @@ fn rag_expand_returns_json_file_text_byte_exact_in_every_level() {
     assert_eq!(expand("data"), plain);
     assert_eq!(expand("prose"), plain);
 }
+
+fn without_format(mut args: Value) -> Value {
+    if let Some(m) = args.as_object_mut() {
+        m.remove("format");
+    }
+    args
+}
+
+#[test]
+fn data_and_prose_never_cost_more_than_off_for_any_tool_at_its_default_format() {
+    let p = Proj::new();
+    let servers = [
+        server(p.dir.path(), &[], "house"),
+        server(p.dir.path(), &["--terse", "data"], "house"),
+        server(p.dir.path(), &["--terse", "prose"], "house"),
+    ];
+    let mut per_tool: std::collections::BTreeMap<&str, [usize; 3]> = std::collections::BTreeMap::new();
+    for (name, args) in calls() {
+        let args = without_format(args);
+        for (i, s) in servers.iter().enumerate() {
+            let t = text(s, name, args.clone());
+            per_tool.entry(name).or_insert([0; 3])[i] += estimate_tokens(&t);
+        }
+    }
+    let mut saved = 0;
+    for (name, [off, data, prose]) in &per_tool {
+        assert!(data <= off, "{name}: data {data} > off {off}");
+        assert!(prose <= off, "{name}: prose {prose} > off {off}");
+        saved += off - data;
+    }
+    assert!(saved > 0, "{per_tool:?}");
+    let total = |i: usize| per_tool.values().map(|t| t[i]).sum::<usize>();
+    assert!(total(1) <= total(0) && total(2) <= total(0));
+}
