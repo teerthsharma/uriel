@@ -21,6 +21,15 @@ pub struct Services {
     scaffold: Mutex<Option<Scaffold>>,
 }
 
+pub const STABLE_PREFIX_ENV: &str = "URIEL_STABLE_PREFIX";
+
+fn stable_prefix_from_env() -> bool {
+    !matches!(
+        std::env::var(STABLE_PREFIX_ENV).as_deref(),
+        Ok("off" | "0" | "false")
+    )
+}
+
 fn probe_from_env() -> Box<dyn SystemProbe> {
     let fake = std::env::var(FAKE_PROBE_ENV).ok().and_then(|v| {
         let (free, total) = v.split_once(',')?;
@@ -68,7 +77,7 @@ impl Services {
             house_cfg,
             rag: OnceLock::new(),
             house: OnceLock::new(),
-            stable_prefix: cfg.stable_prefix,
+            stable_prefix: stable_prefix_from_env(),
             scaffold: Mutex::new(None),
         })
     }

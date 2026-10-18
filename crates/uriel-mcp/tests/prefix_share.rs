@@ -31,11 +31,11 @@ fn the_frozen_queries_report_the_prefix_stable_share_of_the_json_view() {
         .expect("parse");
     assert_eq!(set.queries.len(), 100);
     let start = |flag: &str| {
-        let args: Vec<String> = ["--in-memory", "--stable-prefix", flag]
+        let args: Vec<String> = ["--in-memory"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let mut s = Session::start(&args, &[]);
+        let mut s = Session::start(&args, &[("URIEL_STABLE_PREFIX", flag)]);
         s.ok("rag_index", json!({"path": corpus.root().to_string_lossy()}));
         s
     };

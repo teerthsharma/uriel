@@ -40,11 +40,11 @@ fn corpus() -> tempfile::TempDir {
 }
 
 fn started(flag: &str, corpus: &Path) -> Session {
-    let args: Vec<String> = ["--in-memory", "--stable-prefix", flag]
+    let args: Vec<String> = ["--in-memory"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let mut s = Session::start(&args, &[]);
+    let mut s = Session::start(&args, &[("URIEL_STABLE_PREFIX", flag)]);
     s.text("rag_index", json!({"path": corpus.to_string_lossy()}));
     s
 }
