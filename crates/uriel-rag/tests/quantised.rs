@@ -5,6 +5,8 @@ use uriel_rag::eval::{generate_queries, parse_queries, queries_json, run_frozen,
 
 const F32_RECALL_AT_5: f64 = 0.880;
 const F32_RECALL_AT_10: f64 = 0.890;
+const RERANKED_RECALL_AT_5: f64 = 0.95;
+const COMPRESSION_TARGET: f64 = 16.0;
 
 fn all_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let mut entries: Vec<_> = fs::read_dir(dir)
@@ -66,5 +68,26 @@ fn frozen_corpus_recall_is_not_below_the_f32_baseline() {
         r.rag_recall_at_10 >= F32_RECALL_AT_10 - 1e-9,
         "recall@10 {} fell below the f32 baseline {F32_RECALL_AT_10}",
         r.rag_recall_at_10
+    );
+}
+
+#[test]
+fn frozen_recall_after_rerank_reaches_the_target() {
+    let r = frozen_report();
+    println!("{r}");
+    assert!(
+        r.rag_recall_at_5 >= RERANKED_RECALL_AT_5 - 1e-9,
+        "recall@5 {} below {RERANKED_RECALL_AT_5}",
+        r.rag_recall_at_5
+    );
+}
+
+#[test]
+fn frozen_compression_ratio_reaches_the_target() {
+    let r = frozen_report();
+    assert!(
+        r.compression_ratio >= COMPRESSION_TARGET,
+        "compression {:.2}x below {COMPRESSION_TARGET}x",
+        r.compression_ratio
     );
 }

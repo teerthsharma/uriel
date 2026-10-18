@@ -3,7 +3,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::chunk::{is_doc_line, is_signature, Lang};
 use crate::tokenize::terms;
 
-const MIN_BUDGET: usize = 32;
+const MIN_BUDGET: usize = 12;
+const HEAD_MIN: usize = 16;
 const MAX_LINE_CHARS: usize = 160;
 
 #[derive(Debug, Default)]
@@ -56,6 +57,56 @@ fn cut(s: &str, max: usize) -> String {
     }
 }
 
+fn token_weight(token: &str, corpus: &Corpus) -> f64 {
+    let unique: BTreeSet<String> = terms(token).into_iter().collect();
+    unique.iter().map(|t| f64::from(corpus.idf(t))).sum()
+}
+
+fn fit(line: &str, max: usize, corpus: &Corpus) -> String {
+    let s = squeeze(line);
+    if s.chars().count() <= max {
+        return s;
+    }
+    let mut tokens: Vec<(usize, &str)> = Vec::new();
+    for (i, tok) in s.split(' ').enumerate() {
+        let marker = i == 0 && !tok.chars().any(char::is_alphanumeric);
+        if marker || !terms(tok).is_empty() {
+            tokens.push((i, tok));
+        }
+    }
+    if tokens.is_empty() {
+        return cut(&s, max);
+    }
+    let joined = |kept: &[(usize, &str)]| kept.iter().map(|t| t.1).collect::<Vec<_>>().join(" ");
+    if joined(&tokens).chars().count() <= max {
+        return joined(&tokens);
+    }
+    let weights: Vec<f64> = tokens.iter().map(|t| token_weight(t.1, corpus)).collect();
+    let marker = |k: usize| tokens[k].0 == 0 && weights[k] == 0.0;
+    let mut order: Vec<usize> = (0..tokens.len()).collect();
+    order.sort_by(|&a, &b| {
+        marker(b)
+            .cmp(&marker(a))
+            .then(weights[b].total_cmp(&weights[a]))
+            .then(a.cmp(&b))
+    });
+    let mut used = 0usize;
+    let mut kept: Vec<usize> = Vec::new();
+    let mut anchored = false;
+    for k in order {
+        let cost = tokens[k].1.chars().count() + usize::from(!kept.is_empty());
+        let anchor = !marker(k) && !anchored;
+        if anchor || used + cost <= max {
+            anchored |= anchor;
+            used += cost;
+            kept.push(k);
+        }
+    }
+    kept.sort_unstable();
+    let picked: Vec<(usize, &str)> = kept.into_iter().map(|k| tokens[k]).collect();
+    joined(&picked)
+}
+
 pub(crate) fn compress(text: &str, lang: Lang, ratio: usize, corpus: &Corpus) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let Some(first) = lines.iter().position(|l| !l.trim().is_empty()) else {
@@ -66,7 +117,7 @@ pub(crate) fn compress(text: &str, lang: Lang, ratio: usize, corpus: &Corpus) ->
     let mut chosen: Vec<Option<String>> = vec![None; lines.len()];
     let mut used = 0usize;
 
-    let head = cut(&squeeze(lines[first]), budget.clamp(48, MAX_LINE_CHARS));
+    let head = fit(lines[first], budget.clamp(HEAD_MIN, MAX_LINE_CHARS), corpus);
     used += head.chars().count() + 1;
     chosen[first] = Some(head);
 
@@ -259,5 +310,51 @@ mod tests {
         for _ in 0..500 {
             assert_eq!(compress(&text, Lang::Text, 3, &corpus), first);
         }
+    }
+
+    #[test]
+    fn a_short_first_line_lets_a_small_chunk_reach_the_ratio() {
+        let mut text = String::from("fn run() {\n");
+        for i in 0..12 {
+            text.push_str(&format!("    step_{i}();\n"));
+        }
+        let mut corpus = Corpus::new();
+        corpus.add(&text);
+        let m = compress(&text, Lang::Rust, 16, &corpus);
+        assert!(m.starts_with("fn run() {"), "{m}");
+        assert!(
+            m.chars().count() <= 16,
+            "{} chars from {}: {m}",
+            m.chars().count(),
+            text.len()
+        );
+    }
+
+    #[test]
+    fn an_overlong_first_line_keeps_its_rarest_word_not_its_prefix() {
+        let first = "/// the quick brown fox jumps over a lazy zeppelinwordx";
+        let mut text = String::from(first);
+        text.push('\n');
+        for i in 0..24 {
+            text.push_str(&format!("    let pad_{i} = {i};\n"));
+        }
+        let mut corpus = Corpus::new();
+        for _ in 0..20 {
+            corpus.add("the quick brown fox jumps over a lazy dog");
+        }
+        corpus.add(&text);
+        let m = compress(&text, Lang::Rust, 16, &corpus);
+        let head = m.lines().next().expect("head");
+        assert!(head.starts_with("///"), "{head}");
+        assert!(head.contains("zeppelinwordx"), "{head}");
+        assert!(head.chars().count() <= text.len() / 16, "{head}");
+    }
+
+    #[test]
+    fn the_first_line_is_never_dropped_even_when_the_budget_is_tiny() {
+        let text = "/// Computes a rolling checksum\nfn a() {}\nfn b() {}\nfn c() {}";
+        let m = compress(text, Lang::Rust, 64, &Corpus::new());
+        assert!(!m.is_empty());
+        assert!(m.starts_with("///"), "{m}");
     }
 }

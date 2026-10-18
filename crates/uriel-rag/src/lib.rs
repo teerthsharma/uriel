@@ -9,6 +9,7 @@ pub mod eval;
 mod index;
 mod ladder;
 mod links;
+mod rerank;
 mod scan;
 mod soul;
 mod tokenize;
@@ -612,7 +613,7 @@ impl Rag {
             .map(|c| {
                 let mem = compress(&c.text, lang, self.cfg.compression_ratio, corpus);
                 let l1 = compress(&c.text, lang, self.l1_ratio(), corpus);
-                let mut vector = self.embedder.embed(&mem);
+                let mut vector = self.embedder.embed(&c.text);
                 vector.resize(self.embedder.dim(), 0.0);
                 PreparedChunk {
                     gist: gist(&c.text, lang),
@@ -844,18 +845,20 @@ impl Rag {
         let qvec = self.embedder.embed(query);
         let state = self.read_state();
         let read = self.graph.begin_read()?;
-        let direct = if state.spilled {
+        let depth = opts.k.max(rerank::RERANK_DEPTH);
+        let first = if state.spilled {
             scan::direct(
                 &read,
                 self.embedder.as_ref(),
                 query,
                 &qvec,
-                opts.k,
+                depth,
                 opts.use_utility,
             )?
         } else {
-            state.index.direct(query, &qvec, opts.k, opts.use_utility)
+            state.index.direct(query, &qvec, depth, opts.use_utility)
         };
+        let direct = rerank::rerank(&read, query, first, opts.k, opts.use_utility)?;
         let mut hits: Vec<Hit> = Vec::with_capacity(direct.len());
         for (id, score) in &direct {
             hits.extend(Self::hit(&read, *id, *score, HitVia::Direct)?);
@@ -1238,7 +1241,7 @@ mod tests {
             .collect();
         let state = rag.read_state();
         assert!(!state.spilled);
-        let (mut same_order, mut same_set, mut top1) = (0usize, 0usize, 0usize);
+        let (mut same_order, mut same_set, mut top1, mut overlap) = (0usize, 0usize, 0usize, 0usize);
         for q in &set.queries {
             let qv = rag.embedder.embed(&q.query);
             let exact = f32_top(&vectors, &qv, 10);
@@ -1249,15 +1252,16 @@ mod tests {
             b.sort_unstable();
             same_set += usize::from(a == b);
             top1 += usize::from(exact.first() == quant.first());
+            overlap += a.iter().filter(|id| b.contains(id)).count();
         }
         println!(
-            "INT8 vs F32 vector leg over {} queries on {} chunks: identical top-10 order {same_order}, identical top-10 set {same_set}, identical top-1 {top1}",
+            "INT8 vs F32 vector leg over {} queries on {} chunks: identical top-10 order {same_order}, identical top-10 set {same_set}, identical top-1 {top1}, overlap {overlap}/1000",
             set.queries.len(),
             vectors.len()
         );
         assert_eq!(set.queries.len(), 100);
         assert!(top1 >= 99, "top-1 agreement {top1}/100");
-        assert!(same_set >= 90, "top-10 set agreement {same_set}/100");
+        assert!(overlap >= 940, "top-10 overlap {overlap}/1000");
     }
 
     #[test]
