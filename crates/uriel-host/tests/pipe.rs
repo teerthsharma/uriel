@@ -338,7 +338,6 @@ fn twenty_thousand_random_byte_strings_never_panic_or_wedge_the_server() {
     assert_eq!(reconnects, 0);
 
     let mut refused = 0usize;
-    let mut silent = 0usize;
     for _ in 0..1_000usize {
         let mut raw = Probe::connect(&path);
         let len = 4 + rng.index(60);
@@ -346,10 +345,9 @@ fn twenty_thousand_random_byte_strings_never_panic_or_wedge_the_server() {
         match raw.reply() {
             Reply::Frame(Response::Error { .. }) | Reply::Closed => refused += 1,
             Reply::Frame(_) => {}
-            Reply::Silent => silent += 1,
+            Reply::Silent => panic!("a raw random string drew no reply"),
         }
     }
-    assert_eq!(silent, 0);
     assert!(refused > 990, "only {refused} of 1000 raw strings were refused");
 
     for gauge in host.connection_buffers() {
