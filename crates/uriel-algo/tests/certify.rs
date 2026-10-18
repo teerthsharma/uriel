@@ -683,3 +683,97 @@ fn a_zero_distance_radius_is_the_underflow_floor_rounded_upward() {
     assert_eq!(e.scores, vec![0.0]);
     assert_eq!(e.radii, vec![eta(4, Precision::F32).next_up()]);
 }
+
+fn plain_topk(keys: &[i128], k: usize) -> Vec<usize> {
+    exact_topk(keys, k)
+}
+
+fn corner_separates(keys: &[i128], rad: &[i128], set: &[usize]) -> bool {
+    let max_in = set.iter().map(|&i| keys[i] + rad[i]).max().unwrap();
+    (0..keys.len())
+        .filter(|i| !set.contains(i))
+        .all(|j| keys[j] - rad[j] > max_in)
+}
+
+#[test]
+fn certified_topk_equals_the_plain_exact_topk_on_random_integer_score_sets() {
+    let mut rng = Rng::new(0x1E7);
+    let (mut certified, mut refused) = (0, 0);
+    for case in 0..2000 {
+        let n = rng.int(3, 17) as usize;
+        let k = rng.int(1, n as i64) as usize;
+        let largest = rng.int(0, 2) == 1;
+        let values: Vec<i64> = (0..n).map(|_| rng.int(0, 8)).collect();
+        let quarter: Vec<i64> = (0..n).map(|_| rng.int(0, 2)).collect();
+        let scores: Vec<f64> = values.iter().map(|&v| v as f64).collect();
+        let radii: Vec<f64> = quarter.iter().map(|&q| q as f64 * 0.25).collect();
+        let sgn = if largest { -1 } else { 1 };
+        let keys: Vec<i128> = values.iter().map(|&v| (sgn * 4 * v) as i128).collect();
+        let rad: Vec<i128> = quarter.iter().map(|&q| q as i128).collect();
+        let truth = plain_topk(&keys, k);
+        let decidable = {
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by_key(|&i| (keys[i], i));
+            corner_separates(&keys, &rad, &order[..k])
+        };
+        match certified_topk(&scores, &radii, k, largest, false) {
+            Ok(set) => {
+                assert!(decidable, "case {case}: certified an undecidable boundary");
+                assert_eq!(set, truth, "case {case}");
+                certified += 1;
+            }
+            Err(Refusal::BoundaryUndetermined { .. }) => {
+                assert!(!decidable, "case {case}: refused a decidable boundary");
+                refused += 1;
+            }
+            Err(other) => panic!("case {case}: unexpected {other:?}"),
+        }
+    }
+    assert!(certified >= 300, "only {certified} certified");
+    assert!(refused >= 300, "only {refused} refused");
+}
+
+#[test]
+fn certified_topk_never_returns_a_wrong_set_on_scores_one_ulp_apart() {
+    let mut rng = Rng::new(0xADE);
+    let (mut certified, mut refused) = (0, 0);
+    for case in 0..2000 {
+        let n = rng.int(3, 9) as usize;
+        let k = rng.int(1, n as i64) as usize;
+        let largest = rng.int(0, 2) == 1;
+        let base = (1.0 + rng.unit() * 0.25) * 2f64.powi(rng.int(-30, 30) as i32);
+        let ulp = base.next_up() - base;
+        let steps: Vec<i64> = (0..n).map(|_| rng.int(0, 14)).collect();
+        let scores: Vec<f64> = steps
+            .iter()
+            .map(|&j| (0..j).fold(base, |x, _| x.next_up()))
+            .collect();
+        let half = rng.int(0, 2) == 1;
+        let radii = [if half { ulp / 2.0 } else { 0.0 }];
+        let sgn = if largest { -1 } else { 1 };
+        let keys: Vec<i128> = steps.iter().map(|&j| (sgn * 2 * j) as i128).collect();
+        let rad = vec![i128::from(half); n];
+        match certified_topk(&scores, &radii, k, largest, false) {
+            Ok(set) => {
+                assert!(
+                    corner_separates(&keys, &rad, &set),
+                    "case {case}: certified a set the box does not decide"
+                );
+                assert_eq!(set, plain_topk(&keys, k), "case {case}");
+                certified += 1;
+            }
+            Err(Refusal::BoundaryUndetermined { .. }) => refused += 1,
+            Err(other) => panic!("case {case}: unexpected {other:?}"),
+        }
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| (keys[i], i));
+        if keys[order[k - 1]] == keys[order[k.min(n - 1)]] && k < n {
+            assert!(
+                certified_topk(&scores, &radii, k, largest, false).is_err(),
+                "case {case}: certified through an exact tie"
+            );
+        }
+    }
+    assert!(certified >= 400, "only {certified} certified");
+    assert!(refused >= 1000, "only {refused} refused");
+}
