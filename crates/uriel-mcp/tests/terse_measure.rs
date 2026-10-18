@@ -123,11 +123,13 @@ struct Arm {
     json: bool,
 }
 
-const ARMS: [Arm; 4] = [
+const ARMS: [Arm; 6] = [
     Arm { label: "off-default", terse: "off", json: false },
     Arm { label: "off-json", terse: "off", json: true },
-    Arm { label: "data", terse: "data", json: true },
-    Arm { label: "prose", terse: "prose", json: true },
+    Arm { label: "data-default", terse: "data", json: false },
+    Arm { label: "data-json", terse: "data", json: true },
+    Arm { label: "prose-default", terse: "prose", json: false },
+    Arm { label: "prose-json", terse: "prose", json: true },
 ];
 
 fn session(root: &str, terse: &str) -> Session {
@@ -194,8 +196,14 @@ fn measure_the_three_terse_levels_on_the_repository_index() {
     let total: Vec<usize> = (0..ARMS.len()).map(|a| rows.iter().map(|r| r.2[a]).sum()).collect();
     println!("| TOTAL | {} |", total.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" | "));
     let ratio = |a: usize, b: usize| 1.0 - total[a] as f64 / total[b] as f64;
-    println!("saved vs off-json: data {:.4} prose {:.4}", ratio(2, 1), ratio(3, 1));
-    println!("saved vs off-default: off-json {:.4} data {:.4} prose {:.4}", ratio(1, 0), ratio(2, 0), ratio(3, 0));
+    println!("saved vs off-default: data {:.4} prose {:.4}", ratio(2, 0), ratio(4, 0));
+    println!("saved vs off-json: data-json {:.4} prose-json {:.4}", ratio(3, 1), ratio(5, 1));
+    for (class, t) in &by_class {
+        assert!(t[2] <= t[0], "{class}: data-default {} > off-default {}", t[2], t[0]);
+        assert!(t[4] <= t[0], "{class}: prose-default {} > off-default {}", t[4], t[0]);
+        assert!(t[3] <= t[1], "{class}: data-json {} > off-json {}", t[3], t[1]);
+    }
+    assert!(total[2] <= total[0] && total[4] <= total[0]);
     if let Some(dir) = dump {
         std::fs::create_dir_all(&dir).expect("dir");
         for (i, (class, name, _)) in calls(true).into_iter().enumerate() {
