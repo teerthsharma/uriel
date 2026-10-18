@@ -27,7 +27,14 @@ const HOOKS_HELP: &str = "Claude Code hooks (never block a session, always exit 
       SessionStart (matcher compact): prints the hook JSON with the gists most
       relevant to the session; --capture also stores the compaction summary
       first, under one database open.
-Settings block: docs/claude-code-hooks.md";
+Settings block: docs/claude-code-hooks.md
+
+Searching captured context from a shell (read-only, never a hook):
+  uriel recall --db <path> [--budget 1200] [--k 8] <query words...>
+      Prints `// file:start-end #chunk` citations with the resolution ladder
+      (top hit at L1, then L2, then one-line L3 gists) under the token budget.
+  uriel recall --db <path> --expand <chunk_id>
+      Prints the whole stored text of one cited chunk.";
 
 #[derive(Debug, Parser, PartialEq)]
 #[command(name = "uriel", disable_version_flag = true, about = "uriel: fewest tokens in, same information out", after_help = HOOKS_HELP)]
@@ -48,6 +55,7 @@ enum Command {
     Install,
     Capture(CaptureArgs),
     RecallContext(RecallArgs),
+    Recall(SearchArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -134,6 +142,20 @@ struct RecallArgs {
     capture: bool,
 }
 
+#[derive(Debug, Args, PartialEq)]
+struct SearchArgs {
+    #[arg(long)]
+    db: Option<PathBuf>,
+    #[arg(long, default_value_t = recall::DEFAULT_BUDGET)]
+    budget: usize,
+    #[arg(long, default_value_t = recall::DEFAULT_K)]
+    k: usize,
+    #[arg(long)]
+    expand: Option<u64>,
+    #[arg(num_args = 1.., required_unless_present = "expand", conflicts_with = "expand")]
+    query: Vec<String>,
+}
+
 impl McpArgs {
     fn to_config(&self) -> Result<Config, String> {
         self.to_config_envs(
@@ -211,6 +233,11 @@ fn dispatch<R: BufRead, W: Write>(
         Some(Command::RecallContext(args)) => {
             let db = args.db.unwrap_or_else(default_db_path);
             recall::run(&db, args.budget, args.capture, input, out);
+            Ok(())
+        }
+        Some(Command::Recall(args)) => {
+            let db = args.db.unwrap_or_else(default_db_path);
+            recall::run_search(&db, args.budget, args.k, &args.query.join(" "), args.expand, out);
             Ok(())
         }
         Some(Command::Index(args)) => {
@@ -502,11 +529,50 @@ mod tests {
     }
 
     #[test]
+    fn recall_parses_its_flags_and_query_words() {
+        assert_eq!(
+            command(&["recall", "tcp", "drain"]),
+            Some(Command::Recall(SearchArgs {
+                db: None,
+                budget: 1200,
+                k: 8,
+                expand: None,
+                query: vec!["tcp".into(), "drain".into()],
+            }))
+        );
+        assert_eq!(
+            command(&["recall", "--db", "g", "--budget", "300", "--k", "5", "release", "v0.2.0"]),
+            Some(Command::Recall(SearchArgs {
+                db: Some(PathBuf::from("g")),
+                budget: 300,
+                k: 5,
+                expand: None,
+                query: vec!["release".into(), "v0.2.0".into()],
+            }))
+        );
+        assert_eq!(
+            command(&["recall", "--db", "g", "--expand", "42"]),
+            Some(Command::Recall(SearchArgs {
+                db: Some(PathBuf::from("g")),
+                budget: 1200,
+                k: 8,
+                expand: Some(42),
+                query: Vec::new(),
+            }))
+        );
+        assert!(parse(&["recall", "--expand", "42", "extra", "words"]).is_err());
+        assert!(parse(&["recall"]).is_err());
+        assert!(parse(&["recall", "--bogus", "x"]).is_err());
+        assert!(parse(&["recall", "--k", "many", "x"]).is_err());
+    }
+
+    #[test]
     fn hook_invocations_are_recognised_by_their_first_argument() {
         let args = |a: &[&str]| -> Vec<std::ffi::OsString> { a.iter().map(Into::into).collect() };
         assert!(is_hook_invocation(&args(&["uriel", "capture", "--bogus"])));
         assert!(is_hook_invocation(&args(&["uriel", "recall-context"])));
         assert!(!is_hook_invocation(&args(&["uriel", "index"])));
+        assert!(!is_hook_invocation(&args(&["uriel", "recall", "x"])));
         assert!(!is_hook_invocation(&args(&["uriel"])));
     }
 

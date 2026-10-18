@@ -63,5 +63,27 @@ would race for the database lock. One command takes the lock once.
   than `--budget` (default 1200, ceiling 8000).
 - Stored text is the user and assistant text, tool names with a short input
   summary, and tool results cut to 600 characters. Thinking blocks are skipped.
-- Fractions carry a header with the turn range and the record timestamps, never the
+- Each fraction opens with a one-line topic (the first 120 characters of its first
+  substantive user or assistant text), so the one-line gist of a hit says what it is
+  about; the next line carries the turn range and the record timestamps, never the
   wall clock, so the same transcript always produces the same database content.
+- Re-capturing replaces fractions in place (same `ctx/<session>/<n>.md`), and drops
+  the ones past the end of a transcript that has since become shorter.
+- After a compaction the recall query is the compaction summary; without one it is
+  the last three user prompts. The newest summary comes first, then the best fractions.
+
+## Searching captured context from a shell
+
+The MCP servers keep their own databases and do not read the ctx database. Search it
+with `uriel recall`, which opens it read-only (never writes, never upgrades it):
+
+```
+uriel recall --db ~/.uriel/ctx.uriel --budget 1200 --k 8 release tag commit
+uriel recall --db ~/.uriel/ctx.uriel --expand 123
+```
+
+The first form prints `// file:start-end #chunk` citations with the resolution ladder
+(top hit at L1, then L2, then one-line L3 gists) under the token budget; the second
+prints the whole stored text of one cited chunk. Output is plain text, bounded to
+24 KiB, and identical for identical input. If a hook holds the database at that
+moment, the command prints one stderr line and exits 0.

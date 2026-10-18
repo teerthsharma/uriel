@@ -19,6 +19,9 @@ pub const MAX_WRITES: usize = 256;
 pub const MAX_SUMMARIES: usize = 16;
 pub const MAX_SUMMARY_CHARS: usize = 64_000;
 pub const MAX_PAYLOAD_BYTES: u64 = 1 << 20;
+pub const TOPIC_CHARS: usize = 120;
+pub const MIN_TOPIC_CHARS: usize = 16;
+const TOPIC_SCAN_CHARS: usize = 4 * TOPIC_CHARS;
 pub const SUMMARY_PREFIX: &str = "This session is being continued from a previous conversation";
 const NL: char = '\n';
 const READ_BUFFER_BYTES: usize = 64 << 10;
@@ -67,6 +70,30 @@ pub fn head_chars(s: &str, n: usize) -> &str {
     }
 }
 
+pub fn summary_head(text: &str) -> &str {
+    let body = text.strip_prefix(SUMMARY_PREFIX).unwrap_or(text);
+    body.split_once("Summary:").map_or(body, |x| x.1).trim()
+}
+
+fn cut_word(s: &str, n: usize) -> String {
+    let head = head_chars(s, n);
+    if head.len() == s.len() {
+        return s.to_owned();
+    }
+    match head.rfind(' ') {
+        Some(i) if head[..i].chars().count() >= n * 3 / 4 => head[..i].to_owned(),
+        _ => head.to_owned(),
+    }
+}
+
+pub fn topic_of(s: &str) -> Option<String> {
+    let flat = one_line(head_chars(s, TOPIC_SCAN_CHARS));
+    if flat.starts_with('<') || flat.chars().count() < MIN_TOPIC_CHARS {
+        return None;
+    }
+    Some(cut_word(&flat, TOPIC_CHARS))
+}
+
 fn truncate_chars(s: &str, n: usize) -> String {
     let head = head_chars(s, n);
     if head.len() < s.len() {
@@ -82,6 +109,7 @@ pub struct Entry {
     pub ts: String,
     pub summary: bool,
     pub prompt: Option<String>,
+    pub topic: Option<String>,
 }
 
 fn tool_result_text(content: &Value) -> String {
@@ -166,11 +194,13 @@ pub fn entry_from_value(v: &Value) -> Option<Entry> {
     let summary =
         flagged || (is_user && texts.first().is_some_and(|t| t.starts_with(SUMMARY_PREFIX)));
     let joined = texts.join("\n");
+    let topic = if summary { None } else { texts.iter().find_map(|t| topic_of(t)) };
     Some(Entry {
         text: if summary { joined.clone() } else { lines.join("\n") },
         ts: clean_ts(v),
         summary,
         prompt: (is_user && !summary && !texts.is_empty()).then_some(joined),
+        topic,
     })
 }
 
@@ -340,6 +370,7 @@ struct Builder {
     last_turn: u64,
     first_ts: String,
     last_ts: String,
+    topic: Option<String>,
     out: VecDeque<Fraction>,
     evicted: bool,
 }
@@ -391,20 +422,24 @@ impl Builder {
             last_turn: 0,
             first_ts: "-".to_owned(),
             last_ts: "-".to_owned(),
+            topic: None,
             out: VecDeque::new(),
             evicted: false,
         }
     }
 
-    fn push_entry(&mut self, text: &str, ts: &str) {
+    fn push_entry(&mut self, text: &str, ts: &str, topic: Option<&str>) {
         let turn = self.turn;
         self.turn = self.turn.saturating_add(1);
         let mut rest = text;
+        let mut lead = topic.map(str::to_owned);
+        let mut first = true;
         loop {
             let len = rest.chars().count();
             let sep = usize::from(self.body_chars > 0);
             if self.body_chars.saturating_add(sep).saturating_add(len) <= self.cap {
-                self.append(turn, ts, rest, sep);
+                let t = if first { lead.take() } else { topic_of(rest) };
+                self.append(turn, ts, rest, sep, t);
                 return;
             }
             if self.fresh {
@@ -413,7 +448,9 @@ impl Builder {
             }
             let room = self.cap.saturating_sub(self.body_chars + sep).max(1);
             let (head, tail) = split_fit(rest, room);
-            self.append(turn, ts, head, sep);
+            let t = if first { lead.take() } else { topic_of(head) };
+            self.append(turn, ts, head, sep, t);
+            first = false;
             self.close();
             if tail.is_empty() {
                 return;
@@ -422,7 +459,10 @@ impl Builder {
         }
     }
 
-    fn append(&mut self, turn: u64, ts: &str, s: &str, sep: usize) {
+    fn append(&mut self, turn: u64, ts: &str, s: &str, sep: usize, topic: Option<String>) {
+        if self.topic.is_none() {
+            self.topic = topic;
+        }
         if self.body_chars == 0 {
             self.first_turn = turn;
             self.first_ts = ts.to_owned();
@@ -441,8 +481,12 @@ impl Builder {
     }
 
     fn close(&mut self) {
+        let topic = self
+            .topic
+            .take()
+            .unwrap_or_else(|| cut_word(&one_line(head_chars(&self.body, TOPIC_SCAN_CHARS)), TOPIC_CHARS));
         let text = format!(
-            "# ctx turns={}-{} ts={} session={}\n{}",
+            "# {topic}\nctx turns={}-{} ts={} session={}\n{}",
             self.first_turn, self.last_turn, self.first_ts, self.session, self.body
         );
         self.out.push_back(Fraction {
@@ -493,15 +537,16 @@ pub fn scan_bounded<R: BufRead>(
         Event::Entry(e) if e.summary => {
             seen += 1;
             let body = truncate_chars(&e.text, MAX_SUMMARY_CHARS);
+            let topic = topic_of(summary_head(&body)).unwrap_or_else(|| "ctx-summary".to_owned());
             summaries.push_back(Summary {
                 n: seen,
-                text: format!("# ctx-summary n={seen} ts={} session={key}\n{body}", e.ts),
+                text: format!("# {topic}\nctx-summary n={seen} ts={} session={key}\n{body}", e.ts),
             });
             if summaries.len() > MAX_SUMMARIES {
                 summaries.pop_front();
             }
         }
-        Event::Entry(e) => builder.push_entry(&e.text, &e.ts),
+        Event::Entry(e) => builder.push_entry(&e.text, &e.ts, e.topic.as_deref()),
     });
     let (fractions, evicted) = builder.finish();
     Scan {
@@ -551,18 +596,60 @@ pub fn capture_into(
     Ok(report)
 }
 
+pub fn prune_stale(rag: &Rag, graph: &Graph, session: &str, scan: &Scan) -> Result<usize, String> {
+    if scan.truncated {
+        return Ok(0);
+    }
+    let prefix = format!("ctx/{}/", session_key(session));
+    let last_fraction = scan.fractions.last().map(|f| f.index);
+    let last_summary = scan.summaries.last().map(|s| s.n);
+    let mut stale: Vec<String> = Vec::new();
+    {
+        let read = graph.begin_read().map_err(|e| e.to_string())?;
+        for node in read.nodes_by_label("File").map_err(|e| e.to_string())? {
+            let node = node.map_err(|e| e.to_string())?;
+            let Some(uriel_core::Value::String(path)) = node.props.get("path") else {
+                continue;
+            };
+            let Some(name) = path.strip_prefix(&prefix).and_then(|r| r.strip_suffix(".md")) else {
+                continue;
+            };
+            let dead = match name.strip_prefix("summary-") {
+                Some(n) => n.parse::<usize>().ok().zip(last_summary).is_some_and(|(n, l)| n > l),
+                None => name.parse::<usize>().ok().zip(last_fraction).is_some_and(|(n, l)| n > l),
+            };
+            if dead {
+                stale.push(path.clone());
+            }
+        }
+    }
+    let mut removed = 0;
+    for path in stale {
+        removed += rag.index_text(&path, "").map_err(|e| e.to_string())?.files_indexed;
+    }
+    Ok(removed)
+}
+
 pub fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub fn open_rag(db: &Path) -> Result<Rag, String> {
+pub fn open_read_only(db: &Path) -> Result<Rag, String> {
+    let budget = MemoryBudget::mib(uriel_mcp::config::DEFAULT_MEMORY_MIB);
+    let graph = Graph::open_read_only(db, budget)
+        .map_err(|e| format!("cannot open database {}: {e}", db.display()))?;
+    Rag::open(graph, RagConfig::default()).map_err(|e| e.to_string())
+}
+
+pub fn open_db(db: &Path) -> Result<(Rag, Graph), String> {
     if let Some(dir) = db.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
     let budget = MemoryBudget::mib(uriel_mcp::config::DEFAULT_MEMORY_MIB);
     let graph = Graph::open(db, budget)
         .map_err(|e| format!("cannot open database {}: {e}", db.display()))?;
-    Rag::open(graph, RagConfig::default()).map_err(|e| e.to_string())
+    let rag = Rag::open(graph.clone(), RagConfig::default()).map_err(|e| e.to_string())?;
+    Ok((rag, graph))
 }
 
 pub fn scan_file(path: &Path, session: &str) -> Result<Scan, String> {
@@ -600,8 +687,9 @@ fn run_inner<R: BufRead>(
     if scanned.fractions.is_empty() && scanned.summaries.is_empty() {
         return Ok(());
     }
-    let rag = open_rag(db)?;
+    let (rag, graph) = open_db(db)?;
     capture_into(&rag, &session, &scanned, MAX_WRITES)?;
+    prune_stale(&rag, &graph, &session, &scanned)?;
     Ok(())
 }
 
