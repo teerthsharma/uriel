@@ -613,7 +613,7 @@ impl Rag {
             .map(|c| {
                 let mem = compress(&c.text, lang, self.cfg.compression_ratio, corpus);
                 let l1 = compress(&c.text, lang, self.l1_ratio(), corpus);
-                let mut vector = self.embedder.embed(&mem);
+                let mut vector = self.embedder.embed(&c.text);
                 vector.resize(self.embedder.dim(), 0.0);
                 PreparedChunk {
                     gist: gist(&c.text, lang),

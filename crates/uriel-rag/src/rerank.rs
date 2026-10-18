@@ -6,7 +6,7 @@ use crate::scan::utility_of;
 use crate::tokenize::terms;
 use crate::RagError;
 
-pub(crate) const RERANK_DEPTH: usize = 200;
+pub(crate) const RERANK_DEPTH: usize = 100;
 const RRF_K: f32 = 60.0;
 const FIRST_STAGE_WEIGHT: f32 = 0.5;
 

@@ -129,3 +129,39 @@ fn resident_and_spilled_indexes_return_identical_reranked_hits() {
         assert_eq!(spilled.search(q, &opts(5)).expect("search"), want, "query {q:?}");
     }
 }
+
+fn first_chunk(text: &str) -> (Vec<f32>, String, String) {
+    let graph = Graph::open_in_memory(MemoryBudget::mib(80)).expect("graph");
+    let rag = Rag::open(graph.clone(), RagConfig::default()).expect("rag");
+    rag.index_text("note.txt", text).expect("index");
+    let read = graph.begin_read().expect("read");
+    let node = read
+        .nodes_by_label("Chunk")
+        .expect("chunks")
+        .next()
+        .expect("a chunk")
+        .expect("node");
+    let get = |k: &str| match node.props.get(k) {
+        Some(Value::String(s)) => s.clone(),
+        other => panic!("no {k}: {other:?}"),
+    };
+    let vec = match node.props.get("vec") {
+        Some(Value::Vector(v)) => v.clone(),
+        other => panic!("no vector: {other:?}"),
+    };
+    (vec, get("text"), get("mem"))
+}
+
+#[test]
+fn the_stored_vector_embeds_the_full_text_not_the_compressed_memory() {
+    let text = (0..60)
+        .map(|i| format!("line {i} mentions term{i} and zorblax{i} in passing"))
+        .collect::<Vec<_>>()
+        .join("
+");
+    let (stored, chunk_text, mem) = first_chunk(&text);
+    assert!(mem.len() * 8 < chunk_text.len());
+    let embedder = HashEmbedder::new(256);
+    assert!(stored == embedder.embed(&chunk_text));
+    assert!(stored != embedder.embed(&mem));
+}
