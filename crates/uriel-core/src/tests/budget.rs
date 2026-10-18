@@ -41,8 +41,8 @@ fn the_fifty_mib_split_is_pinned() {
     assert_eq!(
         parts(b),
         [
-            10 * MIB,
-            15 * MIB,
+            25 * MIB / 2,
+            25 * MIB / 2,
             4 * MIB,
             4 * MIB,
             4 * MIB,
