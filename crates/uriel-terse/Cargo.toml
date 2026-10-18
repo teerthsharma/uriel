@@ -1,0 +1,10 @@
+[package]
+name = "uriel-terse"
+description = "Token-saving prose compaction and lossless compact JSON encoding for uriel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
