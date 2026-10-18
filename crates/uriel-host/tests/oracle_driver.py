@@ -2,6 +2,7 @@ import os
 import struct
 import sys
 import threading
+import traceback
 import time
 import unittest
 
@@ -67,11 +68,18 @@ class OracleShapes(unittest.TestCase):
             self.assertLessEqual(len(item["preview"]), 300)
             self.assertEqual(item["preview"], by_file[item["path"]][:300])
 
-    def test_preview_never_exceeds_300_chars_for_a_long_document(self):
-        text = "".join("def f%d(x):\n    return x * %d + len('padding padding padding')\n\n" % (i, i) for i in range(400))
-        self.assertTrue(self.oracle.index_file("long_document.py", text))
-        for item in self.oracle.search("padding padding padding f399", k=3):
-            self.assertLessEqual(len(item["preview"]), 300)
+    def test_preview_is_cut_to_exactly_300_chars_when_the_memory_is_longer(self):
+        class Stub:
+            def search(self, query, k, budget_tokens):
+                memory = "".join(chr(97 + i % 26) for i in range(1000))
+                hit = {"file": "wide.txt", "memory": memory, "start_line": 1, "end_line": 2}
+                return {"hits": [hit]}
+
+        oracle = ClaraOracle.__new__(ClaraOracle)
+        oracle.client = Stub()
+        (item,) = oracle.search("anything", k=3)
+        self.assertEqual(len(item["preview"]), 300)
+        self.assertEqual(item["preview"], "".join(chr(97 + i % 26) for i in range(300)))
 
     def test_score_is_one_over_one_plus_the_fused_rank(self):
         results = self.oracle.search(QUERY, k=3)
@@ -212,6 +220,25 @@ class ModuleShapes(unittest.TestCase):
 
 
 class Concurrency(unittest.TestCase):
+    def test_sixteen_oracles_connecting_at_the_same_instant_all_get_a_connection(self):
+        failures = []
+        gate = threading.Barrier(16)
+
+        def worker():
+            try:
+                gate.wait(10)
+                with ClaraOracle(PIPE) as oracle:
+                    oracle.stats()
+            except BaseException:
+                failures.append(traceback.format_exc())
+
+        threads = [threading.Thread(target=worker) for _ in range(16)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+        self.assertEqual(failures, [])
+
     def test_two_oracles_query_at_once_and_a_disconnect_mid_request_does_not_wedge_the_server(self):
         failures = []
         started = threading.Barrier(3)
@@ -226,12 +253,16 @@ class Concurrency(unittest.TestCase):
                         if not results or results[0]["path"] != "a.rs":
                             failures.append(results)
             except BaseException as error:
-                failures.append(error)
+                failures.append(traceback.format_exc())
+                started.abort()
 
         threads = [threading.Thread(target=worker) for _ in range(2)]
         for thread in threads:
             thread.start()
-        started.wait(10)
+        try:
+            started.wait(10)
+        except threading.BrokenBarrierError:
+            self.fail(failures)
         quitter = uriel_client.Client(PIPE)
         quitter.pipe.write(search_frame("slow-probe vanish before the reply"))
         time.sleep(0.05)

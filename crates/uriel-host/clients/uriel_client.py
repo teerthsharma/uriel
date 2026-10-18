@@ -1,3 +1,4 @@
+import errno
 import json
 import struct
 import sys
@@ -104,7 +105,7 @@ class Client:
                 self.pipe = open(path, "r+b", buffering=0)
                 break
             except OSError as e:
-                busy = getattr(e, "winerror", None) == ERROR_PIPE_BUSY
+                busy = getattr(e, "winerror", None) == ERROR_PIPE_BUSY or e.errno == errno.EINVAL
                 if not busy or time.monotonic() >= deadline:
                     raise
                 time.sleep(0.01)

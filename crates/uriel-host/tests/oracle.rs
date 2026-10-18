@@ -19,7 +19,7 @@ def parse_config(path):
         return json.load(handle)
 ";
 
-const EXPECTED_TESTS: usize = 23;
+const EXPECTED_TESTS: usize = 24;
 
 fn python_on_path() -> bool {
     Command::new("python")
