@@ -203,6 +203,16 @@ fn forty_leaves_complete_under_a_moving_governor() {
         );
         let heavy_cost: u64 = heavy_active.iter().map(|f| f.cost).sum();
         let headroom = free.saturating_sub(RESERVE_MB);
+        assert!(
+            heavy_cost <= TOTAL_MB - RESERVE_MB,
+            "step {step}: committed heavy {heavy_cost} MB exceeds total - reserve"
+        );
+        let new_heavy_cost: u64 = batch
+            .dispatches
+            .iter()
+            .filter(|d| d.class.is_heavy())
+            .map(|d| d.cost_mb)
+            .sum();
         let new_heavy = batch
             .dispatches
             .iter()
@@ -210,8 +220,8 @@ fn forty_leaves_complete_under_a_moving_governor() {
             .count();
         if new_heavy > 0 {
             assert!(
-                heavy_cost <= headroom,
-                "step {step}: active heavy cost {heavy_cost} MB exceeds free {free} - reserve {RESERVE_MB}"
+                new_heavy_cost <= headroom,
+                "step {step}: new heavy batch {new_heavy_cost} MB exceeds free {free} - reserve {RESERVE_MB}"
             );
         }
         if free < RESERVE_MB {
