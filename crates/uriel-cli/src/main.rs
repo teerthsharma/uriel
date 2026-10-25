@@ -5,14 +5,15 @@ mod capture;
 mod commands;
 mod recall;
 
-use std::io::{BufRead, BufWriter, IsTerminal, Write};
+use std::io::{BufRead, BufReader, BufWriter, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use uriel_core::MemoryBudget;
 use uriel_mcp::config::{
-    default_db_path, Config, Format, Mode as ServerMode, PlacementMode, DEFAULT_MEMORY_MIB, DEFAULT_TOKEN_LIMIT,
+    default_db_path, Config, Format, Mode as ServerMode, PlacementMode, DEFAULT_IDLE_RELEASE_SECS, DEFAULT_MEMORY_MIB,
+    DEFAULT_TOKEN_LIMIT,
     Terse, MODE_ENV, TERSE_ENV,
 };
 
@@ -101,6 +102,10 @@ struct McpArgs {
     terse: Option<TerseArg>,
     #[arg(long, value_parser = clap::value_parser!(u64).range(16..))]
     memory_mib: Option<u64>,
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    token_limit: Option<u64>,
+    #[arg(long)]
+    idle_release_secs: Option<u64>,
 }
 
 #[derive(Debug, Args, PartialEq)]
@@ -183,7 +188,9 @@ impl McpArgs {
             db: self.db.clone().unwrap_or_else(default_db_path),
             read_only: self.read_only,
             in_memory: false,
-            token_limit: DEFAULT_TOKEN_LIMIT,
+            token_limit: self
+                .token_limit
+                .map_or(DEFAULT_TOKEN_LIMIT, |n| usize::try_from(n).unwrap_or(usize::MAX)),
             root: self
                 .root
                 .clone()
@@ -204,11 +211,12 @@ impl McpArgs {
             ),
             mode: ServerMode::resolve(mode_flag, mode_env)?,
             terse: Terse::resolve(terse_flag, terse_env)?,
+            idle_release_secs: self.idle_release_secs.unwrap_or(DEFAULT_IDLE_RELEASE_SECS),
         })
     }
 }
 
-fn dispatch<R: BufRead, W: Write>(
+fn dispatch<R: BufRead + Send + 'static, W: Write>(
     cli: Cli,
     mode: Mode,
     input: R,
@@ -307,10 +315,10 @@ fn main() -> ExitCode {
     let stdin = std::io::stdin();
     let mut out = BufWriter::new(stdout.lock());
     let hook = matches!(cli.command, Some(Command::Capture(_) | Command::RecallContext(_)));
-    let input: Box<dyn BufRead> = if hook && stdin.is_terminal() {
+    let input: Box<dyn BufRead + Send> = if hook && stdin.is_terminal() {
         Box::new(std::io::empty())
     } else {
-        Box::new(stdin.lock())
+        Box::new(BufReader::new(stdin))
     };
     let result = dispatch(cli, mode, input, &mut out);
     let flushed = out.flush().map_err(|e| e.to_string());
@@ -388,6 +396,8 @@ mod tests {
                 mode: None,
                 terse: None,
                 memory_mib: Some(64),
+                token_limit: None,
+                idle_release_secs: None,
             }))
         );
     }
@@ -440,6 +450,28 @@ mod tests {
         assert_eq!(cfg_of(&["mcp", "--terse", "off"], Some("prose")).expect("config").terse, Terse::Off);
         assert!(cfg_of(&["mcp"], Some("full")).expect_err("bad env").contains(TERSE_ENV));
         assert!(parse(&["mcp", "--terse", "full"]).is_err());
+    }
+
+    #[test]
+    fn mcp_idle_release_and_token_limit_flags_map_into_the_server_config() {
+        let Some(Command::Mcp(args)) = command(&["mcp", "--idle-release-secs", "7", "--token-limit", "50000"]) else {
+            panic!("expected mcp");
+        };
+        let cfg = args.to_config_env(None).expect("config");
+        assert_eq!(cfg.idle_release_secs, 7);
+        assert_eq!(cfg.token_limit, 50_000);
+        let Some(Command::Mcp(args)) = command(&["mcp", "--idle-release-secs", "0"]) else {
+            panic!("expected mcp");
+        };
+        assert_eq!(args.to_config_env(None).expect("config").idle_release_secs, 0);
+        let Some(Command::Mcp(args)) = command(&["mcp"]) else {
+            panic!("expected mcp");
+        };
+        let cfg = args.to_config_env(None).expect("config");
+        assert_eq!(cfg.idle_release_secs, DEFAULT_IDLE_RELEASE_SECS);
+        assert_eq!(cfg.token_limit, DEFAULT_TOKEN_LIMIT);
+        assert!(parse(&["mcp", "--token-limit", "0"]).is_err());
+        assert!(parse(&["mcp", "--idle-release-secs", "-1"]).is_err());
     }
 
     #[test]
@@ -634,6 +666,8 @@ mod tests {
                     mode: None,
                     terse: None,
                     memory_mib: None,
+                    token_limit: None,
+                    idle_release_secs: None,
                 })),
             };
             let result = dispatch(cli, mode, Cursor::new(Vec::new()), &mut rec);
@@ -657,6 +691,8 @@ mod tests {
                 mode: None,
                 terse: None,
                 memory_mib: None,
+                token_limit: None,
+                idle_release_secs: None,
             })),
         };
         let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";

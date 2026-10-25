@@ -221,7 +221,8 @@ pub(crate) fn plan_for(
                     continue;
                 }
                 let class_slots = slots(class, free, total, cost, cfg);
-                let over = heavy_committed + batch_heavy_cost + cost > headroom;
+                let over = batch_heavy_cost + cost > headroom
+                    || heavy_committed + batch_heavy_cost + cost > total.saturating_sub(reserve);
                 if class_count >= class_slots || over {
                     defer(
                         id,
@@ -345,6 +346,19 @@ mod tests {
         )
     }
 
+    fn heavy(id: &str, status: GoalStatus, cost_mb: u64) -> (GoalId, GoalRec) {
+        let (gid, mut r) = rec(id, &[], status);
+        if let Some(t) = r.goal.test.as_mut() {
+            t.class = "test_unit".into();
+        }
+        r.goal.est = Some(Est {
+            ram_mb: cost_mb,
+            ..Est::default()
+        });
+        r.cost_mb = cost_mb;
+        (gid, r)
+    }
+
     fn state(recs: Vec<(GoalId, GoalRec)>) -> State {
         let mut s = State::default();
         s.goals.extend(recs);
@@ -411,5 +425,46 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn active_cost_not_double_counted() {
+        let s = state(vec![
+            heavy("G1", GoalStatus::Active, 2500),
+            heavy("G2", GoalStatus::Pending, 800),
+        ]);
+        let snap = SystemSnapshot {
+            free_ram_mb: 5416,
+            total_ram_mb: 16091,
+            logical_cores: 8,
+            load_pct: 0.0,
+        };
+        let p = plan(&s, snap, &HouseConfig::default());
+        let got: Vec<&str> = p.planned.iter().map(|x| x.goal.as_str()).collect();
+        assert_eq!(got, vec!["G2"]);
+    }
+
+    #[test]
+    fn active_commitments_bounded_by_total() {
+        let s = state(vec![
+            heavy("G1", GoalStatus::Active, 6500),
+            heavy("G2", GoalStatus::Active, 6500),
+            heavy("G3", GoalStatus::Pending, 800),
+        ]);
+        let snap = SystemSnapshot {
+            free_ram_mb: 15000,
+            total_ram_mb: 16091,
+            logical_cores: 8,
+            load_pct: 0.0,
+        };
+        let p = plan(&s, snap, &HouseConfig::default());
+        assert!(p.planned.is_empty());
+        let d = p
+            .report
+            .deferrals
+            .iter()
+            .find(|d| d.goal.as_str() == "G3")
+            .expect("deferral");
+        assert_eq!(d.reason, DeferReason::Ram);
     }
 }

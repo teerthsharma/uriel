@@ -146,7 +146,7 @@ impl Error {
         }
     }
 
-    pub(crate) fn is_already_open(&self) -> bool {
+    pub fn is_already_open(&self) -> bool {
         matches!(self, Error::Storage(e) if matches!(**e, redb::Error::DatabaseAlreadyOpen))
     }
 }

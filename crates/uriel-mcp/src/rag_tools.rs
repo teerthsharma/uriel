@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use uriel_core::{ConstraintKind, NodeId, Props, Value};
 use uriel_rag::{Hit, HitVia, IndexOptions, Level, Rag, SearchOptions, MEMORY_PREFIX};
@@ -332,7 +333,7 @@ fn deliver(ctx: &Context, hits: Vec<Hit>, d: &Delivery) -> ToolResult {
     match (d.format, d.ladder) {
         (Format::Json, false) => Ok(pack(terse::remembered(ctx, hits), d.budget).to_string()),
         (Format::Json, true) => {
-            let (mut shown, omitted) = ladder_shown(rag, &hits, d.budget)?;
+            let (mut shown, omitted) = ladder_shown(&rag, &hits, d.budget)?;
             ctx.meter.add_pair(remembered_bodies(ctx, &mut shown));
             Ok(ladder_json(&shown, omitted, d.budget).to_string())
         }
@@ -341,14 +342,14 @@ fn deliver(ctx: &Context, hits: Vec<Hit>, d: &Delivery) -> ToolResult {
             let mut inner = d.budget;
             loop {
                 let (shown, omitted, saved) = if ladder {
-                    let (mut shown, omitted) = ladder_shown(rag, &hits, inner)?;
+                    let (mut shown, omitted) = ladder_shown(&rag, &hits, inner)?;
                     let saved = remembered_bodies(ctx, &mut shown);
                     (shown, omitted, saved)
                 } else {
                     let (shown, omitted) = memory_shown(&hits, inner);
                     (shown, omitted, (0, 0))
                 };
-                let (entries, deliveries) = to_pack(ctx, rag, &shown, d.fresh)?;
+                let (entries, deliveries) = to_pack(ctx, &rag, &shown, d.fresh)?;
                 let text = encode_pack(&Pack {
                     hits: entries,
                     omitted,
@@ -396,8 +397,8 @@ fn ladder_json(shown: &[Shown], omitted: usize, budget: usize) -> Json {
     })
 }
 
-fn rag(ctx: &Context) -> Result<&Rag, String> {
-    ctx.services.rag(ctx.engine.graph())
+fn rag(ctx: &Context) -> Result<Arc<Rag>, String> {
+    ctx.rag()
 }
 
 fn positive(args: &Json, key: &str, default: usize) -> Result<usize, String> {
@@ -527,7 +528,8 @@ fn rag_feedback(ctx: &Context, args: &Json) -> ToolResult {
 }
 
 fn next_finding_number(ctx: &Context) -> Result<u64, String> {
-    let tx = ctx.engine.graph().begin_read().map_err(|e| e.to_string())?;
+    let db = ctx.db()?;
+    let tx = db.engine.graph().begin_read().map_err(|e| e.to_string())?;
     let mut max = 0u64;
     for n in tx.nodes_by_label("Decision").map_err(|e| e.to_string())? {
         let n = n.map_err(|e| e.to_string())?;
@@ -541,7 +543,8 @@ fn next_finding_number(ctx: &Context) -> Result<u64, String> {
 }
 
 fn ensure_decision_constraint(ctx: &Context) -> Result<(), String> {
-    let graph = ctx.engine.graph();
+    let db = ctx.db()?;
+    let graph = db.engine.graph();
     let has = graph
         .list_constraints()
         .map_err(|e| e.to_string())?
@@ -560,7 +563,8 @@ fn seal_remember(ctx: &Context, args: &Json) -> ToolResult {
     let tags = opt_strings(args, "tags")?;
     let sources = id_list(args, "sources")?;
     let rag = rag(ctx)?;
-    let graph = ctx.engine.graph();
+    let db = ctx.db()?;
+    let graph = db.engine.graph();
     {
         let tx = graph.begin_read().map_err(|e| e.to_string())?;
         for id in &sources {

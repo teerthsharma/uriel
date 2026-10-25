@@ -1,4 +1,6 @@
 use std::io::{BufRead, Write};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
 
 use serde_json::{json, Value as Json};
 
@@ -17,6 +19,7 @@ pub mod code {
 pub struct Server {
     ctx: Context,
     token_limit: usize,
+    idle_release: Option<Duration>,
 }
 
 struct RpcError {
@@ -70,8 +73,21 @@ fn instructions(mode: Mode, read_only: bool) -> &'static str {
 }
 
 impl Server {
-    pub fn new(ctx: Context, token_limit: usize) -> Self {
-        Self { ctx, token_limit }
+    pub fn new(ctx: Context, token_limit: usize, idle_release: Option<Duration>) -> Self {
+        Self {
+            ctx,
+            token_limit,
+            idle_release,
+        }
+    }
+
+    pub fn release(&self) -> bool {
+        self.ctx.db.release()
+    }
+
+    fn idle_window(&self) -> Option<Duration> {
+        self.idle_release
+            .filter(|_| self.ctx.db.releasable() && self.ctx.db.is_open())
     }
 
     pub fn scaffold_fingerprint(&self) -> Result<String, String> {
@@ -193,9 +209,33 @@ impl Server {
     }
 }
 
-pub fn serve(server: &Server, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
-    for line in input.lines() {
-        let line = line?;
+pub fn serve(
+    server: &Server,
+    input: impl BufRead + Send + 'static,
+    mut output: impl Write,
+) -> std::io::Result<()> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in input.lines() {
+            let failed = line.is_err();
+            if tx.send(line).is_err() || failed {
+                break;
+            }
+        }
+    });
+    loop {
+        let next = match server.idle_window() {
+            Some(idle) => rx.recv_timeout(idle),
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let line = match next {
+            Ok(line) => line?,
+            Err(RecvTimeoutError::Timeout) => {
+                server.release();
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        };
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -206,7 +246,6 @@ pub fn serve(server: &Server, input: impl BufRead, mut output: impl Write) -> st
             output.flush()?;
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
