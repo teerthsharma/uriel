@@ -127,25 +127,25 @@ impl Db {
     }
 
     fn open_once(&self) -> Result<Engine, QueryError> {
-        match &self.source {
-            Source::InMemory => Engine::open_in_memory(self.memory),
-            Source::ReadOnly(path) if path.is_file() => Engine::open_read_only(path, self.memory),
+        let engine = match &self.source {
+            Source::InMemory => Engine::open_in_memory(self.memory)?,
+            Source::ReadOnly(path) if path.is_file() => {
+                return Engine::open_read_only(path, self.memory)
+            }
             Source::ReadOnly(path) => {
                 eprintln!(
                     "uriel-mcp: {} does not exist; serving an empty read-only graph",
                     path.display()
                 );
-                Engine::open_in_memory(self.memory)
+                return Engine::open_in_memory(self.memory);
             }
-            Source::ReadWrite(path) => {
-                let engine = Engine::open(path, self.memory)?;
-                if let Err(e) =
-                    engine.execute(memory::CREATE_CONSTRAINT, &Default::default(), AccessMode::Write)
-                {
-                    eprintln!("uriel-mcp: could not create memory constraint: {e}");
-                }
-                Ok(engine)
-            }
+            Source::ReadWrite(path) => Engine::open(path, self.memory)?,
+        };
+        if let Err(e) =
+            engine.execute(memory::CREATE_CONSTRAINT, &Default::default(), AccessMode::Write)
+        {
+            eprintln!("uriel-mcp: could not create memory constraint: {e}");
         }
+        Ok(engine)
     }
 }
