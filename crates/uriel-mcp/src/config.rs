@@ -4,6 +4,7 @@ use uriel_core::MemoryBudget;
 
 pub const DEFAULT_TOKEN_LIMIT: usize = 20_000;
 pub const DEFAULT_MEMORY_MIB: usize = 50;
+pub const DEFAULT_IDLE_RELEASE_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Format {
@@ -137,6 +138,7 @@ pub struct Config {
     pub memory: MemoryBudget,
     pub mode: Mode,
     pub terse: Terse,
+    pub idle_release_secs: u64,
 }
 
 impl Config {
@@ -182,6 +184,9 @@ OPTIONS:
                          instructions); prose also shortens the prose of returned findings and of
                          documentation sections of the soul guide. Stored data is never altered.
                          Adds the terse_stats tool
+    --idle-release-secs <N>
+                         Close the database after N idle seconds so other uriel processes can open
+                         it; the next tool call reopens it (default: 30, 0: never)
     -h, --help           Print this help
     -V, --version        Print version
 
@@ -249,6 +254,7 @@ where
         memory: MemoryBudget::mib(DEFAULT_MEMORY_MIB),
         mode: Mode::Normal,
         terse: Terse::Off,
+        idle_release_secs: DEFAULT_IDLE_RELEASE_SECS,
     };
     let mut it = args.into_iter().map(Into::into);
     while let Some(arg) = it.next() {
@@ -272,6 +278,12 @@ where
                 let v = value(&flag, inline, &mut it)?;
                 cfg.token_limit = v.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
                     format!("--token-limit expects a positive integer, got '{v}'")
+                })?;
+            }
+            "--idle-release-secs" => {
+                let v = value(&flag, inline, &mut it)?;
+                cfg.idle_release_secs = v.parse::<u64>().map_err(|_| {
+                    format!("--idle-release-secs expects a non-negative integer, got '{v}'")
                 })?;
             }
             "--root" => cfg.root = path_value(&flag, inline, &mut it)?,
@@ -451,6 +463,17 @@ mod tests {
         assert_eq!(run(&["--memory-mib", "64"]).memory, MemoryBudget::mib(64));
         assert_eq!(run(&["--memory-mib=16"]).memory, MemoryBudget::mib(16));
         for bad in [&["--memory-mib", "15"][..], &["--memory-mib", "0"], &["--memory-mib", "x"], &["--memory-mib"]] {
+            assert!(parse_args(bad.iter().copied()).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn idle_release_flag_defaults_to_thirty_seconds_and_zero_means_never() {
+        assert_eq!(run(&[]).idle_release_secs, DEFAULT_IDLE_RELEASE_SECS);
+        assert_eq!(DEFAULT_IDLE_RELEASE_SECS, 30);
+        assert_eq!(run(&["--idle-release-secs", "5"]).idle_release_secs, 5);
+        assert_eq!(run(&["--idle-release-secs=0"]).idle_release_secs, 0);
+        for bad in [&["--idle-release-secs", "x"][..], &["--idle-release-secs", "-1"], &["--idle-release-secs"]] {
             assert!(parse_args(bad.iter().copied()).is_err(), "{bad:?}");
         }
     }

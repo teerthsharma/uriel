@@ -1,19 +1,23 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::{json, Value as Json};
 
 use crate::compact::{encode_table, Table};
 use crate::config::{Format, Mode, Terse};
+use crate::db::{Db, Open};
 use crate::services::Services;
 use crate::session::Session;
 use crate::placement::PlaceState;
 use crate::{house_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
-use uriel_query::{AccessMode, Engine, QueryStats};
+use uriel_house::House;
+use uriel_query::{AccessMode, QueryStats};
+use uriel_rag::Rag;
 
 pub type ToolResult = Result<String, String>;
 
 pub struct Context {
-    pub engine: Engine,
+    pub db: Db,
     pub read_only: bool,
     pub mode: Mode,
     pub terse: Terse,
@@ -22,6 +26,22 @@ pub struct Context {
     pub format: Format,
     pub session: Session,
     pub placement: PlaceState,
+}
+
+impl Context {
+    pub fn db(&self) -> Result<Arc<Open>, String> {
+        self.db.get()
+    }
+
+    pub fn rag(&self) -> Result<Arc<Rag>, String> {
+        let db = self.db()?;
+        self.services.rag(&db)
+    }
+
+    pub fn house(&self) -> Result<Arc<House>, String> {
+        let db = self.db()?;
+        self.services.house(&db)
+    }
 }
 
 pub struct ToolDef {
@@ -336,7 +356,7 @@ fn dispatch(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
         _ => return Some(Err("arguments must be an object".into())),
     };
     Some(match name {
-        "get_neo4j_schema" => Ok(ctx.engine.schema_json().to_string()),
+        "get_neo4j_schema" => ctx.db().map(|db| db.engine.schema_json().to_string()),
         "read_neo4j_cypher" => run_cypher(ctx, args, AccessMode::Read),
         "write_neo4j_cypher" => run_cypher(ctx, args, AccessMode::Write),
         n if n.starts_with("rag_") || n.starts_with("seal_") || n.starts_with("session_") => {
@@ -393,6 +413,7 @@ fn run_cypher(ctx: &Context, args: &Json, mode: AccessMode) -> ToolResult {
         .ok_or_else(|| "'query' is required and must be a non-empty string".to_string())?;
     let params = parse_params(args)?;
     let result = ctx
+        .db()?
         .engine
         .execute(query, &params, mode)
         .map_err(|e| e.to_string())?;
@@ -435,6 +456,7 @@ pub fn read_rows(
     params: &BTreeMap<String, uriel_core::Value>,
 ) -> Result<Vec<Json>, String> {
     let r = ctx
+        .db()?
         .engine
         .execute(query, params, AccessMode::Read)
         .map_err(|e| e.to_string())?;
@@ -449,7 +471,8 @@ pub fn write_query(
     query: &str,
     params: &BTreeMap<String, uriel_core::Value>,
 ) -> Result<QueryStats, String> {
-    ctx.engine
+    ctx.db()?
+        .engine
         .execute(query, params, AccessMode::Write)
         .map(|r| r.stats)
         .map_err(|e| e.to_string())

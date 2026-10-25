@@ -464,9 +464,9 @@ fn view(ctx: &Context, args: &Json) -> ToolResult {
     let k = bounded(args, "k", DEFAULT_K, 1, MAX_K)?;
     let salient = bounded(args, "salient_k", 0, 0, MAX_K)?;
     let islands = opt_bool(args, "islands")?.unwrap_or(ISLANDS_DEFAULT);
-    let rag = ctx.services.rag(ctx.engine.graph())?;
+    let rag = ctx.rag()?;
     let body = run_view(
-        rag,
+        &rag,
         &ViewRequest {
             question,
             focus,

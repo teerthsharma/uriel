@@ -29,9 +29,8 @@ fn main() -> ExitCode {
         },
         cfg.read_only
     );
-    let stdin = std::io::stdin();
     let stdout = BufWriter::new(std::io::stdout().lock());
-    match uriel_mcp::run(&cfg, BufReader::new(stdin.lock()), stdout) {
+    match uriel_mcp::run(&cfg, BufReader::new(std::io::stdin()), stdout) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("uriel-mcp: {e}");

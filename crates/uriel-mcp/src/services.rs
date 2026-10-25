@@ -1,11 +1,11 @@
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
-use uriel_core::Graph;
 use uriel_house::{FakeProbe, House, HouseConfig, JsonlSink, RealProbe, SystemProbe};
 use uriel_rag::{Rag, RagConfig};
 
 use crate::config::{default_config_path, Config};
+use crate::db::Open;
 use crate::prefix::Scaffold;
 
 pub const FAKE_PROBE_ENV: &str = "SEAL_MCP_FAKE_PROBE";
@@ -15,8 +15,6 @@ pub struct Services {
     pub events: PathBuf,
     pub config_source: Option<PathBuf>,
     pub house_cfg: HouseConfig,
-    rag: OnceLock<Rag>,
-    house: OnceLock<House>,
     pub stable_prefix: bool,
     scaffold: Mutex<Option<Scaffold>>,
 }
@@ -75,8 +73,6 @@ impl Services {
             events: cfg.events_path(),
             config_source,
             house_cfg,
-            rag: OnceLock::new(),
-            house: OnceLock::new(),
             stable_prefix: stable_prefix_from_env(),
             scaffold: Mutex::new(None),
         })
@@ -99,30 +95,30 @@ impl Services {
         *self.scaffold.lock().unwrap_or_else(PoisonError::into_inner) = None;
     }
 
-    pub fn rag(&self, graph: &Graph) -> Result<&Rag, String> {
-        if let Some(r) = self.rag.get() {
-            return Ok(r);
+    pub fn rag(&self, open: &Open) -> Result<Arc<Rag>, String> {
+        if let Some(r) = open.rag.get() {
+            return Ok(Arc::clone(r));
         }
-        let rag = Rag::open(graph.clone(), RagConfig::default())
+        let rag = Rag::open(open.engine.graph().clone(), RagConfig::default())
             .map_err(|e| format!("cannot open the RAG index: {e}"))?;
-        Ok(self.rag.get_or_init(|| rag))
+        Ok(Arc::clone(open.rag.get_or_init(|| Arc::new(rag))))
     }
 
-    pub fn house(&self, graph: &Graph) -> Result<&House, String> {
-        if let Some(h) = self.house.get() {
-            return Ok(h);
+    pub fn house(&self, open: &Open) -> Result<Arc<House>, String> {
+        if let Some(h) = open.house.get() {
+            return Ok(Arc::clone(h));
         }
         if let Some(dir) = self.events.parent().filter(|d| !d.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         }
         let house = House::open(
-            graph.clone(),
+            open.engine.graph().clone(),
             self.house_cfg.clone(),
             probe_from_env(),
             Box::new(JsonlSink::new(&self.events)),
         )
         .map_err(|e| format!("cannot open the House: {e}"))?;
-        Ok(self.house.get_or_init(|| house))
+        Ok(Arc::clone(open.house.get_or_init(|| Arc::new(house))))
     }
 }

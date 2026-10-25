@@ -43,7 +43,7 @@ pub fn scaffold(ctx: &Context) -> Result<Scaffold, String> {
 }
 
 fn compute(ctx: &Context) -> Result<Scaffold, String> {
-    let rag = ctx.services.rag(ctx.engine.graph())?;
+    let rag = ctx.rag()?;
     let guide = rag
         .soul(&SoulOptions::default())
         .map_err(|e| e.to_string())?;

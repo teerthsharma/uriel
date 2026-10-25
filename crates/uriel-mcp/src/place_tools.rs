@@ -229,7 +229,7 @@ fn counters(c: &TierCounters) -> Json {
 }
 
 pub(crate) fn tier_stats_json(ctx: &Context) -> Result<Json, String> {
-    let s = ctx.engine.graph().tier_stats().map_err(|e| e.to_string())?;
+    let s = ctx.db()?.engine.graph().tier_stats().map_err(|e| e.to_string())?;
     Ok(json!({
         "hot": counters(&s.hot),
         "warm": counters(&s.warm),

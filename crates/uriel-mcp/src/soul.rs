@@ -108,7 +108,7 @@ fn soul(ctx: &Context, args: &Json) -> ToolResult {
     let budget = budget_arg(args)?;
     let focus = focus_arg(args)?;
     let ids = sections_arg(args)?;
-    let rag = ctx.services.rag(ctx.engine.graph())?;
+    let rag = ctx.rag()?;
     let guide = rag
         .soul(&SoulOptions {
             budget_tokens: budget,

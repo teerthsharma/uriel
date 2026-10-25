@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use uriel_house::{
     Chart, Fact, Fellow, GoalId, GoalStatus, House, Outcome, TestEvidence, TestStatus,
 };
@@ -202,8 +204,8 @@ pub const TOOLS: &[ToolDef] = &[
     },
 ];
 
-fn house(ctx: &Context) -> Result<&House, String> {
-    ctx.services.house(ctx.engine.graph())
+fn house(ctx: &Context) -> Result<Arc<House>, String> {
+    ctx.house()
 }
 
 fn to_json<T: serde::Serialize>(v: &T) -> Result<Json, String> {
