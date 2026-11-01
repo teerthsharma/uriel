@@ -27,7 +27,10 @@ fn tools_without_house(s: &mut Session) -> String {
         .as_array()
         .expect("tools")
         .iter()
-        .filter(|t| !t["name"].as_str().expect("name").starts_with("house_"))
+        .filter(|t| {
+            let name = t["name"].as_str().expect("name");
+            !name.starts_with("house_") && !name.starts_with("genius_") && !name.starts_with("fleet_")
+        })
         .collect();
     serde_json::to_string(&kept).expect("json")
 }

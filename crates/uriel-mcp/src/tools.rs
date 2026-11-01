@@ -9,7 +9,7 @@ use crate::db::{Db, Open};
 use crate::services::Services;
 use crate::session::Session;
 use crate::placement::PlaceState;
-use crate::{house_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
+use crate::{agent_tools, house_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
 use uriel_house::House;
 use uriel_query::{AccessMode, QueryStats};
 use uriel_rag::Rag;
@@ -26,6 +26,7 @@ pub struct Context {
     pub format: Format,
     pub session: Session,
     pub placement: PlaceState,
+    pub agents: agent_tools::Hub,
 }
 
 impl Context {
@@ -284,6 +285,7 @@ pub fn all() -> impl Iterator<Item = &'static ToolDef> {
         .chain(view::TOOLS.iter())
         .chain(soul::TOOLS.iter())
         .chain(terse::TOOLS.iter())
+        .chain(agent_tools::TOOLS.iter())
 }
 
 pub fn house_only(name: &str) -> bool {
@@ -362,6 +364,7 @@ fn dispatch(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
         n if n.starts_with("rag_") || n.starts_with("seal_") || n.starts_with("session_") => {
             rag_tools::call(ctx, n, args)
         }
+        n if n.starts_with("genius_") || n.starts_with("fleet_") => agent_tools::call(ctx, n, args),
         n if n.starts_with("house_") => house_tools::call(ctx, n, args),
         n if n.starts_with("research_") => research_tools::call(ctx, n, args),
         "view" => view::call(ctx, name, args),

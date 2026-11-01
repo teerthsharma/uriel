@@ -1,5 +1,6 @@
 #![deny(unsafe_code)]
 
+pub mod agent_tools;
 pub mod compact;
 pub mod config;
 pub mod db;
@@ -50,6 +51,7 @@ pub fn build_server(cfg: &Config) -> Result<Server, String> {
         format: cfg.format,
         session: session::Session::for_budget(cfg.memory),
         placement: placement::PlaceState::new(cfg.placement, persist_dir(cfg)),
+        agents: agent_tools::Hub::from_env(),
     };
     let idle = (cfg.idle_release_secs > 0).then(|| Duration::from_secs(cfg.idle_release_secs));
     Ok(Server::new(ctx, cfg.token_limit, idle))

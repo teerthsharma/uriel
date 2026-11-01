@@ -19,6 +19,8 @@ members = [
     "crates/uriel-bench",
     "crates/uriel-cli",
     "crates/uriel-terse",
+    "crates/uriel-fleet",
+    "crates/uriel-genius",
 ]
 
 [workspace.package]

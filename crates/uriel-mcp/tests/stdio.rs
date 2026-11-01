@@ -334,6 +334,8 @@ const MODE_TOOLS: &[&str] = &[
     "tier_stats",
 ];
 
+const AGENT_TOOLS: &[&str] = &["genius_plan", "genius_brief", "genius_submit", "fleet_admit", "fleet_event", "fleet_trace"];
+
 const HOUSE_TOOLS: &[&str] = &[
     "house_need",
     "house_chart",
@@ -358,6 +360,7 @@ fn house_mode_tools_list_names() {
     let mut want: Vec<String> = ALL_TOOLS
         .iter()
         .chain(MODE_TOOLS)
+        .chain(AGENT_TOOLS)
         .chain(HOUSE_TOOLS)
         .map(|x| x.to_string())
         .collect();
@@ -373,6 +376,7 @@ fn tools_list_names() {
     let mut want: Vec<String> = ALL_TOOLS
         .iter()
         .chain(MODE_TOOLS)
+        .chain(AGENT_TOOLS)
         .map(|x| x.to_string())
         .collect();
     got.sort();
@@ -386,7 +390,7 @@ fn tools_list_schemas_match_neo4j_shapes() {
     let r = s.rpc("tools/list", json!({}));
     for t in r["result"]["tools"].as_array().unwrap() {
         let name = t["name"].as_str().unwrap();
-        if MODE_TOOLS.contains(&name) {
+        if MODE_TOOLS.contains(&name) || AGENT_TOOLS.contains(&name) {
             continue;
         }
         let schema = &t["inputSchema"];

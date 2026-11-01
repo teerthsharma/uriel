@@ -17,6 +17,7 @@ enable-ansi-support = "0.2"
 uriel-mcp = { path = "../uriel-mcp" }
 uriel-rag = { path = "../uriel-rag" }
 uriel-core = { path = "../uriel-core" }
+uriel-genius = { path = "../uriel-genius" }
 uriel-place = { path = "../uriel-place" }
 serde_json = "1"
 

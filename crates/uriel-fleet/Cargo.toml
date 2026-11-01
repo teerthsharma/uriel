@@ -1,0 +1,13 @@
+[package]
+name = "uriel-fleet"
+description = "Agent fleet admission, hash-chained observation and input sanitisation for uriel, with no I/O"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10.9"
+thiserror = "2.0.21"

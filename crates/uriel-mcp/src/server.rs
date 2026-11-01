@@ -40,6 +40,39 @@ fn error_response(id: Json, code: i64, message: &str) -> Json {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+const GENIUS_PROMPT: &str = "genius";
+const GENIUS_IDEA_BYTES: usize = 2000;
+
+fn prompts_list() -> Json {
+    json!({"prompts": [{
+        "name": GENIUS_PROMPT,
+        "title": "Genius",
+        "description": "Run an idea through the deterministic hexagonal abduction protocol: six lenses on smaller models, a typed ledger that keeps strange ideas as testable conjectures, and a verdict you test.",
+        "arguments": [{"name": "idea", "description": "The idea, question or surprising fact.", "required": true}]
+    }]})
+}
+
+fn prompts_get(params: &Json) -> Result<Json, RpcError> {
+    let name = params.get("name").and_then(Json::as_str).ok_or_else(|| {
+        RpcError::new(code::INVALID_PARAMS, "prompts/get requires a string 'name'")
+    })?;
+    if name != GENIUS_PROMPT {
+        return Err(RpcError::new(code::INVALID_PARAMS, format!("Unknown prompt: {name}")));
+    }
+    let idea = params
+        .get("arguments")
+        .and_then(|a| a.get("idea"))
+        .and_then(Json::as_str)
+        .map(|i| uriel_fleet::sanitize(i, &uriel_fleet::Policy::new(GENIUS_IDEA_BYTES)).text)
+        .map(|i| i.trim().to_string())
+        .filter(|i| !i.is_empty())
+        .ok_or_else(|| RpcError::new(code::INVALID_PARAMS, "prompt 'genius' requires a non-empty string argument 'idea'"))?;
+    Ok(json!({
+        "description": "Genius: hexagonal abduction over the idea",
+        "messages": [{"role": "user", "content": {"type": "text", "text": uriel_genius::conductor::prompt(&idea)}}]
+    }))
+}
+
 pub fn truncate(text: String, limit: usize) -> String {
     let total = text.chars().count();
     if total <= limit {
@@ -55,13 +88,13 @@ pub fn truncate(text: String, limit: usize) -> String {
     )
 }
 
-const NORMAL_RW: &str = "seal graph database, normal mode. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. Light research from cached and stored context: rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats.";
+const NORMAL_RW: &str = "seal graph database, normal mode. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. Light research from cached and stored context: rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats. Agents and abduction: genius_plan, genius_brief, genius_submit, fleet_admit, fleet_event, fleet_trace; the prompt genius runs them.";
 
-const NORMAL_RO: &str = "seal graph database (read-only), normal mode. Use get_neo4j_schema, read_neo4j_cypher, the memory read tools, rag_search, rag_expand, seal_recall, view, why_hot, replay, calibrate and tier_stats.";
+const NORMAL_RO: &str = "seal graph database (read-only), normal mode. Use get_neo4j_schema, read_neo4j_cypher, the memory read tools, rag_search, rag_expand, seal_recall, view, why_hot, replay, calibrate and tier_stats. Also genius_plan, genius_brief, genius_submit, fleet_admit, fleet_event, fleet_trace and the prompt genius.";
 
-const HOUSE_RW: &str = "seal graph database, house mode. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. The differential: house_need, house_chart, house_merge, house_fact, house_next, house_report, house_test_run, house_leap, house_status, house_select_tests, house_config. Inspector research, one-sided evidence that can disprove a claim and never confirm one: research_orbit_audit, research_pooling_audit, research_record. Retrieval: rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats.";
+const HOUSE_RW: &str = "seal graph database, house mode. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. The differential: house_need, house_chart, house_merge, house_fact, house_next, house_report, house_test_run, house_leap, house_status, house_select_tests, house_config. Inspector research, one-sided evidence that can disprove a claim and never confirm one: research_orbit_audit, research_pooling_audit, research_record. Retrieval: rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats. Agents and abduction: genius_plan, genius_brief, genius_submit, fleet_admit, fleet_event, fleet_trace; the prompt genius runs them.";
 
-const HOUSE_RO: &str = "seal graph database (read-only), house mode. Use get_neo4j_schema, read_neo4j_cypher, the memory read tools, house_status, house_select_tests, house_config, research_orbit_audit, research_pooling_audit, rag_search, rag_expand, seal_recall, view, why_hot, replay, calibrate and tier_stats.";
+const HOUSE_RO: &str = "seal graph database (read-only), house mode. Use get_neo4j_schema, read_neo4j_cypher, the memory read tools, house_status, house_select_tests, house_config, research_orbit_audit, research_pooling_audit, rag_search, rag_expand, seal_recall, view, why_hot, replay, calibrate and tier_stats. Also genius_plan, genius_brief, genius_submit, fleet_admit, fleet_event, fleet_trace and the prompt genius.";
 
 fn instructions(mode: Mode, read_only: bool) -> &'static str {
     match (mode, read_only) {
@@ -168,6 +201,8 @@ impl Server {
                 self.ctx.terse,
             )),
             "tools/call" => self.tools_call(params),
+            "prompts/list" => Ok(prompts_list()),
+            "prompts/get" => prompts_get(params),
             m if m.starts_with("notifications/") => Ok(Json::Null),
             other => Err(RpcError::new(
                 code::METHOD_NOT_FOUND,
@@ -187,7 +222,7 @@ impl Server {
         );
         json!({
             "protocolVersion": version,
-            "capabilities": {"tools": {"listChanged": false}},
+            "capabilities": {"tools": {"listChanged": false}, "prompts": {"listChanged": false}},
             "serverInfo": {"name": "uriel-mcp", "title": "seal graph database", "version": env!("CARGO_PKG_VERSION")},
             "instructions": instructions
         })

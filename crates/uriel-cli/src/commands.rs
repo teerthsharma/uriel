@@ -321,3 +321,54 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+pub fn genius<W: Write>(
+    out: &mut W,
+    idea: &str,
+    mode: uriel_genius::Mode,
+    warm: bool,
+    max_agents: usize,
+    json: bool,
+    print_command: bool,
+) -> Result<(), String> {
+    if print_command {
+        return write!(out, "{}", uriel_genius::conductor::command_markdown())
+            .map_err(|e| format!("write failed: {e}"));
+    }
+    let plan = uriel_genius::Plan::compile(
+        idea,
+        uriel_genius::Options { mode, warm, max_concurrent: max_agents },
+    )
+    .map_err(|e| e.to_string())?;
+    if json {
+        return say(out, plan.to_json());
+    }
+    say(out, uriel_genius::conductor::prompt(&plan.idea))?;
+    say(out, format!("\nplan {} mode {} waves {}", plan.id, mode_name(mode), waves_line(&plan)))?;
+    match mode {
+        uriel_genius::Mode::Tier => {
+            for v in uriel_genius::VERTICES {
+                say(out, format!("\n===== BRIEF {} =====\n{}", v.name(), plan.brief1(v)))?;
+            }
+        }
+        uriel_genius::Mode::Fork => {
+            say(out, format!("\n===== SHARED =====\n{}", plan.shared()))?;
+            for v in uriel_genius::VERTICES {
+                say(out, format!("\n===== LENS {} ====={}", v.name(), plan.lens(v)))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mode_name(mode: uriel_genius::Mode) -> &'static str {
+    mode.name()
+}
+
+fn waves_line(plan: &uriel_genius::Plan) -> String {
+    plan.waves()
+        .iter()
+        .map(|w| w.iter().map(|v| v.name()).collect::<Vec<_>>().join("+"))
+        .collect::<Vec<_>>()
+        .join(" > ")
+}

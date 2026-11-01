@@ -124,3 +124,15 @@ Phase 1 (building) and the Phase 2 items that gate a release (name, repository, 
 - [ ] I8 Version bump: the workspace and `uriel --version` still report 0.1.0
 - [ ] I6 Blog post on teerth.blog from this registry
 - [ ] I7 Paper on blog.teerth.dev: topological context scheduling, deterministic placement, tiered gated storage; every number with its baseline and the negatives
+
+## J. Agents: genius and fleet. Design: `docs/GENIUS.md`
+
+- [x] J1 Sanitiser: `crates/uriel-fleet/src/sanitize.rs`; strips ANSI, controls, bidi and zero-width, Unicode tag characters; redacts private-key blocks and 11 other secret classes to a fixed point; fences untrusted text with a content-hash nonce; counts injection phrases without rewriting. Gate `crates/uriel-fleet/tests/sanitize.rs` (24 tests, including idempotence over 3,000 seeded inputs, which found and fixed a nested-secret bypass, and linear time on 1.1 MB)
+- [x] J2 Fleet admission and observation: `crates/uriel-fleet/src/fleet.rs`, `trace.rs`; concurrency, depth, lifetime and token limits, `Want::Max`, deferral, `reap`, bounded runs and events, hash-chained trace with an anchor. Gates `crates/uriel-fleet/tests/fleet.rs` (19) and the unit tests in `trace.rs` (8)
+- [x] J3 Genius protocol: `crates/uriel-genius`; hexagon and axes, byte-stable plan and briefs, shared-prefix-first rendering, waves under a cap, typed claim validation, quarantine of wild claims, order-independent verdict. Gate `crates/uriel-genius/tests/protocol.rs` (40), including a worst-case size gate (maximal claims from all six lenses keep every brief and response under the 20,000-character server output limit; found while probing that a six-brief round-2 payload could pass 100 KB in the worst case and be truncated into invalid JSON) and that `.claude/commands/genius.md` equals the generated command
+- [x] J4 MCP surface: `crates/uriel-mcp/src/agent_tools.rs` (`genius_plan`, `genius_brief`, `genius_submit`, `fleet_admit`, `fleet_event`, `fleet_trace`), the `genius` prompt and the `prompts` capability in `server.rs`, `URIEL_FLEET_MAX`; `uriel genius` in the CLI. Gates `crates/uriel-mcp/tests/agent_wire.rs` (17), `stdio.rs` tool lists; `mode_golden.rs` still pins the 27 earlier tools byte for byte
+- [x] J5 Mutation check: six rules broken one at a time, each turned the suite red (2026-11-01)
+- [ ] J6 NeMo Relay conformance: map `fleet_trace` jsonl to ATOF and ATIF and check it against the published schema; blocked here because the documentation host was unreachable
+- [ ] J7 Evidence that the hexagon helps: a fixed set of diagnosis tasks, single prompt against `/genius`, scored blind; until then it is a discipline, not an accuracy claim
+- [ ] J8 Hosted-cache measurement: `cached_in` across the six lenses on a real provider, with and without `warm`
+- [ ] J9 `--fleet-max` flag next to `URIEL_FLEET_MAX`; NFKC normalisation and email redaction in the sanitiser

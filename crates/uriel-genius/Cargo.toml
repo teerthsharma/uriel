@@ -1,0 +1,15 @@
+[package]
+name = "uriel-genius"
+description = "Deterministic hexagonal abduction protocol for uriel: lens plans, claim validation and a replayable verdict, with no I/O"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+uriel-fleet = { path = "../uriel-fleet" }
+uriel-terse = { path = "../uriel-terse" }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10.9"
+thiserror = "2.0.21"
