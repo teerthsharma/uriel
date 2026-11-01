@@ -20,17 +20,14 @@ members = [
     "crates/uriel-bench",
     "crates/uriel-cli",
     "crates/uriel-terse",
-<<<<<<< HEAD
     "crates/uriel-fleet",
     "crates/uriel-genius",
     "crates/uriel-ledger",
-=======
     "crates/uriel-page",
->>>>>>> origin/master
 ]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.9"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"

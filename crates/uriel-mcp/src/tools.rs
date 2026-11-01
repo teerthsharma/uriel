@@ -9,11 +9,7 @@ use crate::db::{Db, Open};
 use crate::services::Services;
 use crate::session::Session;
 use crate::placement::PlaceState;
-<<<<<<< HEAD
-use crate::{agent_tools, house_tools, ledger_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
-=======
-use crate::{dispatch_tools, guard, house_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
->>>>>>> origin/master
+use crate::{agent_tools, dispatch_tools, guard, house_tools, ledger_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
 use uriel_house::House;
 use uriel_query::{AccessMode, QueryStats};
 use uriel_rag::Rag;
@@ -291,21 +287,17 @@ pub fn all() -> impl Iterator<Item = &'static ToolDef> {
         .chain(view::TOOLS.iter())
         .chain(soul::TOOLS.iter())
         .chain(terse::TOOLS.iter())
-<<<<<<< HEAD
         .chain(agent_tools::TOOLS.iter())
         .chain(ledger_tools::TOOLS.iter())
-}
-
-pub fn house_only(name: &str) -> bool {
-    name.starts_with("house_") || name.starts_with("research_") || name.starts_with("genius_")
-=======
         .chain(guard::TOOLS.iter())
         .chain(dispatch_tools::TOOLS.iter())
 }
 
 pub fn house_only(name: &str) -> bool {
-    name.starts_with("house_") || name.starts_with("research_") || name.starts_with("dispatch_")
->>>>>>> origin/master
+    name.starts_with("house_")
+        || name.starts_with("research_")
+        || name.starts_with("genius_")
+        || name.starts_with("dispatch_")
 }
 
 pub fn visible(
@@ -443,13 +435,10 @@ fn dispatch(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
         n if n.starts_with("rag_") || n.starts_with("seal_") || n.starts_with("session_") => {
             rag_tools::call(ctx, n, args)
         }
-<<<<<<< HEAD
-        n if n.starts_with("ledger_") => ledger_tools::call(ctx, n, args),
-        n if n.starts_with("genius_") || n.starts_with("fleet_") => agent_tools::call(ctx, n, args),
-=======
         guard::MORE | guard::USAGE | guard::ENABLE => guard::call(ctx, name, args, ctx.token_limit),
         n if n.starts_with("dispatch_") => dispatch_tools::call(ctx, n, args),
->>>>>>> origin/master
+        n if n.starts_with("ledger_") => ledger_tools::call(ctx, n, args),
+        n if n.starts_with("genius_") || n.starts_with("fleet_") => agent_tools::call(ctx, n, args),
         n if n.starts_with("house_") => house_tools::call(ctx, n, args),
         n if n.starts_with("research_") => research_tools::call(ctx, n, args),
         "view" => view::call(ctx, name, args),

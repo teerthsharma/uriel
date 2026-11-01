@@ -1,0 +1,16 @@
+[package]
+name = "uriel-ledger"
+description = "A bounded DAG of tiny goals for uriel: Kahn layers, ready frontier, issue and finish, a re-validating JSON form, with no I/O"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }
+thiserror = "2.0.21"
+uriel-fleet = { path = "../uriel-fleet" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -40,7 +40,6 @@ fn error_response(id: Json, code: i64, message: &str) -> Json {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
-<<<<<<< HEAD
 const GENIUS_PROMPT: &str = "genius";
 const GENIUS_IDEA_BYTES: usize = 2000;
 
@@ -83,25 +82,7 @@ fn prompts_get(mode: Mode, params: &Json) -> Result<Json, RpcError> {
     }))
 }
 
-pub fn truncate(text: String, limit: usize) -> String {
-    let total = text.chars().count();
-    if total <= limit {
-        return text;
-    }
-    let cut = text
-        .char_indices()
-        .nth(limit)
-        .map_or(text.len(), |(i, _)| i);
-    format!(
-        "{}\n... [truncated: showing {limit} of {total} characters; refine the query or raise --token-limit]",
-        &text[..cut]
-    )
-}
-
 const NORMAL_RW: &str = "seal graph database, normal mode. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. Light research from cached and stored context: rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats. Agents: fleet_admit, fleet_event, fleet_trace. Dependent goals: ledger_add, ledger_next, ledger_done.";
-=======
-const NORMAL_RW: &str = "seal graph database, normal mode. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. Light research from cached and stored context: rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats.";
->>>>>>> origin/master
 
 const NORMAL_RO: &str = "seal graph database (read-only), normal mode. Use get_neo4j_schema, read_neo4j_cypher, the memory read tools, rag_search, rag_expand, seal_recall, view, why_hot, replay, calibrate and tier_stats. Also fleet_admit, fleet_event and fleet_trace.";
 
@@ -235,8 +216,8 @@ impl Server {
 
     fn capabilities(&self) -> Json {
         match self.ctx.mode {
-            Mode::House => json!({"tools": {"listChanged": false}, "prompts": {"listChanged": false}}),
-            Mode::Normal => json!({"tools": {"listChanged": false}}),
+            Mode::House => json!({"tools": {"listChanged": self.ctx.guard.adaptive()}, "prompts": {"listChanged": false}}),
+            Mode::Normal => json!({"tools": {"listChanged": self.ctx.guard.adaptive()}}),
         }
     }
 
@@ -252,11 +233,7 @@ impl Server {
         let instructions = crate::guard::with_notes(&instructions, &self.ctx);
         json!({
             "protocolVersion": version,
-<<<<<<< HEAD
             "capabilities": self.capabilities(),
-=======
-            "capabilities": {"tools": {"listChanged": self.ctx.guard.adaptive()}},
->>>>>>> origin/master
             "serverInfo": {"name": "uriel-mcp", "title": "seal graph database", "version": env!("CARGO_PKG_VERSION")},
             "instructions": instructions
         })

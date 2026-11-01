@@ -365,13 +365,10 @@ fn house_mode_tools_list_names() {
     let mut want: Vec<String> = ALL_TOOLS
         .iter()
         .chain(MODE_TOOLS)
-<<<<<<< HEAD
         .chain(AGENT_TOOLS)
         .chain(GENIUS_TOOLS)
-=======
         .chain(GUARD_TOOLS)
         .chain(DISPATCH_TOOLS)
->>>>>>> origin/master
         .chain(HOUSE_TOOLS)
         .map(|x| x.to_string())
         .collect();
@@ -387,11 +384,8 @@ fn tools_list_names() {
     let mut want: Vec<String> = ALL_TOOLS
         .iter()
         .chain(MODE_TOOLS)
-<<<<<<< HEAD
         .chain(AGENT_TOOLS)
-=======
         .chain(GUARD_TOOLS)
->>>>>>> origin/master
         .map(|x| x.to_string())
         .collect();
     got.sort();
@@ -405,11 +399,11 @@ fn tools_list_schemas_match_neo4j_shapes() {
     let r = s.rpc("tools/list", json!({}));
     for t in r["result"]["tools"].as_array().unwrap() {
         let name = t["name"].as_str().unwrap();
-<<<<<<< HEAD
-        if MODE_TOOLS.contains(&name) || AGENT_TOOLS.contains(&name) || GENIUS_TOOLS.contains(&name) {
-=======
-        if MODE_TOOLS.contains(&name) || GUARD_TOOLS.contains(&name) {
->>>>>>> origin/master
+        if MODE_TOOLS.contains(&name)
+            || AGENT_TOOLS.contains(&name)
+            || GENIUS_TOOLS.contains(&name)
+            || GUARD_TOOLS.contains(&name)
+        {
             continue;
         }
         let schema = &t["inputSchema"];

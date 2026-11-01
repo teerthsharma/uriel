@@ -103,10 +103,10 @@ fn prompt_errors_are_typed_invalid_params() {
 #[test]
 fn fleet_and_ledger_tools_are_in_both_modes_genius_only_in_house_and_ledger_not_in_read_only() {
     for (extra, base, fleet, ledger, genius) in [
-        (vec![], 27usize, 3usize, 3usize, 0usize),
-        (vec!["--mode", "house"], 41, 3, 3, 3),
-        (vec!["--read-only"], 15, 3, 0, 0),
-        (vec!["--mode", "house", "--read-only"], 20, 3, 0, 3),
+        (vec![], 30usize, 3usize, 3usize, 0usize),
+        (vec!["--mode", "house"], 51, 3, 3, 3),
+        (vec!["--read-only"], 18, 3, 0, 0),
+        (vec!["--mode", "house", "--read-only"], 23, 3, 0, 3),
     ] {
         let p = Proj::new();
         let mut s = start(&p, &extra, &[]);
