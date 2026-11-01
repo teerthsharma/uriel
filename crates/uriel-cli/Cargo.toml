@@ -12,8 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-sysinfo = "0.33"
-enable-ansi-support = "0.2"
+sysinfo = "0.39"
+enable-ansi-support = "0.3"
 uriel-mcp = { path = "../uriel-mcp" }
 uriel-rag = { path = "../uriel-rag" }
 uriel-core = { path = "../uriel-core" }
