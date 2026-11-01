@@ -440,7 +440,10 @@ pub fn call(ctx: &Context, name: &str, args: &Json) -> ToolResult {
             out
         }
         "seal_recall" => seal_recall(ctx, args),
-        "session_reset" => Ok(json!({"cleared": ctx.session.reset()}).to_string()),
+        "session_reset" => {
+            ctx.guard.repeats.reset();
+            Ok(json!({"cleared": ctx.session.reset()}).to_string())
+        }
         other => Err(format!("unknown tool '{other}'")),
     }
 }

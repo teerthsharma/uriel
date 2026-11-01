@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use uriel_terse::count_tokens as estimate_tokens;
 
 use crate::config::Tools;
-use crate::session::Seen;
+use crate::session::{Seen, Session};
 use crate::tools::{object, opt_usize, req_str, str_prop, Context, ToolDef, ToolResult};
 
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
@@ -16,6 +16,7 @@ pub const DEFAULT_SOFT_TOKENS: u64 = 40_000;
 pub const DEFAULT_HARD_TOKENS: u64 = 100_000;
 pub const SPILL_BYTES: usize = 2 * 1024 * 1024;
 pub const MIN_STUB_TOKENS: usize = 200;
+pub const REPEAT_ENTRIES: usize = 512;
 pub const MIN_TIGHT_CHARS: usize = 2_000;
 pub const MIN_CRITICAL_CHARS: usize = 800;
 
@@ -241,6 +242,7 @@ pub struct Guard {
     changed: AtomicBool,
     active: Mutex<BTreeSet<Group>>,
     pub spill: Spill,
+    pub repeats: Session,
 }
 
 impl Guard {
@@ -260,6 +262,7 @@ impl Guard {
             changed: AtomicBool::new(false),
             active: Mutex::new(BTreeSet::new()),
             spill: Spill::new(SPILL_BYTES),
+            repeats: Session::with_cap(REPEAT_ENTRIES),
         }
     }
 
@@ -386,11 +389,11 @@ pub fn shape(
         if tokens >= MIN_STUB_TOKENS {
             let id = key(name, args);
             let fp = fingerprint(&text);
-            if ctx.session.check(id, &fp, 1) == Seen::Same {
+            if g.repeats.check(id, &fp, 1) == Seen::Same {
                 g.stubbed.fetch_add(1, Ordering::Relaxed);
                 text = format!("=same ({tokens} tokens sent earlier; fresh=true resends)");
             } else {
-                ctx.session.record(id, &fp, 1);
+                g.repeats.record(id, &fp, 1);
             }
         }
     }

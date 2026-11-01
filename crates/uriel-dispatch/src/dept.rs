@@ -78,7 +78,7 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn add(self, o: Progress) -> Progress {
+    pub fn plus(self, o: Progress) -> Progress {
         Progress {
             done: self.done + o.done,
             total: self.total + o.total,
@@ -118,9 +118,17 @@ impl fmt::Display for PlanError {
             PlanError::TooMany(what) => write!(f, "too many {what}"),
             PlanError::Empty(w) => write!(f, "{w} is empty"),
             PlanError::Long(w) => write!(f, "{w} is longer than {MAX_TEXT} characters"),
-            PlanError::Duplicate(n) => write!(f, "department name '{n}' collides with another after slugging"),
-            PlanError::NoLeaves(w) => write!(f, "{w} has no leaves: every sub-goal needs at least one"),
-            PlanError::NoChecklist(w) => write!(f, "{w} has an empty checklist: every leaf needs at least one item"),
+            PlanError::Duplicate(n) => write!(
+                f,
+                "department name '{n}' collides with another after slugging"
+            ),
+            PlanError::NoLeaves(w) => {
+                write!(f, "{w} has no leaves: every sub-goal needs at least one")
+            }
+            PlanError::NoChecklist(w) => write!(
+                f,
+                "{w} has an empty checklist: every leaf needs at least one item"
+            ),
             PlanError::UnknownLeaf(l) => write!(f, "no leaf '{l}'"),
             PlanError::BadItem(l, i) => write!(f, "leaf '{l}' has no checklist item {i}"),
         }
@@ -264,7 +272,7 @@ impl Plan {
     pub fn progress(&self) -> Progress {
         self.departments
             .iter()
-            .fold(Progress::default(), |a, d| a.add(d.progress()))
+            .fold(Progress::default(), |a, d| a.plus(d.progress()))
     }
 
     pub fn dept_of_leaf(&self, id: &str) -> Option<&str> {
@@ -275,7 +283,8 @@ impl Plan {
 impl Leaf {
     pub fn progress(&self) -> Progress {
         Progress {
-            done: u32::try_from(self.checklist.iter().filter(|i| i.done).count()).unwrap_or(u32::MAX),
+            done: u32::try_from(self.checklist.iter().filter(|i| i.done).count())
+                .unwrap_or(u32::MAX),
             total: u32::try_from(self.checklist.len()).unwrap_or(u32::MAX),
         }
     }
@@ -283,13 +292,17 @@ impl Leaf {
 
 impl SubGoal {
     pub fn progress(&self) -> Progress {
-        self.leaves.iter().fold(Progress::default(), |a, l| a.add(l.progress()))
+        self.leaves
+            .iter()
+            .fold(Progress::default(), |a, l| a.plus(l.progress()))
     }
 }
 
 impl Department {
     pub fn progress(&self) -> Progress {
-        self.subgoals.iter().fold(Progress::default(), |a, s| a.add(s.progress()))
+        self.subgoals
+            .iter()
+            .fold(Progress::default(), |a, s| a.plus(s.progress()))
     }
 }
 
@@ -302,7 +315,11 @@ pub fn distribute_ranked(
     loads: &BTreeMap<String, u32>,
     served: &BTreeMap<String, u64>,
 ) -> BTreeMap<String, u32> {
-    let active: Vec<(&String, u32)> = loads.iter().filter(|(_, l)| **l > 0).map(|(k, l)| (k, *l)).collect();
+    let active: Vec<(&String, u32)> = loads
+        .iter()
+        .filter(|(_, l)| **l > 0)
+        .map(|(k, l)| (k, *l))
+        .collect();
     let mut out: BTreeMap<String, u32> = loads.keys().map(|k| (k.clone(), 0)).collect();
     if active.is_empty() || capacity == 0 {
         return out;
