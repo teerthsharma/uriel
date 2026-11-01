@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 mod afk_cmd;
+mod afk_pages;
+mod page_cmd;
 mod banner;
 mod capture;
 mod commands;
@@ -15,7 +17,7 @@ use uriel_core::MemoryBudget;
 use uriel_mcp::config::{
     default_db_path, Config, Format, Mode as ServerMode, PlacementMode, DEFAULT_IDLE_RELEASE_SECS, DEFAULT_MEMORY_MIB,
     DEFAULT_TOKEN_LIMIT,
-    Terse, Tools, MODE_ENV, TERSE_ENV, TOOLS_ENV,
+    Reduce, Terse, Tools, MODE_ENV, REDUCE_ENV, TERSE_ENV, TOOLS_ENV,
 };
 
 use banner::{mode_from_env, render_banner, Mode};
@@ -59,6 +61,7 @@ enum Command {
     RecallContext(RecallArgs),
     Recall(SearchArgs),
     Afk(AfkArgs),
+    Page(PageArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -77,6 +80,13 @@ enum ModeArg {
 enum ToolsArg {
     Adaptive,
     Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ReduceArg {
+    Auto,
+    On,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -116,6 +126,8 @@ struct McpArgs {
     idle_release_secs: Option<u64>,
     #[arg(long, value_enum)]
     tools: Option<ToolsArg>,
+    #[arg(long, value_enum)]
+    reduce: Option<ReduceArg>,
     #[arg(long)]
     soft_tokens: Option<u64>,
     #[arg(long)]
@@ -179,8 +191,23 @@ enum AfkCmd {
     Add {
         #[arg(long)]
         goal_id: Option<String>,
-        #[arg(num_args = 1.., required = true)]
+        #[arg(long)]
+        leaf: Option<String>,
+        #[arg(num_args = 1.., required_unless_present = "leaf", conflicts_with = "leaf")]
         text: Vec<String>,
+    },
+    Plan {
+        spec: PathBuf,
+    },
+    Check {
+        leaf: String,
+        index: usize,
+        #[arg(long)]
+        undo: bool,
+    },
+    Pages {
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     Report {
         ticket: u64,
@@ -193,6 +220,25 @@ enum AfkCmd {
     Init {
         #[arg(long)]
         project: bool,
+    },
+}
+
+#[derive(Debug, Args, PartialEq)]
+struct PageArgs {
+    #[command(subcommand)]
+    cmd: PageCmd,
+}
+
+#[derive(Debug, Subcommand, PartialEq)]
+enum PageCmd {
+    Build {
+        spec: PathBuf,
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    Demo {
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -272,6 +318,14 @@ impl McpArgs {
             terse: Terse::resolve(terse_flag, terse_env)?,
             idle_release_secs: self.idle_release_secs.unwrap_or(DEFAULT_IDLE_RELEASE_SECS),
             tools: Tools::resolve(tools_flag, tools_env)?,
+            reduce: Reduce::resolve(
+                self.reduce.map(|r| match r {
+                    ReduceArg::Auto => Reduce::Auto,
+                    ReduceArg::On => Reduce::On,
+                    ReduceArg::Off => Reduce::Off,
+                }),
+                std::env::var(REDUCE_ENV).ok().as_deref(),
+            )?,
             soft_tokens: self.soft_tokens.unwrap_or(uriel_mcp::guard::DEFAULT_SOFT_TOKENS),
             hard_tokens: self.hard_tokens.unwrap_or(uriel_mcp::guard::DEFAULT_HARD_TOKENS),
         })
@@ -311,6 +365,7 @@ fn dispatch<R: BufRead + Send + 'static, W: Write>(
             Ok(())
         }
         Some(Command::Afk(args)) => afk_cmd::run(out, args.file, &args.cmd),
+        Some(Command::Page(args)) => page_cmd::run(out, &args.cmd),
         Some(Command::Index(args)) => {
             let db = args.db.unwrap_or_else(default_db_path);
             commands::index(out, &args.path, &db)
@@ -437,7 +492,7 @@ mod tests {
             command(&["afk", "add", "--goal-id", "G1.2", "write", "the", "parser"]),
             Some(Command::Afk(AfkArgs {
                 file: None,
-                cmd: AfkCmd::Add { goal_id: Some("G1.2".into()), text: vec!["write".into(), "the".into(), "parser".into()] }
+                cmd: AfkCmd::Add { goal_id: Some("G1.2".into()), leaf: None, text: vec!["write".into(), "the".into(), "parser".into()] }
             }))
         );
         assert_eq!(
@@ -447,6 +502,27 @@ mod tests {
                 cmd: AfkCmd::Report { ticket: 3, kind: "ask".into(), note: Some("which?".into()) }
             }))
         );
+        assert_eq!(
+            command(&["afk", "add", "--leaf", "research.1.2"]),
+            Some(Command::Afk(AfkArgs {
+                file: None,
+                cmd: AfkCmd::Add { goal_id: None, leaf: Some("research.1.2".into()), text: vec![] }
+            }))
+        );
+        assert!(parse(&["afk", "add", "--leaf", "a.1.1", "also", "text"]).is_err());
+        assert_eq!(
+            command(&["afk", "check", "build.1.1", "2", "--undo"]),
+            Some(Command::Afk(AfkArgs { file: None, cmd: AfkCmd::Check { leaf: "build.1.1".into(), index: 2, undo: true } }))
+        );
+        assert_eq!(
+            command(&["afk", "pages", "--out", "site"]),
+            Some(Command::Afk(AfkArgs { file: None, cmd: AfkCmd::Pages { out: Some("site".into()) } }))
+        );
+        assert_eq!(
+            command(&["page", "build", "spec.json", "--out", "x.html"]),
+            Some(Command::Page(PageArgs { cmd: PageCmd::Build { spec: "spec.json".into(), out: Some("x.html".into()) } }))
+        );
+        assert!(parse(&["page"]).is_err());
         assert!(parse(&["afk", "add"]).is_err());
         assert!(parse(&["afk"]).is_err());
     }
@@ -489,6 +565,7 @@ mod tests {
                 token_limit: None,
                 idle_release_secs: None,
                 tools: None,
+                reduce: None,
                 soft_tokens: None,
                 hard_tokens: None,
             }))
@@ -762,6 +839,7 @@ mod tests {
                     token_limit: None,
                     idle_release_secs: None,
                 tools: None,
+                reduce: None,
                 soft_tokens: None,
                 hard_tokens: None,
                 })),
@@ -790,6 +868,7 @@ mod tests {
                 token_limit: None,
                 idle_release_secs: None,
                 tools: None,
+                reduce: None,
                 soft_tokens: None,
                 hard_tokens: None,
             })),

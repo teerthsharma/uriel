@@ -11,4 +11,4 @@ pub use error::Error;
 pub use json::Value;
 pub use prose::{compact, Level};
 pub use protected::{scan, Kind, Span};
-pub use tokens::{estimate_tokens, Report, CHARS_PER_TOKEN};
+pub use tokens::{count_tokens, estimate_tokens, Report, CHARS_PER_TOKEN};

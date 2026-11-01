@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as Json};
 use uriel_dispatch::afk::{parse_duration, Afk, Kind};
+use uriel_dispatch::dept::PlanSpec;
 use uriel_dispatch::{Ms, TicketId};
 
 use crate::services::probe_from_env;
@@ -52,10 +53,34 @@ fn open_schema() -> Json {
 fn add_schema() -> Json {
     object(
         json!({
-            "scope": str_prop("One line: what changes, where, and the test that proves it."),
+            "leaf": str_prop("Plan leaf id such as research.1.2: opens its ticket in its department."),
+            "scope": str_prop("Without a plan: one line of what changes, where, and the test that proves it."),
             "goal_id": str_prop("House goal id this ticket carries out.")
         }),
-        &["scope"],
+        &[],
+    )
+}
+
+fn plan_schema() -> Json {
+    object(
+        json!({
+            "plan": {
+                "type": "object",
+                "description": "{departments:[{name,goal,subgoals:[{goal,leaves:[{goal,checklist:[string]}]}]}]}. Three tiers: department goal, sub-goal, leaf with a checklist. Ids are positional: research.2.1."
+            }
+        }),
+        &["plan"],
+    )
+}
+
+fn check_schema() -> Json {
+    object(
+        json!({
+            "leaf": str_prop("Leaf id."),
+            "index": {"type": "integer", "description": "Checklist item number, from 0."},
+            "done": {"type": "boolean", "description": "Default true; false unticks."}
+        }),
+        &["leaf", "index"],
     )
 }
 
@@ -83,9 +108,23 @@ pub const TOOLS: &[ToolDef] = &[
         schema: open_schema,
     },
     ToolDef {
+        name: "dispatch_plan",
+        title: "Set the department plan",
+        description: "Set the three-tier plan once per window: departments own goals, sub-goals split them, leaves carry checklists. Slots are shared between departments by load.",
+        writes: true,
+        schema: plan_schema,
+    },
+    ToolDef {
+        name: "dispatch_check",
+        title: "Tick a checklist item",
+        description: "Tick or untick one checklist item of a plan leaf; progress rolls up to its sub-goal, department and the plan.",
+        writes: true,
+        schema: check_schema,
+    },
+    ToolDef {
         name: "dispatch_add",
-        title: "Add a sub-goal ticket",
-        description: "Gate and open a ticket for one sub-goal. Returns actions: a `start` action means start a worker now; none means queued.",
+        title: "Add a ticket",
+        description: "Gate and open a ticket for a plan leaf, or for a one-line scope. Returns actions: a `start` action means start a worker now; none means queued.",
         writes: true,
         schema: add_schema,
     },
@@ -123,14 +162,49 @@ pub fn call(ctx: &Context, name: &str, args: &Json) -> ToolResult {
                 .map_err(|e| e.to_string())?;
             Ok(json!({"open": true, "minutes": ms / 60_000, "workers": workers.clamp(1, 16), "closes": afk.closes()}).to_string())
         }
-        "dispatch_add" => {
-            let scope = req_str(args, "scope")?;
-            let goal = args
-                .get("goal_id")
-                .and_then(Json::as_str)
-                .filter(|g| !g.is_empty());
+        "dispatch_plan" => {
+            let spec: PlanSpec = serde_json::from_value(
+                args.get("plan")
+                    .cloned()
+                    .ok_or("'plan' is required and must be an object")?,
+            )
+            .map_err(|e| format!("plan: {e}"))?;
             let mut afk = open_fed(ctx, now)?;
-            let (ticket, actions) = afk.add(now, goal, scope).map_err(|e| e.to_string())?;
+            let leaves = afk.set_plan(spec).map_err(|e| e.to_string())?;
+            Ok(json!({"leaves": leaves, "departments": afk.departments_json()}).to_string())
+        }
+        "dispatch_check" => {
+            let leaf = req_str(args, "leaf")?;
+            let index = args
+                .get("index")
+                .and_then(Json::as_u64)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or("'index' is required and must be a non-negative integer")?;
+            let done = args.get("done").and_then(Json::as_bool).unwrap_or(true);
+            let mut afk = open_fed(ctx, now)?;
+            afk.check(leaf, index, done).map_err(|e| e.to_string())?;
+            let progress = afk.plan().map(|p| p.progress());
+            Ok(json!({"leaf": leaf, "index": index, "done": done, "plan": progress}).to_string())
+        }
+        "dispatch_add" => {
+            let mut afk = open_fed(ctx, now)?;
+            let leaf = args
+                .get("leaf")
+                .and_then(Json::as_str)
+                .filter(|l| !l.is_empty());
+            let (ticket, actions) = match leaf {
+                Some(leaf) => afk.add_leaf(now, leaf),
+                None => {
+                    let scope = req_str(args, "scope")
+                        .map_err(|_| "give a plan 'leaf' or a non-empty 'scope'".to_string())?;
+                    let goal = args
+                        .get("goal_id")
+                        .and_then(Json::as_str)
+                        .filter(|g| !g.is_empty());
+                    afk.add(now, goal, scope)
+                }
+            }
+            .map_err(|e| e.to_string())?;
             Ok(json!({"ticket": ticket.0, "actions": actions}).to_string())
         }
         "dispatch_report" => {

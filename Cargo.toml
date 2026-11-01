@@ -20,6 +20,7 @@ members = [
     "crates/uriel-bench",
     "crates/uriel-cli",
     "crates/uriel-terse",
+    "crates/uriel-page",
 ]
 
 [workspace.package]

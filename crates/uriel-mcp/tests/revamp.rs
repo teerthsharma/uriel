@@ -244,7 +244,7 @@ fn rows_past_the_cap_are_counted_not_sent_in_both_formats() {
 
 #[test]
 fn the_memory_graph_is_capped_and_says_how_to_reach_the_rest() {
-    let (_p, mut s) = adaptive(&[]);
+    let (_p, mut s) = adaptive(&["--reduce", "off"]);
     let ents: Vec<Value> = (0..230)
         .map(|i| json!({"name": format!("e{i:03}"), "type": "T"}))
         .collect();
@@ -458,4 +458,76 @@ fn a_cli_session_and_the_mcp_tools_share_one_log() {
         afk.is_ok(),
         "the CLI's reader accepts what the MCP tool wrote"
     );
+}
+
+#[test]
+fn a_department_plan_runs_through_the_mcp_tools_with_checklists_and_shares() {
+    let (_p, mut s) = adaptive(&["--mode", "house"]);
+    s.tool("dispatch_open", json!({"duration": "2h", "workers": 2}));
+    let plan = json!({"departments": [
+        {"name": "Research", "goal": "Find the fix", "subgoals": [{"goal": "Reproduce", "leaves": [{"goal": "Failing case", "checklist": ["seen failing", "minimal"]}]}]},
+        {"name": "Build", "goal": "Land it", "subgoals": [{"goal": "Implement", "leaves": [{"goal": "Code", "checklist": ["compiles"]}]}]}
+    ]});
+    let (t, err) = s.tool("dispatch_plan", json!({"plan": plan}));
+    assert!(!err, "{t}");
+    assert_eq!(serde_json::from_str::<Value>(&t).unwrap()["leaves"], 2);
+    let (t, err) = s.tool("dispatch_plan", json!({"plan": {"departments": []}}));
+    assert!(err && t.contains("already has a plan"), "{t}");
+    let (t, _) = s.tool("dispatch_add", json!({"leaf": "research.1.1"}));
+    assert_eq!(serde_json::from_str::<Value>(&t).unwrap()["actions"][0]["goal"], "research.1.1");
+    let (t, err) = s.tool("dispatch_add", json!({"leaf": "research.1.1"}));
+    assert!(err && t.contains("already has a ticket"), "{t}");
+    let (t, _) = s.tool("dispatch_check", json!({"leaf": "research.1.1", "index": 0}));
+    assert_eq!(serde_json::from_str::<Value>(&t).unwrap()["plan"], json!({"done": 1, "total": 3}));
+    let (t, err) = s.tool("dispatch_check", json!({"leaf": "research.1.1", "index": 7}));
+    assert!(err && t.contains("no checklist item"), "{t}");
+    let (t, err) = s.tool("dispatch_add", json!({}));
+    assert!(err && t.contains("leaf"), "{t}");
+    let (t, _) = s.tool("dispatch_status", json!({}));
+    let st: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(st["departments"][0]["progress"], json!({"done": 1, "total": 2}));
+}
+
+#[test]
+fn the_reducer_shrinks_big_json_results_losslessly_and_reports_the_saving() {
+    let ents: Vec<Value> = (0..120).map(|i| json!({"name": format!("e{i:03}"), "type": "Thing"})).collect();
+    let (_p1, mut off) = adaptive(&["--reduce", "off"]);
+    off.tool("create_entities", json!({"entities": ents.clone()}));
+    let (plain, _) = off.tool("read_graph", json!({}));
+    let (_p2, mut on) = adaptive(&["--reduce", "on"]);
+    on.tool("create_entities", json!({"entities": ents}));
+    let (reduced, _) = on.tool("read_graph", json!({}));
+    assert!(reduced.len() * 100 < plain.len() * 85, "{} vs {}", reduced.len(), plain.len());
+    let back = uriel_terse::data::decode(&reduced).expect("terse text decodes");
+    assert_eq!(back, uriel_terse::Value::parse(&plain).unwrap());
+    let (u, _) = on.tool("usage", json!({}));
+    let v: Value = serde_json::from_str(&u).unwrap();
+    assert_eq!(v["reducer"]["on"], true);
+    assert!(v["reducer"]["by_stage"]["data"].as_u64().unwrap() > 0, "{u}");
+}
+
+#[test]
+fn explicit_json_and_exact_tools_bypass_the_reducer_and_off_means_off() {
+    let ents: Vec<Value> = (0..120).map(|i| json!({"name": format!("e{i:03}"), "type": "Thing"})).collect();
+    let (_p, mut on) = adaptive(&["--reduce", "on"]);
+    on.tool("create_entities", json!({"entities": ents}));
+    let (j, _) = on.tool("search_memories", json!({"query": "e0", "format": "json"}));
+    assert!(serde_json::from_str::<Value>(&j).is_ok(), "an explicit format=json stays JSON");
+    let (_p2, mut off) = adaptive(&["--reduce", "off"]);
+    let (u, _) = off.tool("usage", json!({}));
+    assert_eq!(serde_json::from_str::<Value>(&u).unwrap()["reducer"]["on"], false);
+}
+
+#[test]
+fn the_reducer_defaults_to_on_with_adaptive_tools_and_off_with_full() {
+    let (_p, mut a) = adaptive(&[]);
+    let (u, _) = a.tool("usage", json!({}));
+    assert_eq!(serde_json::from_str::<Value>(&u).unwrap()["reducer"]["on"], true);
+    let p = Proj::new();
+    let mut f = Session::start(
+        &["--root".to_string(), p.root(), "--in-memory".to_string()],
+        &[("URIEL_TOOLS", "full")],
+    );
+    let (u, _) = f.tool("usage", json!({}));
+    assert_eq!(serde_json::from_str::<Value>(&u).unwrap()["reducer"]["on"], false);
 }

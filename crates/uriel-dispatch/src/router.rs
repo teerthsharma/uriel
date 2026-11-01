@@ -96,6 +96,8 @@ pub struct Router {
     ram_slots: Option<u32>,
     window: Option<Ms>,
     window_announced: bool,
+    served: std::collections::BTreeMap<String, u64>,
+    grants: u64,
     inputs: Vec<(Ms, Input)>,
     digest: [u8; 32],
 }
@@ -130,6 +132,8 @@ impl Router {
             ram_slots: None,
             window: None,
             window_announced: false,
+            served: std::collections::BTreeMap::new(),
+            grants: 0,
             inputs: Vec::new(),
             digest: h.finalize().into(),
         }
@@ -208,6 +212,30 @@ impl Router {
             }
         }
         (regular, reserve)
+    }
+
+    pub fn loads(&self) -> std::collections::BTreeMap<String, u32> {
+        let mut out = std::collections::BTreeMap::new();
+        for t in self.tickets.values() {
+            let live = t.status == Status::Open
+                && (t.slot.is_some() || matches!(t.phase, Phase::Queued { .. } | Phase::Preparing { .. }));
+            if live {
+                *out.entry(t.dept.clone().unwrap_or_default()).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
+    pub fn shares(&self) -> std::collections::BTreeMap<String, u32> {
+        crate::dept::distribute_ranked(self.capacity(), &self.loads(), &self.served)
+    }
+
+    pub fn held_by_dept(&self) -> std::collections::BTreeMap<String, u32> {
+        let mut out = std::collections::BTreeMap::new();
+        for t in self.tickets.values().filter(|t| t.slot == Some(SlotKind::Regular)) {
+            *out.entry(t.dept.clone().unwrap_or_default()).or_insert(0) += 1;
+        }
+        out
     }
 
     pub fn attention(&self) -> Vec<AttentionItem> {
@@ -899,6 +927,7 @@ impl Router {
                 scope,
                 rules,
                 assessed,
+                dept,
             } => {
                 if let Some(id) = self.accepted.get(trigger) {
                     return Decision::Accept(*id);
@@ -945,7 +974,7 @@ impl Router {
                     thread: t.thread.clone(),
                     basis: adm.basis,
                 };
-                Decision::Accept(self.open_ticket(now, &t, mandate, fx))
+                Decision::Accept(self.open_ticket(now, &t, mandate, dept.clone(), fx))
             }
         }
     }
@@ -955,6 +984,7 @@ impl Router {
         now: Ms,
         t: &Trigger,
         mandate: Mandate,
+        dept: Option<String>,
         fx: &mut Vec<Effect>,
     ) -> TicketId {
         let id = TicketId(self.next_ticket);
@@ -981,6 +1011,7 @@ impl Router {
             prepared: false,
             opened_at: now,
             changed_at: now,
+            dept,
         };
         self.seq += 1;
         self.tickets.insert(id, tk);
@@ -1255,17 +1286,23 @@ impl Router {
             }
             let cap = self.capacity();
             let (regular, reserve) = self.slots_held();
-            let mut cands: Vec<(bool, u64, TicketId)> = self
+            let shares = self.shares();
+            let held = self.held_by_dept();
+            let deficit = |d: &Option<String>| -> i64 {
+                let k = d.clone().unwrap_or_default();
+                i64::from(shares.get(&k).copied().unwrap_or(0)) - i64::from(held.get(&k).copied().unwrap_or(0))
+            };
+            let mut cands: Vec<(bool, i64, u64, TicketId)> = self
                 .tickets
                 .values()
                 .filter(|t| t.status == Status::Open)
                 .filter_map(|t| match t.phase {
-                    Phase::Queued { seq, person } => Some((!person, seq, t.id)),
+                    Phase::Queued { seq, person } => Some((!person, -deficit(&t.dept), seq, t.id)),
                     _ => None,
                 })
                 .collect();
             cands.sort();
-            let Some(&(not_person, _, id)) = cands.first() else {
+            let Some(&(not_person, _, _, id)) = cands.first() else {
                 break;
             };
             let kind = if regular < cap {
@@ -1279,6 +1316,9 @@ impl Router {
                 break;
             };
             t.slot = Some(kind);
+            self.grants += 1;
+            self.served
+                .insert(t.dept.clone().unwrap_or_default(), self.grants);
             t.changed_at = now;
             if t.latest == Some(Report::Waiting) {
                 t.latest = Some(Report::Progress);

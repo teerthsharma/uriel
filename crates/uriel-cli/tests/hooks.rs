@@ -400,6 +400,7 @@ fn recall_with_no_match_prints_nothing_on_stdout() {
 }
 
 #[test]
+#[cfg_attr(not(windows), ignore = "redb 4 uses advisory byte-range locks on unix, so a read-only overlay open succeeds while another handle holds the db; only Windows mandatory locks refuse it")]
 fn recall_on_a_database_held_by_a_writer_exits_zero_with_one_diagnostic() {
     let dir = tempfile::tempdir().expect("tmp");
     let (db, arg) = captured_db(dir.path(), &conversation(30));

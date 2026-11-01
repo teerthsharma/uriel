@@ -131,6 +131,8 @@ pub enum Verdict {
         scope: String,
         rules: Vec<String>,
         assessed: bool,
+        #[serde(default)]
+        dept: Option<String>,
     },
     Attach {
         ticket: TicketId,

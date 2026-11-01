@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde_json::{json, Value as Json};
 use sha2::{Digest, Sha256};
-use uriel_terse::estimate_tokens;
+use uriel_terse::count_tokens as estimate_tokens;
 
 use crate::config::Tools;
 use crate::session::Seen;
@@ -230,6 +230,9 @@ pub struct Guard {
     pub tools: Tools,
     pub soft: u64,
     pub hard: u64,
+    pub reduce: bool,
+    saved_trim: AtomicU64,
+    saved_data: AtomicU64,
     sent: AtomicU64,
     calls: AtomicU64,
     stubbed: AtomicU64,
@@ -241,11 +244,14 @@ pub struct Guard {
 }
 
 impl Guard {
-    pub fn new(tools: Tools, soft: u64, hard: u64) -> Guard {
+    pub fn new(tools: Tools, soft: u64, hard: u64, reduce: bool) -> Guard {
         Guard {
             tools,
             soft,
             hard,
+            reduce,
+            saved_trim: AtomicU64::new(0),
+            saved_data: AtomicU64::new(0),
             sent: AtomicU64::new(0),
             calls: AtomicU64::new(0),
             stubbed: AtomicU64::new(0),
@@ -368,6 +374,13 @@ pub fn shape(
     let g = &ctx.guard;
     g.calls.fetch_add(1, Ordering::Relaxed);
     let mut text = text;
+    if g.reduce && !is_error {
+        let with_data = ctx.terse == crate::config::Terse::Off;
+        let (t, saved) = crate::reduce::apply(name, args, text, with_data);
+        text = t;
+        g.saved_trim.fetch_add(saved.trim as u64, Ordering::Relaxed);
+        g.saved_data.fetch_add(saved.data as u64, Ordering::Relaxed);
+    }
     if !is_error && name != MORE && REPEATABLE.contains(&name) && !fresh(args) {
         let tokens = estimate_tokens(&text);
         if tokens >= MIN_STUB_TOKENS {
@@ -513,6 +526,14 @@ pub fn call(ctx: &Context, name: &str, args: &Json, limit: usize) -> ToolResult 
             "repeats_stubbed": g.stubbed.load(Ordering::Relaxed),
             "cut_results": g.spilled.load(Ordering::Relaxed),
             "kept_bytes": g.spill.bytes(),
+            "reducer": {
+                "on": g.reduce,
+                "tokens_saved": g.saved_trim.load(Ordering::Relaxed) + g.saved_data.load(Ordering::Relaxed),
+                "by_stage": {
+                    "trim": g.saved_trim.load(Ordering::Relaxed),
+                    "data": g.saved_data.load(Ordering::Relaxed),
+                },
+            },
         })
         .to_string()),
         ENABLE => {
@@ -550,13 +571,13 @@ mod tests {
 
     #[test]
     fn pressure_follows_the_two_thresholds_and_zero_disables() {
-        let g = Guard::new(Tools::Adaptive, 100, 300);
+        let g = Guard::new(Tools::Adaptive, 100, 300, false);
         assert_eq!(g.pressure(), Pressure::Normal);
         g.sent.store(100, Ordering::Relaxed);
         assert_eq!(g.pressure(), Pressure::Tight);
         g.sent.store(300, Ordering::Relaxed);
         assert_eq!(g.pressure(), Pressure::Critical);
-        let off = Guard::new(Tools::Adaptive, 0, 0);
+        let off = Guard::new(Tools::Adaptive, 0, 0, false);
         off.sent.store(u64::MAX, Ordering::Relaxed);
         assert_eq!(off.pressure(), Pressure::Normal);
     }
@@ -614,7 +635,7 @@ mod tests {
 
     #[test]
     fn groups_open_on_entry_close_on_exit_and_member_use_lists_the_group() {
-        let g = Guard::new(Tools::Adaptive, 0, 0);
+        let g = Guard::new(Tools::Adaptive, 0, 0, false);
         assert!(g.is_listed("rag_search"));
         assert!(!g.is_listed("house_next"));
         g.note_call("house_need", true);
@@ -627,7 +648,7 @@ mod tests {
         assert!(!g.is_listed("dispatch_add"));
         g.note_call("create_entities", true);
         assert!(g.is_listed("read_graph"));
-        let full = Guard::new(Tools::Full, 0, 0);
+        let full = Guard::new(Tools::Full, 0, 0, false);
         assert!(full.is_listed("house_next"));
         full.note_call("house_need", true);
         assert!(
@@ -638,7 +659,7 @@ mod tests {
 
     #[test]
     fn a_failed_entry_call_does_not_open_its_group() {
-        let g = Guard::new(Tools::Adaptive, 0, 0);
+        let g = Guard::new(Tools::Adaptive, 0, 0, false);
         g.note_call("dispatch_open", false);
         assert!(!g.is_listed("dispatch_add"));
     }

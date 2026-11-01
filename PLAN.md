@@ -141,6 +141,17 @@ Source: DeepSeek `dsh-superagent-prototype` (research prototype, MIT), rebuilt a
 - [x] K5 `/afk` merges ready branches with passing tests into the branch it started on (`--no-merge` opts out); never pushes: `crates/uriel-cli/assets/afk.md`. Policy text only, tested for presence, not enforced
 - [ ] K6 A real tokenizer for the ledger; trimming `rag_search` and `view` schemas; terse echo for memory writes. Unbuilt
 
+## L. Real revamp: counter, reducer, pages, departments, CI
+
+- [x] L1 Token counter fitted on real cl100k counts: `crates/uriel-terse/src/tokens.rs` (`count_tokens`). Old rule 28 % mean error and 29 % under the total, new 3.3 % and within 3 %. Gate `crates/uriel-terse/tests/tokenizer.rs` (24 recorded samples with real counts). One corpus, cl100k only
+- [x] L2 Deterministic output reducer, `--reduce auto|on|off`: `crates/uriel-mcp/src/reduce.rs`. Measured on 1,980 recorded outputs: JSON results -26 % to -38 %, compact text 0 %. Gates: unit tests in `reduce.rs` (idempotent, lossless decode, exact tools untouched) and `tests/revamp.rs`
+- [x] L3 `uriel-page`: deterministic hospital-chart pages, no JavaScript: `crates/uriel-page`. 38 tests incl. XSS corpus, caps, accessibility checker, fuzz, golden digests; sample pages in `docs/pages/` kept in step by a test. Verified in Chromium at 1280, 390 and 360 px, dark and print emulation; a mobile overflow from visually-hidden text in table cells was found with the real pages and fixed
+- [x] L4 Departments: three tiers (department goal, sub-goal, leaf with checklist), progress roll-up, load-shared slots with no starvation: `crates/uriel-dispatch/src/dept.rs`, `router.rs`. Gates `tests/dept.rs` (13, incl. 4,000 random loads), `tests/department.rs` (11). A first fairness rule (busiest first) could starve a small department and was replaced by least recently served, with a test
+- [x] L5 `uriel afk plan|add --leaf|check|pages` and `uriel page build|demo`; `dispatch_plan`, `dispatch_check`, `dispatch_add{leaf}`: gates in `crates/uriel-cli/src/afk_cmd.rs`, `tests/revamp.rs`
+- [x] L6 CI/CD: `.github/workflows/` (see the CI report in the pull request). The workflows have not run on GitHub; the commands they run were run locally
+- [ ] L7 A hold-out evaluation of the counter on a second corpus; a real tokenizer vocabulary. Unbuilt
+- [ ] L8 Pages for the MCP `usage` and for `uriel doctor`. Unbuilt
+
 ## I. Release
 
 - [x] I1a Name decided: **Uriel** (2026-10-15), mark and lockups in `assets/`, rationale and limits in `docs/BRAND.md`

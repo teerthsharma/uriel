@@ -8,6 +8,7 @@ pub mod guard;
 pub mod house_tools;
 pub mod memory;
 pub mod place_tools;
+pub mod reduce;
 pub mod placement;
 pub mod prefix;
 pub mod prefix_tree;
@@ -51,7 +52,7 @@ pub fn build_server(cfg: &Config) -> Result<Server, String> {
         services: Services::from_config(cfg)?,
         format: cfg.format,
         session: session::Session::for_budget(cfg.memory),
-        guard: guard::Guard::new(cfg.tools, cfg.soft_tokens, cfg.hard_tokens),
+        guard: guard::Guard::new(cfg.tools, cfg.soft_tokens, cfg.hard_tokens, cfg.reduce.enabled(cfg.tools)),
         token_limit: cfg.token_limit,
         placement: placement::PlaceState::new(cfg.placement, persist_dir(cfg)),
     };

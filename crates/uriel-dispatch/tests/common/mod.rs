@@ -138,6 +138,16 @@ pub fn accept(rules: &[&str]) -> Verdict {
         scope: "work".into(),
         rules: rules.iter().map(|s| s.to_string()).collect(),
         assessed: true,
+        dept: None,
+    }
+}
+
+pub fn accept_in(dept: &str) -> Verdict {
+    Verdict::Accept {
+        scope: "work".into(),
+        rules: Vec::new(),
+        assessed: true,
+        dept: Some(dept.into()),
     }
 }
 

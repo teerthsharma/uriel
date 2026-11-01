@@ -23,7 +23,7 @@ const HOUSE: [&str; 11] = [
     "house_config",
 ];
 
-const DISPATCH: [&str; 5] = ["dispatch_open", "dispatch_add", "dispatch_report", "dispatch_status", "dispatch_close"];
+const DISPATCH: [&str; 7] = ["dispatch_open", "dispatch_plan", "dispatch_check", "dispatch_add", "dispatch_report", "dispatch_status", "dispatch_close"];
 const RESEARCH: [&str; 3] = [
     "research_orbit_audit",
     "research_pooling_audit",

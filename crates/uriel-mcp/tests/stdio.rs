@@ -318,7 +318,7 @@ const ALL_TOOLS: &[&str] = &[
 ];
 
 const GUARD_TOOLS: &[&str] = &["more", "usage", "tools_enable"];
-const DISPATCH_TOOLS: &[&str] = &["dispatch_open", "dispatch_add", "dispatch_report", "dispatch_status", "dispatch_close"];
+const DISPATCH_TOOLS: &[&str] = &["dispatch_open", "dispatch_plan", "dispatch_check", "dispatch_add", "dispatch_report", "dispatch_status", "dispatch_close"];
 const MODE_TOOLS: &[&str] = &[
     "rag_index",
     "rag_search",

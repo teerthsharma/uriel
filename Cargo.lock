@@ -954,6 +954,7 @@ dependencies = [
  "uriel-core",
  "uriel-dispatch",
  "uriel-mcp",
+ "uriel-page",
  "uriel-place",
  "uriel-rag",
 ]
@@ -1044,6 +1045,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "uriel-page"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+]
+
+[[package]]
 name = "uriel-place"
 version = "0.2.1"
 dependencies = [
@@ -1102,6 +1112,9 @@ dependencies = [
 [[package]]
 name = "uriel-terse"
 version = "0.2.1"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "uriel-tier"

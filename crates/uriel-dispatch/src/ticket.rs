@@ -48,6 +48,7 @@ pub struct Ticket {
     pub prepared: bool,
     pub opened_at: Ms,
     pub changed_at: Ms,
+    pub dept: Option<String>,
 }
 
 impl Ticket {
