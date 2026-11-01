@@ -60,6 +60,7 @@ enum Command {
     Capture(CaptureArgs),
     RecallContext(RecallArgs),
     Recall(SearchArgs),
+    Genius(GeniusArgs),
     Afk(AfkArgs),
     Page(PageArgs),
 }
@@ -256,6 +257,28 @@ struct SearchArgs {
     query: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PlanModeArg {
+    Tier,
+    Fork,
+}
+
+#[derive(Debug, Args, PartialEq)]
+struct GeniusArgs {
+    #[arg(long, value_enum, default_value = "tier")]
+    mode: PlanModeArg,
+    #[arg(long)]
+    warm: bool,
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u64).range(1..=256))]
+    max_agents: u64,
+    #[arg(long, conflicts_with = "print_command")]
+    json: bool,
+    #[arg(long)]
+    print_command: bool,
+    #[arg(num_args = 1.., required_unless_present = "print_command")]
+    idea: Vec<String>,
+}
+
 impl McpArgs {
     fn to_config(&self) -> Result<Config, String> {
         self.to_config_envs(
@@ -370,6 +393,18 @@ fn dispatch<R: BufRead + Send + 'static, W: Write>(
             let db = args.db.unwrap_or_else(default_db_path);
             commands::index(out, &args.path, &db)
         }
+        Some(Command::Genius(args)) => commands::genius(
+            out,
+            &args.idea.join(" "),
+            match args.mode {
+                PlanModeArg::Tier => uriel_genius::Mode::Tier,
+                PlanModeArg::Fork => uriel_genius::Mode::Fork,
+            },
+            args.warm,
+            args.max_agents as usize,
+            args.json,
+            args.print_command,
+        ),
         Some(Command::Calibrate(args)) => commands::calibrate(out, args.secs),
         Some(Command::Doctor(args)) => {
             let db = args.db.unwrap_or_else(default_db_path);
@@ -532,6 +567,28 @@ mod tests {
         let cli = parse(&[]).expect("parses");
         assert_eq!(cli.command, None);
         assert!(!cli.version);
+    }
+
+    #[test]
+    fn genius_takes_the_idea_as_trailing_words_with_defaults() {
+        match command(&["genius", "why", "is", "it", "slow"]) {
+            Some(Command::Genius(a)) => {
+                assert_eq!(a.idea.join(" "), "why is it slow");
+                assert_eq!((a.mode, a.warm, a.max_agents, a.json), (PlanModeArg::Tier, false, 8, false));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn genius_flags_parse_and_bad_values_are_refused() {
+        assert!(parse(&["genius", "--mode", "fork", "--warm", "--max-agents", "3", "--json", "x"]).is_ok());
+        assert!(parse(&["genius", "--json", "--print-command"]).is_err());
+        assert!(parse(&["genius", "--mode", "fork", "--warm", "--max-agents", "3", "x"]).is_ok());
+        assert!(parse(&["genius", "--max-agents", "0", "x"]).is_err());
+        assert!(parse(&["genius", "--max-agents", "257", "x"]).is_err());
+        assert!(parse(&["genius"]).is_err());
+        assert!(parse(&["genius", "--print-command"]).is_ok());
     }
 
     #[test]

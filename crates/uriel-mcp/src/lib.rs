@@ -1,11 +1,13 @@
 #![deny(unsafe_code)]
 
+pub mod agent_tools;
 pub mod compact;
 pub mod config;
 pub mod db;
 pub mod dispatch_tools;
 pub mod guard;
 pub mod house_tools;
+pub mod ledger_tools;
 pub mod memory;
 pub mod place_tools;
 pub mod reduce;
@@ -55,6 +57,7 @@ pub fn build_server(cfg: &Config) -> Result<Server, String> {
         guard: guard::Guard::new(cfg.tools, cfg.soft_tokens, cfg.hard_tokens, cfg.reduce.enabled(cfg.tools)),
         token_limit: cfg.token_limit,
         placement: placement::PlaceState::new(cfg.placement, persist_dir(cfg)),
+        agents: agent_tools::Hub::from_env_in(persist_dir(cfg)),
     };
     let idle = (cfg.idle_release_secs > 0).then(|| Duration::from_secs(cfg.idle_release_secs));
     Ok(Server::new(ctx, cfg.token_limit, idle))

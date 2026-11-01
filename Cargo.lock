@@ -921,6 +921,7 @@ dependencies = [
  "tempfile",
  "uriel-core",
  "uriel-dispatch",
+ "uriel-genius",
  "uriel-mcp",
  "uriel-page",
  "uriel-place",
@@ -959,6 +960,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "uriel-fleet"
+version = "0.2.1"
+dependencies = [
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+]
+
+[[package]]
+name = "uriel-genius"
+version = "0.2.1"
+dependencies = [
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "uriel-fleet",
+ "uriel-terse",
+]
+
+[[package]]
 name = "uriel-host"
 version = "0.2.1"
 dependencies = [
@@ -992,6 +1013,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "uriel-ledger"
+version = "0.2.1"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uriel-fleet",
+]
+
+[[package]]
 name = "uriel-mcp"
 version = "0.2.1"
 dependencies = [
@@ -1003,8 +1034,14 @@ dependencies = [
  "thiserror",
  "uriel-algo",
  "uriel-core",
+<<<<<<< HEAD
+ "uriel-fleet",
+ "uriel-genius",
+=======
  "uriel-dispatch",
+>>>>>>> origin/master
  "uriel-house",
+ "uriel-ledger",
  "uriel-place",
  "uriel-query",
  "uriel-rag",
