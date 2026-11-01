@@ -1,0 +1,17 @@
+[package]
+name = "uriel-dispatch"
+description = "Deterministic router for team agents: gate, policy version, mandate, ticket stages and worker slots as a replayable state machine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+
+[dev-dependencies]
+uriel-house = { path = "../uriel-house" }
+tempfile = "3.27.0"

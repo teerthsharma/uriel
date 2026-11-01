@@ -326,6 +326,7 @@ flowchart TB
 | `uriel-topo` | 0-D persistence, causal context schedules, topology-sorted layout, CSR export for the Triton kernel. |
 | `uriel-mcp` | The stdio server: tools, compact encoding, session dedup, stable prefix, modes. |
 | `uriel-house` | The harness: chart validation and merge, scheduling under the governor, RED-first gating, event stream. |
+| `uriel-dispatch` | Deterministic router for team agents, and the engine of `/afk`: gate, policy version, mandate, ticket stages, RAM-aware worker slots, time window, replay digest. See [`docs/DISPATCH.md`](docs/DISPATCH.md). |
 | `uriel-kv` / `uriel-repl` | The sans-IO distributed core and the replicated graph over it. |
 | `uriel-host` | Embedding API for an IDE host. |
 | `uriel-sys` | Capability-checked memory, large pages, hot arena, IOCP reads. |

@@ -952,6 +952,7 @@ dependencies = [
  "sysinfo 0.33.1",
  "tempfile",
  "uriel-core",
+ "uriel-dispatch",
  "uriel-mcp",
  "uriel-place",
  "uriel-rag",
@@ -975,6 +976,17 @@ name = "uriel-cypher"
 version = "0.2.1"
 dependencies = [
  "thiserror",
+]
+
+[[package]]
+name = "uriel-dispatch"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "uriel-house",
 ]
 
 [[package]]
