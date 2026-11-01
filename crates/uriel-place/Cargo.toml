@@ -9,6 +9,6 @@ publish = false
 
 [dependencies]
 uriel-tier = { path = "../uriel-tier" }
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]

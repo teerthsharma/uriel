@@ -7,3 +7,5 @@ docs/HOUSE-SEAL.md
 *.pre-*
 
 .uriel/
+prompt-cache/
+uriel-ledger/
