@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod afk;
 pub mod config;
 pub mod input;
 pub mod policy;

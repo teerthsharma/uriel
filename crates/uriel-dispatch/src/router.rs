@@ -94,6 +94,8 @@ pub struct Router {
     decisions: Vec<DecisionRecord>,
     reasons: BTreeMap<TriggerId, Vec<String>>,
     ram_slots: Option<u32>,
+    window: Option<Ms>,
+    window_announced: bool,
     inputs: Vec<(Ms, Input)>,
     digest: [u8; 32],
 }
@@ -126,6 +128,8 @@ impl Router {
             decisions: Vec::new(),
             reasons: BTreeMap::new(),
             ram_slots: None,
+            window: None,
+            window_announced: false,
             inputs: Vec::new(),
             digest: h.finalize().into(),
         }
@@ -177,6 +181,14 @@ impl Router {
 
     pub fn digest(&self) -> [u8; 32] {
         self.digest
+    }
+
+    pub fn window_closes(&self) -> Option<Ms> {
+        self.window
+    }
+
+    pub fn window_open(&self) -> bool {
+        self.window.is_none_or(|c| self.now < c)
     }
 
     pub fn capacity(&self) -> u32 {
@@ -277,6 +289,10 @@ impl Router {
     fn handle(&mut self, now: Ms, input: &Input, fx: &mut Vec<Effect>) {
         match input {
             Input::Tick => {}
+            Input::Window { closes } => {
+                self.window = *closes;
+                self.window_announced = false;
+            }
             Input::SetPolicy(p) => self.set_policy(now, p, fx),
             Input::Pressure { free_mb, total_mb } => {
                 self.ram_slots = Some(self.cfg.ram_slots(*free_mb, *total_mb));
@@ -1209,6 +1225,15 @@ impl Router {
                 fx.push(Effect::Redeliver { ticket: id });
             }
         }
+        if let Some(c) = self.window {
+            if now >= c && !self.window_announced {
+                self.window_announced = true;
+                for t in self.tickets.values().filter(|t| t.slot.is_some()) {
+                    fx.push(Effect::WindDown { ticket: t.id });
+                }
+                fx.push(Effect::WindowClosed);
+            }
+        }
         let horizon = self.cfg.poll_horizon_ms;
         for (thread, th) in &mut self.threads {
             if !th.subs.is_empty()
@@ -1225,6 +1250,9 @@ impl Router {
 
     fn settle(&mut self, now: Ms, fx: &mut Vec<Effect>) {
         loop {
+            if !self.window_open() {
+                break;
+            }
             let cap = self.capacity();
             let (regular, reserve) = self.slots_held();
             let mut cands: Vec<(bool, u64, TicketId)> = self

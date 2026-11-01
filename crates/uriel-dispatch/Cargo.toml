@@ -14,3 +14,4 @@ sha2 = "0.11.1"
 
 [dev-dependencies]
 uriel-house = { path = "../uriel-house" }
+tempfile = "3.27.0"

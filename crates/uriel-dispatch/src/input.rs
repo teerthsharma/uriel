@@ -6,6 +6,9 @@ use crate::types::*;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Input {
     Tick,
+    Window {
+        closes: Option<Ms>,
+    },
     SetPolicy(Policy),
     Pressure {
         free_mb: u64,
@@ -142,6 +145,10 @@ pub enum Effect {
     Unpoll {
         thread: ThreadId,
     },
+    WindDown {
+        ticket: TicketId,
+    },
+    WindowClosed,
     Rejected {
         what: &'static str,
         why: Refusal,

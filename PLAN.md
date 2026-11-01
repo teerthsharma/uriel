@@ -115,7 +115,7 @@ Phase 1 (building) and the Phase 2 items that gate a release (name, repository, 
 
 ## J. Dispatch (team-agent control plane). Design: `docs/DISPATCH.md`
 
-Source: DeepSeek `dsh-superagent-prototype` (research prototype, MIT), rebuilt as a pure state machine in `crates/uriel-dispatch`. 88 tests pass in the crate (`cargo test -p uriel-dispatch`); `cargo clippy -p uriel-dispatch --all-targets --no-deps -- -D warnings` exits clean. Nine mutations of the logic (no reserve slot, off mode admitting inferred, retry off by one, bot made explicit, no eval discard on policy change, hand-off keeping the slot, stopped ticket still fed, resume without revalidation, uncapped backoff) each fail 2 to 5 tests.
+Source: DeepSeek `dsh-superagent-prototype` (research prototype, MIT), rebuilt as a pure state machine in `crates/uriel-dispatch`. 108 tests pass in the crate (`cargo test -p uriel-dispatch`); `cargo clippy -p uriel-dispatch --all-targets --no-deps -- -D warnings` exits clean. Nine mutations of the logic (no reserve slot, off mode admitting inferred, retry off by one, bot made explicit, no eval discard on policy change, hand-off keeping the slot, stopped ticket still fed, resume without revalidation, uncapped backoff) each fail 2 to 5 tests.
 
 - [x] J1 Gate and admission table: `crates/uriel-dispatch/src/policy.rs` (`gate`). Gate: `tests/gate.rs`, including an exhaustive sweep of 3 modes x 27 cell settings x scope x addressed x ticket x 5 actors (1,620 cases): a bot is never explicit, off mode never admits inferred
 - [x] J2 Policy version, Mandate with recorded basis, revalidation before resume, per-ticket change notices: `policy.rs` (`revalidate`, `changes_for`), `router.rs` (`set_policy`). Gates `tests/gate.rs`, `tests/threads.rs`
@@ -124,9 +124,11 @@ Source: DeepSeek `dsh-superagent-prototype` (research prototype, MIT), rebuilt a
 - [x] J5 Subscription fan-out, ownership, hand-back, release on end, resume with revalidation, stop, attach, unfollow, 14-day polling horizon: `router.rs`. Gate `tests/threads.rs`
 - [x] J6 Replay: SHA-256 chain over (time, input, effects); log round trip through JSON; clock clamp; 40 seeds x 600 random inputs with slot and phase invariants after each step, and a coverage gate that the streams reach all four ticket endings and the reserve slot: `tests/replay.rs`
 - [x] J7 RAM-aware capacity with the same reserve as the House governor: `config.rs`. Gate `tests/execution.rs` (parity with `uriel_house::governor::reserve_mb` and `slots` over 4 totals x 6 free values)
-- [ ] J8 MCP tools `dispatch_*` in house mode. Unbuilt; moves the 41-tool goldens
-- [ ] J9 Persistence: write `Router::inputs()` as JSONL and replay on start. Unbuilt
-- [ ] J10 Source and Executor adapters (GitHub, Feishu, worker runner). Unbuilt; the crate is the decision core only
+- [x] J8 Time window: `Input::Window`, wind-down and close effects, no grants after the close: `crates/uriel-dispatch/src/router.rs`. Gate `tests/window.rs`
+- [x] J9 Persistence: `afk::Afk`, JSONL with the router digest on every line, exclusive lock, forged line refused, torn last line dropped, archive on end: `crates/uriel-dispatch/src/afk.rs`. Gate `tests/afk.rs`
+- [x] J10 `/afk` command: `uriel afk start|add|report|status|end|init`, `crates/uriel-cli/src/afk_cmd.rs`, command text `crates/uriel-cli/assets/afk.md` (repo copy `.claude/commands/afk.md`, equality tested). Gates: unit tests in `afk_cmd.rs`, parse tests in `main.rs`, and a run of the built binary through start, three adds under two workers, ready, ask, status, end
+- [ ] J10b MCP tools `dispatch_*` in house mode. Unbuilt; moves the 41-tool goldens
+- [ ] J10c GitHub and Feishu Sources. Unbuilt; `/afk` is the only Source
 - [ ] J11 Token-budgeted ticket context through `view`. Unbuilt and unmeasured
 - [ ] J12 Prune ended threads from the in-memory trigger table. Unbuilt
 

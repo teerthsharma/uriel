@@ -40,10 +40,36 @@ Each has a test; change the test with the call.
 - Only a person's message with an authority subscription (`Origin` or `Attached`) is owned by the executor; a `Context` subscription delivers and never owns.
 - `Basis::Followup` is produced by `gate(.., has_ticket = true)`; the router calls that only to admit a stop, because every other follow-up on a live ticket reaches the executor without a gate.
 
+## /afk: the trigger is a command, not an issue
+
+The prototype listens to GitHub and Feishu. Here the Source is the person at the keyboard: typing `/afk 2h <goal>` is an explicit, addressed request from the one allowed identity, and the same gate that judges a GitHub comment judges it.
+
+```
+/afk 2h <goal>
+  -> uriel afk start 2h            window opens, log created
+  -> chart sub-goals               House (house_need, house_next) when present, else the model, max 12
+  -> uriel afk add --goal-id G1.2  gate -> eval -> accept -> ticket -> worker slot, or queued
+  -> Agent (background, worktree)  one worker per `start` action, under the mandate in the command
+  -> uriel afk report N ready|ask|blocked|failed|done
+  -> uriel afk end                 one summary: needs you, ready, unfinished, never started
+```
+
+| Part | Where | What it guarantees |
+|---|---|---|
+| Slash command | `crates/uriel-cli/assets/afk.md`, copied to `.claude/commands/afk.md`; `uriel afk init` installs it for any project or globally | A test fails if the two copies differ |
+| Policy | `afk::afk_policy` | Accept mode `off`, one allowed identity, no bots: nothing inferred is ever admitted, so the agent acts only on what you typed |
+| Window | `Input::Window`, `Effect::WindDown`, `Effect::WindowClosed` | After the close no slot is granted; running tickets get one wind-down notice and may still report; extending the window releases the queue |
+| Slots | `RouterConfig::max_workers` (`--workers`, 1 to 16, default 3), `uriel afk` feeds free RAM on every call | A burst of sub-goals runs three at a time, fewer when memory is short, the rest wait |
+| Log | `afk::Afk`, `.uriel/afk/session.jsonl`, an exclusive file lock | Every line carries the router digest after that step. A forged or edited line is refused with its line number; a half-written last line from a crash is dropped; a second process waits for the lock |
+| Summary | `Afk::summary` | Sorted by what a person must do: needs you (with each question), ready, unfinished, never started, done. The log is archived as `.done` |
+
+House keeps the goal tree, the RED-first test gate and the RAM governor for heavy test jobs; dispatch adds who may ask, how many workers run, the time window and the attention list. A goal id passed with `--goal-id` links a ticket to its House leaf.
+
+Not enforced by code, only by the mandate text in the command: a worker staying inside its scope and its branch. The host cannot sandbox a subagent; run the agent under a dedicated OS account, as the prototype also warns.
+
 ## Not built
 
-- No MCP tools yet. Adding `dispatch_*` to house mode moves the tool-count goldens (41), so it is its own change.
-- No persistence. `Router::inputs()` is the log; a writer and a replay-on-start are not wired.
-- No Source or Executor adapters (GitHub, Feishu, a worker runner). The crate is the part that must not be wrong; the adapters are I/O.
+- No MCP tools. The command drives the `uriel afk` CLI; `dispatch_*` tools in house mode would move the tool-count goldens (41), so they are their own change.
+- No GitHub or Feishu Source, and no worker runner of its own: workers are Claude Code subagents started by the command.
 - Triggers are kept in memory for the life of the router. Pruning ended threads is not done.
 - No token budget on what a ticket receives. The natural fit is the `view` ladder; it is not measured, so it is not claimed.
