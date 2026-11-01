@@ -40,21 +40,6 @@ fn error_response(id: Json, code: i64, message: &str) -> Json {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
-pub fn truncate(text: String, limit: usize) -> String {
-    let total = text.chars().count();
-    if total <= limit {
-        return text;
-    }
-    let cut = text
-        .char_indices()
-        .nth(limit)
-        .map_or(text.len(), |(i, _)| i);
-    format!(
-        "{}\n... [truncated: showing {limit} of {total} characters; refine the query or raise --token-limit]",
-        &text[..cut]
-    )
-}
-
 const NORMAL_RW: &str = "seal graph database, normal mode. Cypher and memory: get_neo4j_schema, read_neo4j_cypher, write_neo4j_cypher and the memory tools. Light research from cached and stored context: rag_index, rag_search, rag_expand, rag_feedback, seal_remember, seal_recall. Placement and views: view, why_hot, pin, unpin, replay, calibrate, tier_stats.";
 
 const NORMAL_RO: &str = "seal graph database (read-only), normal mode. Use get_neo4j_schema, read_neo4j_cypher, the memory read tools, rag_search, rag_expand, seal_recall, view, why_hot, replay, calibrate and tier_stats.";
@@ -95,6 +80,16 @@ impl Server {
     }
 
     pub fn handle_line(&self, line: &str) -> Option<String> {
+        self.reply(line)
+    }
+
+    pub fn take_notification(&self) -> Option<String> {
+        self.ctx.guard.take_list_changed().then(|| {
+            json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}).to_string()
+        })
+    }
+
+    fn reply(&self, line: &str) -> Option<String> {
         let parsed: Json = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
@@ -150,6 +145,9 @@ impl Server {
             ));
         };
         let params = obj.get("params").unwrap_or(&Json::Null);
+        if id.is_none() && !method.starts_with("notifications/") {
+            return None;
+        }
         let outcome = self.dispatch(method, params);
         let id = id?;
         Some(match outcome {
@@ -162,11 +160,7 @@ impl Server {
         match method {
             "initialize" => Ok(self.initialize(params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(tools::list_json_with(
-                self.ctx.read_only,
-                self.ctx.mode,
-                self.ctx.terse,
-            )),
+            "tools/list" => Ok(tools::list_json_for(&self.ctx)),
             "tools/call" => self.tools_call(params),
             m if m.starts_with("notifications/") => Ok(Json::Null),
             other => Err(RpcError::new(
@@ -185,9 +179,10 @@ impl Server {
             instructions(self.ctx.mode, self.ctx.read_only),
             self.ctx.terse,
         );
+        let instructions = crate::guard::with_notes(&instructions, &self.ctx);
         json!({
             "protocolVersion": version,
-            "capabilities": {"tools": {"listChanged": false}},
+            "capabilities": {"tools": {"listChanged": self.ctx.guard.adaptive()}},
             "serverInfo": {"name": "uriel-mcp", "title": "seal graph database", "version": env!("CARGO_PKG_VERSION")},
             "instructions": instructions
         })
@@ -204,9 +199,48 @@ impl Server {
             Ok(t) => (t, false),
             Err(t) => (t, true),
         };
-        let text = truncate(text, self.token_limit);
+        self.ctx.guard.note_call(name, !is_error);
+        let text = crate::guard::shape(&self.ctx, name, args, text, is_error, self.token_limit);
         Ok(json!({"content": [{"type": "text", "text": text}], "isError": is_error}))
     }
+}
+
+const OVERSIZE: &str = "\u{0}oversize";
+
+pub fn read_bounded(input: &mut impl BufRead, max: usize) -> std::io::Result<Option<String>> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut dropped = false;
+    let mut any = false;
+    loop {
+        let chunk = input.fill_buf()?;
+        if chunk.is_empty() {
+            break;
+        }
+        any = true;
+        let (take, done) = match chunk.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (chunk.len(), false),
+        };
+        if !dropped {
+            if buf.len() + take > max {
+                dropped = true;
+                buf = Vec::new();
+            } else {
+                buf.extend_from_slice(&chunk[..take]);
+            }
+        }
+        input.consume(take);
+        if done {
+            break;
+        }
+    }
+    if !any {
+        return Ok(None);
+    }
+    if dropped {
+        return Ok(Some(OVERSIZE.to_string()));
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
 pub fn serve(
@@ -216,9 +250,16 @@ pub fn serve(
 ) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        for line in input.lines() {
-            let failed = line.is_err();
-            if tx.send(line).is_err() || failed {
+        let mut input = input;
+        loop {
+            let line = read_bounded(&mut input, crate::guard::MAX_LINE_BYTES);
+            let end = !matches!(line, Ok(Some(_)));
+            let msg = match line {
+                Ok(Some(l)) => Ok(l),
+                Ok(None) => break,
+                Err(e) => Err(e),
+            };
+            if tx.send(msg).is_err() || end {
                 break;
             }
         }
@@ -240,27 +281,25 @@ pub fn serve(
         if line.is_empty() {
             continue;
         }
+        if line == OVERSIZE {
+            let e = error_response(
+                Json::Null,
+                code::INVALID_REQUEST,
+                &format!("Request line exceeds {} bytes and was dropped", crate::guard::MAX_LINE_BYTES),
+            );
+            output.write_all(e.to_string().as_bytes())?;
+            output.write_all(b"\n")?;
+            output.flush()?;
+            continue;
+        }
         if let Some(resp) = server.handle_line(line) {
             output.write_all(resp.as_bytes())?;
             output.write_all(b"\n")?;
-            output.flush()?;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncate_short_is_untouched() {
-        assert_eq!(truncate("abc".into(), 3), "abc");
-    }
-
-    #[test]
-    fn truncate_cuts_on_char_boundary_and_notes_totals() {
-        let t = truncate("\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}".into(), 2);
-        assert!(t.starts_with("\u{e9}\u{e9}\n"));
-        assert!(t.contains("showing 2 of 5 characters"));
+        if let Some(note) = server.take_notification() {
+            output.write_all(note.as_bytes())?;
+            output.write_all(b"\n")?;
+        }
+        output.flush()?;
     }
 }

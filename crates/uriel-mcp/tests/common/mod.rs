@@ -39,6 +39,7 @@ pub struct Session {
     stdin: Option<ChildStdin>,
     rx: Receiver<String>,
     next_id: u64,
+    pub notes: Vec<Value>,
     pub home: TempDir,
 }
 
@@ -46,12 +47,14 @@ impl Session {
     pub fn start(args: &[String], envs: &[(&str, &str)]) -> Session {
         let home = tempfile::tempdir().expect("home");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_uriel-mcp"));
-        cmd.args(args)
+        cmd.args(["--soft-tokens", "0", "--hard-tokens", "0"])
+            .args(args)
             .env("USERPROFILE", home.path())
             .env("HOME", home.path())
             .env_remove("SEAL_DR_HOUSE_MODEL")
             .env_remove("URIEL_MODE")
             .env_remove("URIEL_TERSE")
+            .env("URIEL_TOOLS", "full")
             .env_remove("SEAL_MCP_FAKE_PROBE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -80,6 +83,7 @@ impl Session {
             stdin,
             rx,
             next_id: 1,
+            notes: Vec::new(),
             home,
         }
     }
@@ -92,14 +96,32 @@ impl Session {
         stdin.write_all(line.as_bytes()).expect("write");
         stdin.write_all(b"\n").expect("write");
         stdin.flush().expect("flush");
-        let resp = self
-            .rx
+        loop {
+            let resp = self
+                .rx
+                .recv_timeout(TIMEOUT)
+                .expect("timed out waiting for a response");
+            let v: Value =
+                serde_json::from_str(&resp).unwrap_or_else(|e| panic!("not JSON ({e}): {resp}"));
+            if v.get("id").is_none() && v.get("method").is_some() {
+                self.notes.push(v);
+                continue;
+            }
+            assert_eq!(v["id"], json!(id), "{v}");
+            return v;
+        }
+    }
+
+    pub fn raw(&mut self, bytes: &[u8]) {
+        let stdin = self.stdin.as_mut().expect("stdin open");
+        stdin.write_all(bytes).expect("write");
+        stdin.flush().expect("flush");
+    }
+
+    pub fn recv_line(&mut self) -> String {
+        self.rx
             .recv_timeout(TIMEOUT)
-            .expect("timed out waiting for a response");
-        let v: Value =
-            serde_json::from_str(&resp).unwrap_or_else(|e| panic!("not JSON ({e}): {resp}"));
-        assert_eq!(v["id"], json!(id), "{v}");
-        v
+            .expect("timed out waiting for a line")
     }
 
     pub fn tool(&mut self, name: &str, args: Value) -> (String, bool) {
@@ -350,7 +372,8 @@ pub struct Frozen {
 
 pub fn frozen() -> Frozen {
     let rag_tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../uriel-rag/tests");
-    let corpus = uriel_rag::eval::materialize(&rag_tests.join("frozen_corpus")).expect("materialize");
+    let corpus =
+        uriel_rag::eval::materialize(&rag_tests.join("frozen_corpus")).expect("materialize");
     let recorded = std::fs::read_to_string(rag_tests.join("eval_queries.json")).expect("queries");
     let queries: Vec<String> = uriel_rag::eval::parse_queries(&recorded)
         .expect("parse")

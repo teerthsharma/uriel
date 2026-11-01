@@ -1,0 +1,94 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            exe: uriel
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            exe: uriel.exe
+            archive: zip
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            exe: uriel
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release -p uriel-cli --locked --target ${{ matrix.target }}
+      - name: package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          EXE: ${{ matrix.exe }}
+          ARCHIVE: ${{ matrix.archive }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          name="uriel-${REF_NAME}-${TARGET}"
+          mkdir -p "dist/${name}"
+          cp "target/${TARGET}/release/${EXE}" "dist/${name}/"
+          for f in README.md LICENSE LICENSE-MIT LICENSE-APACHE; do
+            if [ -f "$f" ]; then cp "$f" "dist/${name}/"; fi
+          done
+          cd dist
+          if [ "$ARCHIVE" = "zip" ]; then
+            7z a "${name}.zip" "${name}" > /dev/null
+            out="${name}.zip"
+          else
+            tar -czf "${name}.tar.gz" "${name}"
+            out="${name}.tar.gz"
+          fi
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$out" > "${out}.sha256"
+          else
+            shasum -a 256 "$out" > "${out}.sha256"
+          fi
+          rm -rf "${name}"
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uriel-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

@@ -84,6 +84,40 @@ pub fn add<W: Write>(
     )
 }
 
+pub fn plan<W: Write>(out: &mut W, file: &Path, spec_path: &Path, now: Ms, mem: (u64, u64)) -> Result<(), String> {
+    let text = std::fs::read_to_string(spec_path).map_err(|e| format!("cannot read {}: {e}", spec_path.display()))?;
+    let spec: uriel_dispatch::dept::PlanSpec = serde_json::from_str(&text).map_err(|e| format!("plan: {e}"))?;
+    let mut afk = open_fed(file, now, mem)?;
+    let leaves = afk.set_plan(spec).map_err(|e| e.to_string())?;
+    emit(out, &json!({"leaves": leaves, "departments": afk.departments_json()}))
+}
+
+pub fn add_leaf<W: Write>(out: &mut W, file: &Path, leaf: &str, now: Ms, mem: (u64, u64)) -> Result<(), String> {
+    let mut afk = open_fed(file, now, mem)?;
+    let (ticket, actions) = afk.add_leaf(now, leaf).map_err(|e| e.to_string())?;
+    emit(out, &json!({ "ticket": ticket.0, "actions": acts(&actions) }))
+}
+
+pub fn check<W: Write>(out: &mut W, file: &Path, leaf: &str, index: usize, done: bool, now: Ms, mem: (u64, u64)) -> Result<(), String> {
+    let mut afk = open_fed(file, now, mem)?;
+    afk.check(leaf, index, done).map_err(|e| e.to_string())?;
+    let p = afk.plan().map(|p| p.progress());
+    emit(out, &json!({"leaf": leaf, "index": index, "done": done, "plan": p}))
+}
+
+pub fn pages<W: Write>(out: &mut W, file: &Path, dir: &Path, now: Ms, mem: (u64, u64)) -> Result<(), String> {
+    let mut afk = open_fed(file, now, mem)?;
+    let status = afk.status(now).map_err(|e| e.to_string())?;
+    let files = crate::afk_pages::render_all(&status, afk.owner(), afk.started())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let mut names = Vec::new();
+    for (name, html) in &files {
+        std::fs::write(dir.join(name), html).map_err(|e| e.to_string())?;
+        names.push(json!({"file": name, "digest": uriel_page::digest(html)}));
+    }
+    emit(out, &json!({"dir": dir, "pages": names}))
+}
+
 pub fn report<W: Write>(
     out: &mut W,
     file: &Path,
@@ -145,11 +179,26 @@ pub fn run<W: Write>(
         crate::AfkCmd::Start { duration, workers } => {
             start(out, &file, duration, *workers, now, None)
         }
-        crate::AfkCmd::Add { goal_id, text } => add(
+        crate::AfkCmd::Add {
+            leaf: Some(leaf), ..
+        } => add_leaf(out, &file, leaf, now, memory_mb()),
+        crate::AfkCmd::Add { goal_id, text, .. } => add(
             out,
             &file,
             goal_id.as_deref(),
             &text.join(" "),
+            now,
+            memory_mb(),
+        ),
+        crate::AfkCmd::Plan { spec } => plan(out, &file, spec, now, memory_mb()),
+        crate::AfkCmd::Check { leaf, index, undo } => {
+            check(out, &file, leaf, *index, !*undo, now, memory_mb())
+        }
+        crate::AfkCmd::Pages { out: dir } => pages(
+            out,
+            &file,
+            &dir.clone()
+                .unwrap_or_else(|| PathBuf::from(".uriel").join("afk").join("pages")),
             now,
             memory_mb(),
         ),
@@ -195,6 +244,15 @@ mod tests {
             "uriel afk end",
             "$ARGUMENTS",
             "argument-hint",
+            "uriel afk plan",
+            "uriel afk add --leaf",
+            "uriel afk check",
+            "uriel afk pages",
+            "checklist",
+            "git merge --no-ff",
+            "git merge --abort",
+            "--no-merge",
+            "Never push",
         ] {
             assert!(COMMAND_FILE.contains(needle), "{needle}");
         }
@@ -268,5 +326,86 @@ mod tests {
         let p = d.path().join(".claude").join("commands").join("afk.md");
         assert_eq!(std::fs::read_to_string(p).unwrap(), COMMAND_FILE);
         assert!(init(&mut Vec::new(), false, None).is_err());
+    }
+
+    const PLAN: &str = r#"{"departments":[
+      {"name":"Research","goal":"Find <b>the</b> fix","subgoals":[{"goal":"Reproduce","leaves":[{"goal":"Failing test","checklist":["seen failing","minimal"]}]}]},
+      {"name":"Build","goal":"Land it","subgoals":[{"goal":"Implement","leaves":[{"goal":"Code","checklist":["compiles"]}]}]}]}"#;
+
+    #[test]
+    fn plan_leaf_check_and_pages_round_trip_through_the_binary_layer() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("s.jsonl");
+        let spec = d.path().join("plan.json");
+        std::fs::write(&spec, PLAN).unwrap();
+        start(&mut Vec::new(), &f, "2h", 2, T0, Some("me")).unwrap();
+        let mut o = Vec::new();
+        plan(&mut o, &f, &spec, T0 + 1, PLENTY).unwrap();
+        assert_eq!(json_of(o)["leaves"], 2);
+        let mut o = Vec::new();
+        add_leaf(&mut o, &f, "research.1.1", T0 + 2, PLENTY).unwrap();
+        assert_eq!(json_of(o)["actions"][0]["goal"], "research.1.1");
+        let mut o = Vec::new();
+        check(&mut o, &f, "research.1.1", 0, true, T0 + 3, PLENTY).unwrap();
+        assert_eq!(json_of(o)["plan"]["done"], 1);
+        let out = d.path().join("pages");
+        let mut o = Vec::new();
+        pages(&mut o, &f, &out, T0 + 4, PLENTY).unwrap();
+        let listed = json_of(o);
+        assert_eq!(listed["pages"].as_array().unwrap().len(), 3);
+        for name in ["index.html", "department-research.html", "department-build.html"] {
+            let html = std::fs::read_to_string(out.join(name)).unwrap();
+            assert!(html.starts_with("<!doctype html>"), "{name}");
+        }
+        let research = std::fs::read_to_string(out.join("department-research.html")).unwrap();
+        assert!(research.contains("1 of 2"), "department checklist progress");
+        assert!(!research.contains("<b>the</b>"), "goal text is escaped");
+        assert!(research.contains("&lt;b&gt;the&lt;/b&gt;"));
+    }
+
+    #[test]
+    fn the_same_log_draws_the_same_pages_and_a_changed_checklist_changes_them() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("s.jsonl");
+        let spec = d.path().join("plan.json");
+        std::fs::write(&spec, PLAN).unwrap();
+        start(&mut Vec::new(), &f, "2h", 2, T0, Some("me")).unwrap();
+        plan(&mut Vec::new(), &f, &spec, T0 + 1, PLENTY).unwrap();
+        let digest = |dir: &str| {
+            let mut o = Vec::new();
+            pages(&mut o, &f, &d.path().join(dir), T0 + 2, PLENTY).unwrap();
+            json_of(o)["pages"].to_string()
+        };
+        let before = digest("a");
+        assert_eq!(before, digest("b"));
+        add_leaf(&mut Vec::new(), &f, "build.1.1", T0 + 3, PLENTY).unwrap();
+        check(&mut Vec::new(), &f, "build.1.1", 0, true, T0 + 4, PLENTY).unwrap();
+        assert_ne!(before, digest("c"));
+    }
+
+    #[test]
+    fn pages_without_a_plan_still_draw_a_board_that_says_how_to_make_one() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("s.jsonl");
+        start(&mut Vec::new(), &f, "1h", 3, T0, Some("me")).unwrap();
+        let out = d.path().join("p");
+        pages(&mut Vec::new(), &f, &out, T0 + 1, PLENTY).unwrap();
+        let html = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(html.contains("No plan yet"));
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn plan_errors_are_messages_not_panics() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("s.jsonl");
+        start(&mut Vec::new(), &f, "1h", 3, T0, Some("me")).unwrap();
+        let bad = d.path().join("bad.json");
+        std::fs::write(&bad, r#"{"departments":[]}"#).unwrap();
+        assert!(plan(&mut Vec::new(), &f, &bad, T0, PLENTY).unwrap_err().contains("at least one department"));
+        std::fs::write(&bad, "not json").unwrap();
+        assert!(plan(&mut Vec::new(), &f, &bad, T0, PLENTY).unwrap_err().starts_with("plan:"));
+        assert!(plan(&mut Vec::new(), &f, &d.path().join("missing.json"), T0, PLENTY).unwrap_err().contains("cannot read"));
+        assert!(check(&mut Vec::new(), &f, "x.1.1", 0, true, T0, PLENTY).is_err());
     }
 }

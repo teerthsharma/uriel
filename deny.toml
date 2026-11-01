@@ -2,7 +2,6 @@
 all-features = false
 
 [advisories]
-db-urls = []
 yanked = "deny"
 
 [licenses]

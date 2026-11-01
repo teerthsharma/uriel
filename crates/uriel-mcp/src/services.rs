@@ -28,7 +28,7 @@ fn stable_prefix_from_env() -> bool {
     )
 }
 
-fn probe_from_env() -> Box<dyn SystemProbe> {
+pub fn probe_from_env() -> Box<dyn SystemProbe> {
     let fake = std::env::var(FAKE_PROBE_ENV).ok().and_then(|v| {
         let (free, total) = v.split_once(',')?;
         Some(FakeProbe::new(

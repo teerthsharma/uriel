@@ -56,6 +56,7 @@ fn exit_code(args: &[&str], env: Option<&str>) -> Option<i32> {
     cmd.args(args)
         .arg("--in-memory")
         .env_remove("URIEL_MODE")
+        .env("URIEL_TOOLS", "full")
         .env_remove(TERSE_ENV)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
