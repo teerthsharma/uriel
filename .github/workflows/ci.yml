@@ -27,9 +27,9 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
-          components: clippy
+          components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: clippy
         run: cargo clippy --workspace --all-targets --no-deps -- -D warnings
@@ -46,21 +46,21 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
       - name: test
         run: cargo test --workspace --no-fail-fast
 
   msrv:
-    name: msrv (1.90)
+    name: msrv (1.95)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.90
+      - uses: dtolnay/rust-toolchain@1.95
       - uses: Swatinem/rust-cache@v2
       - name: check
-        run: cargo +1.90 check --workspace
+        run: cargo +1.95 check --workspace
 
   fmt-new:
     name: fmt (gated crates)
@@ -68,9 +68,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
-          components: rustfmt
+          components: clippy,rustfmt
       - name: rustfmt
         run: cargo fmt -p uriel-dispatch -p uriel-page -- --check
 
@@ -83,7 +83,6 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          command-arguments: --config deny.toml
 
   mcp-token-gate:
     name: mcp token gate
@@ -91,7 +90,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
       - name: build
         run: cargo build -p uriel-mcp
@@ -104,7 +103,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
       - uses: Swatinem/rust-cache@v2
       - name: regenerate pages
         if: hashFiles('crates/uriel-page/Cargo.toml') != ''
