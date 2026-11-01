@@ -9,6 +9,7 @@ members = [
     "crates/uriel-mcp",
     "crates/uriel-rag",
     "crates/uriel-house",
+    "crates/uriel-dispatch",
     "crates/uriel-tier",
     "crates/uriel-kv",
     "crates/uriel-repl",

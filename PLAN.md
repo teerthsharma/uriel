@@ -113,6 +113,23 @@ Phase 1 (building) and the Phase 2 items that gate a release (name, repository, 
 - [x] H2 Criterion benches per tier operation (`crates/uriel-bench/benches/`) with a regression ceiling asserted in `crates/uriel-bench/tests/ceilings.rs` against `ceilings.json` (factor 5.0)
 - [x] H4 Workspace gate: see the header of this file
 
+## J. Dispatch (team-agent control plane). Design: `docs/DISPATCH.md`
+
+Source: DeepSeek `dsh-superagent-prototype` (research prototype, MIT), rebuilt as a pure state machine in `crates/uriel-dispatch`. 88 tests pass in the crate (`cargo test -p uriel-dispatch`); `cargo clippy -p uriel-dispatch --all-targets --no-deps -- -D warnings` exits clean. Nine mutations of the logic (no reserve slot, off mode admitting inferred, retry off by one, bot made explicit, no eval discard on policy change, hand-off keeping the slot, stopped ticket still fed, resume without revalidation, uncapped backoff) each fail 2 to 5 tests.
+
+- [x] J1 Gate and admission table: `crates/uriel-dispatch/src/policy.rs` (`gate`). Gate: `tests/gate.rs`, including an exhaustive sweep of 3 modes x 27 cell settings x scope x addressed x ticket x 5 actors (1,620 cases): a bot is never explicit, off mode never admits inferred
+- [x] J2 Policy version, Mandate with recorded basis, revalidation before resume, per-ticket change notices: `policy.rs` (`revalidate`, `changes_for`), `router.rs` (`set_policy`). Gates `tests/gate.rs`, `tests/threads.rs`
+- [x] J3 Eval lifecycle: one per thread, batch merge, 120 s from delivery (never before), two retries then `unavailable`, assessment failure, discard on policy change, re-evaluate and dismiss: `router.rs`. Gate `tests/eval.rs`, `tests/replay.rs`
+- [x] J4 Ticket stages, worker slots with one reserved for a person, prepare 10 min, background 30 min, redelivery 2 s doubling to 60 s: `ticket.rs`, `router.rs`. Gate `tests/execution.rs`. A woken idle ticket kept its stale `waiting` report and read `idle` while working: found by the gate, fixed
+- [x] J5 Subscription fan-out, ownership, hand-back, release on end, resume with revalidation, stop, attach, unfollow, 14-day polling horizon: `router.rs`. Gate `tests/threads.rs`
+- [x] J6 Replay: SHA-256 chain over (time, input, effects); log round trip through JSON; clock clamp; 40 seeds x 600 random inputs with slot and phase invariants after each step, and a coverage gate that the streams reach all four ticket endings and the reserve slot: `tests/replay.rs`
+- [x] J7 RAM-aware capacity with the same reserve as the House governor: `config.rs`. Gate `tests/execution.rs` (parity with `uriel_house::governor::reserve_mb` and `slots` over 4 totals x 6 free values)
+- [ ] J8 MCP tools `dispatch_*` in house mode. Unbuilt; moves the 41-tool goldens
+- [ ] J9 Persistence: write `Router::inputs()` as JSONL and replay on start. Unbuilt
+- [ ] J10 Source and Executor adapters (GitHub, Feishu, worker runner). Unbuilt; the crate is the decision core only
+- [ ] J11 Token-budgeted ticket context through `view`. Unbuilt and unmeasured
+- [ ] J12 Prune ended threads from the in-memory trigger table. Unbuilt
+
 ## I. Release
 
 - [x] I1a Name decided: **Uriel** (2026-10-15), mark and lockups in `assets/`, rationale and limits in `docs/BRAND.md`

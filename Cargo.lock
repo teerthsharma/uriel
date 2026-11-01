@@ -978,6 +978,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "uriel-dispatch"
+version = "0.2.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "uriel-house",
+]
+
+[[package]]
 name = "uriel-host"
 version = "0.2.1"
 dependencies = [
