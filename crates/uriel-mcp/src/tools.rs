@@ -9,7 +9,11 @@ use crate::db::{Db, Open};
 use crate::services::Services;
 use crate::session::Session;
 use crate::placement::PlaceState;
+<<<<<<< HEAD
 use crate::{agent_tools, house_tools, ledger_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
+=======
+use crate::{dispatch_tools, guard, house_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
+>>>>>>> origin/master
 use uriel_house::House;
 use uriel_query::{AccessMode, QueryStats};
 use uriel_rag::Rag;
@@ -25,6 +29,8 @@ pub struct Context {
     pub services: Services,
     pub format: Format,
     pub session: Session,
+    pub guard: guard::Guard,
+    pub token_limit: usize,
     pub placement: PlaceState,
     pub agents: agent_tools::Hub,
 }
@@ -285,12 +291,21 @@ pub fn all() -> impl Iterator<Item = &'static ToolDef> {
         .chain(view::TOOLS.iter())
         .chain(soul::TOOLS.iter())
         .chain(terse::TOOLS.iter())
+<<<<<<< HEAD
         .chain(agent_tools::TOOLS.iter())
         .chain(ledger_tools::TOOLS.iter())
 }
 
 pub fn house_only(name: &str) -> bool {
     name.starts_with("house_") || name.starts_with("research_") || name.starts_with("genius_")
+=======
+        .chain(guard::TOOLS.iter())
+        .chain(dispatch_tools::TOOLS.iter())
+}
+
+pub fn house_only(name: &str) -> bool {
+    name.starts_with("house_") || name.starts_with("research_") || name.starts_with("dispatch_")
+>>>>>>> origin/master
 }
 
 pub fn visible(
@@ -326,6 +341,69 @@ pub fn list_json_with(read_only: bool, mode: Mode, terse: Terse) -> Json {
         })
         .collect();
     json!({ "tools": tools })
+}
+
+pub fn list_json_for(ctx: &Context) -> Json {
+    if !ctx.guard.adaptive() {
+        return list_json_with(ctx.read_only, ctx.mode, ctx.terse);
+    }
+    let tools: Vec<Json> = visible(ctx.read_only, ctx.mode, ctx.terse)
+        .filter(|t| ctx.guard.is_listed(t.name))
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "title": t.title,
+                "description": t.description,
+                "inputSchema": slim((t.schema)()),
+                "annotations": {"readOnlyHint": !t.writes, "openWorldHint": false}
+            })
+        })
+        .collect();
+    json!({ "tools": tools })
+}
+
+const LONG_DESCRIPTION: usize = 160;
+
+fn first_sentence(desc: &str) -> String {
+    if desc.chars().count() <= LONG_DESCRIPTION {
+        return desc.to_string();
+    }
+    let head: String = desc.chars().take(LONG_DESCRIPTION).collect();
+    match head.rfind(". ") {
+        Some(i) if i > 20 => head[..=i].to_string(),
+        _ => head.trim_end().to_string(),
+    }
+}
+
+pub(crate) fn slim(mut schema: Json) -> Json {
+    match &mut schema {
+        Json::Object(map) => {
+            if map.get("additionalProperties") == Some(&Json::Bool(false)) {
+                map.remove("additionalProperties");
+            }
+            if map.get("required").and_then(Json::as_array).is_some_and(Vec::is_empty) {
+                map.remove("required");
+            }
+            if let Some(Json::String(d)) = map.get_mut("description") {
+                *d = first_sentence(d);
+            }
+            if let Some(Json::Object(props)) = map.get_mut("properties") {
+                if let Some(Json::Object(f)) = props.get_mut("format") {
+                    f.insert("description".into(), Json::String("compact (default) or json".into()));
+                }
+            }
+            for v in map.values_mut() {
+                *v = slim(std::mem::take(v));
+            }
+        }
+        Json::Array(items) => {
+            for v in items {
+                *v = slim(std::mem::take(v));
+            }
+        }
+        _ => {}
+    }
+    schema
 }
 
 pub fn call(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
@@ -365,8 +443,13 @@ fn dispatch(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
         n if n.starts_with("rag_") || n.starts_with("seal_") || n.starts_with("session_") => {
             rag_tools::call(ctx, n, args)
         }
+<<<<<<< HEAD
         n if n.starts_with("ledger_") => ledger_tools::call(ctx, n, args),
         n if n.starts_with("genius_") || n.starts_with("fleet_") => agent_tools::call(ctx, n, args),
+=======
+        guard::MORE | guard::USAGE | guard::ENABLE => guard::call(ctx, name, args, ctx.token_limit),
+        n if n.starts_with("dispatch_") => dispatch_tools::call(ctx, n, args),
+>>>>>>> origin/master
         n if n.starts_with("house_") => house_tools::call(ctx, n, args),
         n if n.starts_with("research_") => research_tools::call(ctx, n, args),
         "view" => view::call(ctx, name, args),
@@ -426,16 +509,40 @@ fn run_cypher(ctx: &Context, args: &Json, mode: AccessMode) -> ToolResult {
         AccessMode::Read => {
             let rows = result.to_json_rows();
             ctx.placement.observe_rows(&rows);
+            let (rows, omitted) = cap_rows(rows);
+            let note = format!(
+                "+{omitted} rows not shown (cap {}); add LIMIT or SKIP",
+                guard::MAX_ROWS
+            );
             match (format_arg(args, ctx.format)?, &rows) {
-                (Format::Compact, Json::Array(items)) => match Table::from_rows(items) {
-                    Some(table) => encode_table(&table),
-                    None => rows.to_string(),
-                },
+                (Format::Compact, Json::Array(items)) => {
+                    let body = match Table::from_rows(items) {
+                        Some(table) => encode_table(&table),
+                        None => rows.to_string(),
+                    };
+                    if omitted > 0 {
+                        format!("{body}\n{note}")
+                    } else {
+                        body
+                    }
+                }
+                _ if omitted > 0 => json!({"rows": rows, "omitted": omitted, "note": note}).to_string(),
                 _ => rows.to_string(),
             }
         }
         AccessMode::Write => stats_json(&result.stats).to_string(),
     })
+}
+
+fn cap_rows(rows: Json) -> (Json, usize) {
+    match rows {
+        Json::Array(mut items) if items.len() > guard::MAX_ROWS => {
+            let omitted = items.len() - guard::MAX_ROWS;
+            items.truncate(guard::MAX_ROWS);
+            (Json::Array(items), omitted)
+        }
+        other => (other, 0),
+    }
 }
 
 pub(crate) fn format_arg(args: &Json, default: Format) -> Result<Format, String> {

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::config::RouterConfig;
+use crate::dept::{Plan, PlanSpec};
 use crate::input::{Effect, Input};
 use crate::policy::{AcceptMode, Policy, ScopePolicy, SourcePolicy};
 use crate::router::Router;
@@ -31,6 +32,10 @@ pub enum AfkError {
     UnknownTicket(TicketId),
     WindowClosed,
     Empty,
+    Plan(String),
+    PlanExists,
+    NoPlan,
+    LeafTaken(String),
 }
 
 impl fmt::Display for AfkError {
@@ -50,6 +55,10 @@ impl fmt::Display for AfkError {
             AfkError::UnknownTicket(t) => write!(f, "no ticket {}", t.0),
             AfkError::WindowClosed => f.write_str("the afk window has closed; nothing new starts"),
             AfkError::Empty => f.write_str("empty goal"),
+            AfkError::Plan(e) => write!(f, "plan refused: {e}"),
+            AfkError::PlanExists => f.write_str("this session already has a plan"),
+            AfkError::NoPlan => f.write_str("this session has no plan; run `uriel afk plan <file>` first"),
+            AfkError::LeafTaken(l) => write!(f, "leaf {l} already has a ticket"),
         }
     }
 }
@@ -143,6 +152,18 @@ enum Line {
         ticket: TicketId,
         text: String,
     },
+    Plan {
+        spec: PlanSpec,
+    },
+    Leaf {
+        leaf: String,
+        ticket: TicketId,
+    },
+    Check {
+        leaf: String,
+        index: usize,
+        done: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +211,7 @@ pub struct Afk {
     router: Router,
     notes: BTreeMap<TicketId, (Option<String>, String)>,
     results: BTreeMap<TicketId, String>,
+    plan: Option<Plan>,
     ingested: u64,
 }
 
@@ -243,6 +265,7 @@ impl Afk {
             header: header.clone(),
             notes: BTreeMap::new(),
             results: BTreeMap::new(),
+            plan: None,
             ingested: 0,
         };
         afk.write(&Line::Header(header))?;
@@ -297,6 +320,7 @@ impl Afk {
             header,
             notes: BTreeMap::new(),
             results: BTreeMap::new(),
+            plan: None,
             ingested: 0,
         };
         for (i, l) in lines {
@@ -320,6 +344,25 @@ impl Afk {
                 Ok(Line::Result { ticket, text }) => {
                     afk.results.insert(ticket, text);
                 }
+                Ok(Line::Plan { spec }) => match Plan::build(&spec) {
+                    Ok(p) => afk.plan = Some(p),
+                    Err(_) => {
+                        return Err(AfkError::Corrupt {
+                            line: n,
+                            why: "unreadable plan",
+                        })
+                    }
+                },
+                Ok(Line::Leaf { leaf, ticket }) => {
+                    if let Some(l) = afk.plan.as_mut().and_then(|p| p.leaf_mut(&leaf)) {
+                        l.ticket = Some(ticket.0);
+                    }
+                }
+                Ok(Line::Check { leaf, index, done }) => {
+                    if let Some(p) = afk.plan.as_mut() {
+                        let _ = p.check(&leaf, index, done);
+                    }
+                }
                 _ => {
                     return Err(AfkError::Corrupt {
                         line: n,
@@ -333,6 +376,14 @@ impl Afk {
 
     pub fn router(&self) -> &Router {
         &self.router
+    }
+
+    pub fn owner(&self) -> &str {
+        &self.header.owner
+    }
+
+    pub fn started(&self) -> Ms {
+        self.header.started
     }
 
     pub fn closes(&self) -> Ms {
@@ -416,6 +467,67 @@ impl Afk {
         goal: Option<&str>,
         text: &str,
     ) -> Result<(TicketId, Vec<Action>), AfkError> {
+        self.add_in(now, goal, text, None)
+    }
+
+    pub fn plan(&self) -> Option<&Plan> {
+        self.plan.as_ref()
+    }
+
+    pub fn set_plan(&mut self, spec: PlanSpec) -> Result<usize, AfkError> {
+        if self.plan.is_some() {
+            return Err(AfkError::PlanExists);
+        }
+        let plan = Plan::build(&spec).map_err(|e| AfkError::Plan(e.to_string()))?;
+        let leaves = plan
+            .departments
+            .iter()
+            .flat_map(|d| d.subgoals.iter())
+            .map(|s| s.leaves.len())
+            .sum();
+        self.write(&Line::Plan { spec })?;
+        self.plan = Some(plan);
+        Ok(leaves)
+    }
+
+    pub fn add_leaf(&mut self, now: Ms, leaf: &str) -> Result<(TicketId, Vec<Action>), AfkError> {
+        let plan = self.plan.as_ref().ok_or(AfkError::NoPlan)?;
+        let (dept, l) = plan
+            .leaf(leaf)
+            .ok_or_else(|| AfkError::Plan(format!("no leaf '{leaf}'")))?;
+        if l.ticket.is_some() {
+            return Err(AfkError::LeafTaken(leaf.to_string()));
+        }
+        let items: Vec<&str> = l.checklist.iter().map(|i| i.text.as_str()).collect();
+        let text = format!("{} [checklist: {}]", l.goal, items.join("; "));
+        let dept = dept.slug.clone();
+        let id = l.id.clone();
+        let (ticket, actions) = self.add_in(now, Some(&id), &text, Some(&dept))?;
+        if let Some(p) = self.plan.as_mut().and_then(|p| p.leaf_mut(&id)) {
+            p.ticket = Some(ticket.0);
+        }
+        self.write(&Line::Leaf { leaf: id, ticket })?;
+        Ok((ticket, actions))
+    }
+
+    pub fn check(&mut self, leaf: &str, index: usize, done: bool) -> Result<(), AfkError> {
+        let plan = self.plan.as_mut().ok_or(AfkError::NoPlan)?;
+        plan.check(leaf, index, done)
+            .map_err(|e| AfkError::Plan(e.to_string()))?;
+        self.write(&Line::Check {
+            leaf: leaf.to_string(),
+            index,
+            done,
+        })
+    }
+
+    pub fn add_in(
+        &mut self,
+        now: Ms,
+        goal: Option<&str>,
+        text: &str,
+        dept: Option<&str>,
+    ) -> Result<(TicketId, Vec<Action>), AfkError> {
         let text = text.trim();
         if text.is_empty() {
             return Err(AfkError::Empty);
@@ -464,6 +576,7 @@ impl Afk {
                         scope: text.to_string(),
                         rules: Vec::new(),
                         assessed: true,
+                        dept: dept.map(str::to_string),
                     },
                 )],
             },
@@ -572,8 +685,60 @@ impl Afk {
             "capacity": r.capacity(),
             "slots": { "regular": regular, "reserve": reserve },
             "tickets": tickets,
+            "departments": self.departments_json(),
             "actions": actions,
         }))
+    }
+
+    pub fn departments_json(&self) -> Value {
+        let Some(plan) = &self.plan else {
+            return Value::Array(Vec::new());
+        };
+        let r = &self.router;
+        let shares = r.shares();
+        let held = r.held_by_dept();
+        let loads = r.loads();
+        let depts: Vec<Value> = plan
+            .departments
+            .iter()
+            .map(|d| {
+                let subgoals: Vec<Value> = d
+                    .subgoals
+                    .iter()
+                    .map(|s| {
+                        let leaves: Vec<Value> = s
+                            .leaves
+                            .iter()
+                            .map(|l| {
+                                let t = l.ticket.and_then(|n| r.ticket(TicketId(n)));
+                                json!({
+                                    "id": l.id,
+                                    "goal": l.goal,
+                                    "progress": l.progress(),
+                                    "ticket": l.ticket,
+                                    "stage": t.and_then(|t| t.stage()).map(|s| format!("{s:?}")),
+                                    "status": t.map(|t| match t.status { Status::Open => "open".to_string(), Status::Ended(e) => format!("{e:?}") }),
+                                    "result": l.ticket.and_then(|n| self.results.get(&TicketId(n))),
+                                    "checklist": l.checklist,
+                                })
+                            })
+                            .collect();
+                        json!({"id": s.id, "goal": s.goal, "progress": s.progress(), "leaves": leaves})
+                    })
+                    .collect();
+                json!({
+                    "slug": d.slug,
+                    "name": d.name,
+                    "goal": d.goal,
+                    "progress": d.progress(),
+                    "load": loads.get(&d.slug).copied().unwrap_or(0),
+                    "share": shares.get(&d.slug).copied().unwrap_or(0),
+                    "held": held.get(&d.slug).copied().unwrap_or(0),
+                    "subgoals": subgoals,
+                })
+            })
+            .collect();
+        Value::Array(depts)
     }
 
     pub fn summary(&self) -> Value {
@@ -611,6 +776,7 @@ impl Afk {
             "needs_you": needs_you,
             "unfinished": unfinished,
             "never_started": never_started,
+            "departments": self.departments_json(),
             "done": done,
             "idle": idle,
             "digest": hex(r.digest()),

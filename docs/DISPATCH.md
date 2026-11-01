@@ -63,9 +63,26 @@ The prototype listens to GitHub and Feishu. Here the Source is the person at the
 | Log | `afk::Afk`, `.uriel/afk/session.jsonl`, an exclusive file lock | Every line carries the router digest after that step. A forged or edited line is refused with its line number; a half-written last line from a crash is dropped; a second process waits for the lock |
 | Summary | `Afk::summary` | Sorted by what a person must do: needs you (with each question), ready, unfinished, never started, done. The log is archived as `.done` |
 
+Merging: a ticket that reports `ready` with passing tests is merged `--no-ff` into the branch you started on, one at a time, and its test is run again on the merged tree. A conflict or a failing test aborts the merge and turns the ticket into `blocked` with the reason. Nothing is ever pushed, forced or merged anywhere else, and the worker branch is kept. `--no-merge`, a dirty tree or a detached HEAD turns merging off. This is policy in the command text, not code the router enforces.
+
 House keeps the goal tree, the RED-first test gate and the RAM governor for heavy test jobs; dispatch adds who may ask, how many workers run, the time window and the attention list. A goal id passed with `--goal-id` links a ticket to its House leaf.
 
-Not enforced by code, only by the mandate text in the command: a worker staying inside its scope and its branch. The host cannot sandbox a subagent; run the agent under a dedicated OS account, as the prototype also warns.
+Not enforced by code, only by the mandate text in the command: a worker staying inside its scope and its branch, and the router's merge rules above. The host cannot sandbox a subagent; run the agent under a dedicated OS account, as the prototype also warns.
+
+## Departments: three tiers, shared slots
+
+A plan has three tiers. A **department** owns a goal; it splits into **sub-goals**; each sub-goal into **leaves**, and every leaf carries a **checklist**. Ids are positional (`research.2.1`), every leaf must have at least one item, and caps hold (12 departments, 24 sub-goals each, 48 leaves each, 32 items, 300 characters per text). Progress rolls up leaf to sub-goal to department to plan; a department is done when every item under it is ticked.
+
+| Part | Where | Guarantee |
+|---|---|---|
+| Plan | `dept::Plan`, `uriel afk plan <file>`, `dispatch_plan` | Set once per window; stored in the digest-chained log; a tampered plan line is refused |
+| Leaf tickets | `uriel afk add --leaf research.1.2`, `dispatch_add{leaf}` | One ticket per leaf, opened through the same gate, in its department |
+| Checklists | `uriel afk check <leaf> <n> [--undo]`, `dispatch_check` | Only a worker's evidenced items are ticked; unknown leaf or item is an error that changes nothing |
+| Distribution | `dept::distribute_ranked`, used by `Router::settle` | Each busy department gets a slot first, the rest by load and never above a department's own work; a department with a deficit is served first; no slot idles while any department has queued work; with fewer slots than busy departments, the least recently served goes first so none starves. Swept over 4,000 random loads |
+
+## Pages: the department board and sub pages
+
+`uriel afk pages [--out dir]` draws `index.html` (the board: window, workers, tickets, checklist, a table of departments with their slot share) and `department-<slug>.html` per department (sub-goals with progress bars, leaf tables with ticket and stage, and every checklist with worker results) with the `uriel-page` toolkit. The same log gives the same bytes. `uriel page build <spec.json>` draws any spec; `uriel page demo` writes the sample pages in `docs/pages/`, which a test keeps in step with the code. The toolkit: `crates/uriel-page/API.md`.
 
 ## Not built
 

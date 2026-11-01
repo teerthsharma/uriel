@@ -20,9 +20,13 @@ members = [
     "crates/uriel-bench",
     "crates/uriel-cli",
     "crates/uriel-terse",
+<<<<<<< HEAD
     "crates/uriel-fleet",
     "crates/uriel-genius",
     "crates/uriel-ledger",
+=======
+    "crates/uriel-page",
+>>>>>>> origin/master
 ]
 
 [workspace.package]

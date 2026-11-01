@@ -7,8 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lz4_flex = { version = "0.11", default-features = false, features = ["safe-encode", "safe-decode", "std"] }
+lz4_flex = { version = "0.14", default-features = false, features = ["safe-encode", "safe-decode", "std"] }
 thiserror = "2"
-zstd = "0.13"
+zstd = "0.14"
 
 [dev-dependencies]

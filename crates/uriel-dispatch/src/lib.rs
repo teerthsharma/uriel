@@ -2,6 +2,7 @@
 
 pub mod afk;
 pub mod config;
+pub mod dept;
 pub mod input;
 pub mod policy;
 pub mod router;

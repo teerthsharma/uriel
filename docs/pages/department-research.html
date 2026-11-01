@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Measure first, claim second. Every figure names the command that produced it.">
+<title>Research department</title>
+<style>
+:root{color-scheme:light;--paper:#fdfdfb;--desk:#e6ebe9;--ink:#16222c;--mut:#4b5964;--rule:#9fb0b9;--hair:#d9e2e6;--acc:#0a5c66;--accbg:#e3f0f1;--ok:#0e5a2c;--okbg:#e0f1e5;--wa:#6b4400;--wabg:#fbefcc;--al:#8a1c12;--albg:#fbe1de;--id:#3f4c56;--idbg:#e9edf0;--dn:#1b4382;--dnbg:#e1eaf8;--sh:rgba(22,34,44,.12)}
+*,::before,::after{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scrollbar-gutter:stable}
+body{margin:0;background:var(--desk);color:var(--ink);font:1rem/1.55 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;overflow-wrap:anywhere}
+.skip{position:absolute;left:.5rem;top:-4rem;background:var(--paper);color:var(--ink);padding:.5rem .75rem;border:2px solid var(--acc);z-index:9}
+.skip:focus{top:.5rem}
+.sheet{max-width:64rem;margin:0 auto;background:var(--paper);border:1px solid var(--rule);border-top:.5rem solid var(--acc);box-shadow:0 .5rem 1.5rem var(--sh);min-height:100vh}
+@media(min-width:70rem){.sheet{margin:1.5rem auto;min-height:0}}
+a{color:var(--acc);text-underline-offset:.2em}
+a:focus-visible,.tw:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+h1,h2,h3,h4,h5,h6{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;line-height:1.2;margin:0;text-wrap:balance}
+.hd{display:grid;gap:1.25rem 2rem;grid-template-columns:minmax(0,1fr) auto;align-items:end;padding:1.5rem 1.5rem 1.25rem;border-bottom:2px solid var(--ink)}
+h1{font-size:clamp(1.75rem,5vw,2.5rem);font-weight:700;letter-spacing:-.01em}
+.sub{margin:.4rem 0 0;color:var(--mut);max-width:42rem}
+.fields{margin:0;display:grid;border:1px solid var(--ink);min-width:15rem}
+.fields div{display:grid;grid-template-columns:6.5rem 1fr;align-items:baseline;gap:.5rem;padding:.3rem .6rem;border-top:1px solid var(--rule)}
+.fields div:first-child{border-top:0}
+.fields dt{font-size:.8rem;color:var(--mut)}
+.fields dd{margin:0;font:600 .9rem/1.4 ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace}
+@media(max-width:44rem){.hd{grid-template-columns:minmax(0,1fr);padding:1.1rem 1rem}.fields{min-width:0}}
+.tabs{border-bottom:1px solid var(--rule);padding:.6rem 1.5rem 0;background:var(--accbg)}
+.tabs ul{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:.25rem .35rem}
+.tabs a{display:block;padding:.4rem .9rem;border:1px solid var(--rule);border-bottom:0;border-radius:.4rem .4rem 0 0;color:var(--ink);text-decoration:none;font-size:.92rem;background:var(--paper)}
+.tabs a:hover{text-decoration:underline}
+.tabs a[aria-current]{font-weight:700;border-top:3px solid var(--acc);margin-bottom:-1px;padding-bottom:calc(.4rem + 1px)}
+@media(max-width:44rem){.tabs{padding:.5rem 1rem 0}}
+main{padding:1.5rem;display:grid;gap:2rem}
+@media(max-width:44rem){main{padding:1.1rem 1rem;gap:1.6rem}}
+main>*,.cols>*,.sec>*{min-width:0}
+.sec{display:grid;gap:1.1rem;align-content:start}
+.sec>h2,.sec>h3,.sec>h4,.sec>h5,.sec>h6{font-size:1.35rem;padding-bottom:.35rem;border-bottom:1px solid var(--ink)}
+.sec .sec>h3,.sec .sec>h4,.sec .sec>h5,.sec .sec>h6{font-size:1.1rem;border-bottom:1px solid var(--rule)}
+.cols{display:grid;gap:2rem;grid-template-columns:repeat(auto-fit,minmax(min(100%,17rem),1fr))}
+hr{border:0;border-top:1px dashed var(--rule);margin:0}
+.vt{margin:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(9rem,1fr));border-top:1px solid var(--ink);border-left:1px solid var(--ink)}
+.vt>div{padding:.7rem .8rem .6rem;border-right:1px solid var(--ink);border-bottom:1px solid var(--ink);border-top:4px solid var(--rule);display:flex;flex-direction:column;gap:.15rem;min-width:0}
+.vt .s-ok{border-top-color:var(--ok)}.vt .s-wa{border-top-color:var(--wa)}.vt .s-al{border-top-color:var(--al)}.vt .s-id{border-top-color:var(--id)}
+.vt dt{font-size:.82rem;color:var(--mut)}
+.vt dd{margin:0}
+.vt .v{font:600 1.9rem/1.1 ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.vt .u{font-size:.85rem;color:var(--mut);margin-left:.25rem;letter-spacing:0;font-weight:400}
+.vt .h{font-size:.82rem;color:var(--mut)}
+.st{display:inline-flex;align-items:center;gap:.35rem;font-size:.82rem;font-weight:600}
+.st.s-ok{color:var(--ok)}.st.s-wa{color:var(--wa)}.st.s-al{color:var(--al)}.st.s-id{color:var(--id)}
+.g{display:inline-block;width:.7rem;height:.7rem;flex:none;background:currentColor;print-color-adjust:exact;-webkit-print-color-adjust:exact}
+.g-ok{border-radius:50%}
+.g-wa{clip-path:polygon(50% 0,100% 100%,0 100%)}
+.g-al{clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%)}
+.g-id{background:none;border:2px solid currentColor;border-radius:50%}
+.g-dn{clip-path:polygon(0 55%,15% 40%,38% 62%,85% 8%,100% 22%,38% 92%)}
+.tw{position:relative;overflow-x:auto;border:1px solid var(--ink)}
+table{width:100%;min-width:32rem;overflow-wrap:normal;border-collapse:collapse;font-size:.95rem}
+caption{text-align:left;font:700 1.05rem/1.3 "Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;padding:.6rem .75rem;border-bottom:2px solid var(--ink);background:var(--accbg)}
+th,td{min-width:6rem;padding:.5rem .75rem;text-align:left;vertical-align:top;border-bottom:1px solid var(--rule)}
+tbody tr:last-child>*{border-bottom:0}
+thead th{font-size:.82rem;color:var(--mut);font-weight:600;border-bottom:1px solid var(--ink);white-space:nowrap}
+tbody th{font-weight:600}
+tbody tr:nth-child(even){background:color-mix(in srgb,var(--hair) 45%,transparent)}
+.chip{display:inline-flex;align-items:center;gap:.4rem;padding:.1rem .55rem .1rem .45rem;border:1px solid currentColor;border-radius:.25rem;font-size:.85rem;font-weight:600;line-height:1.4;white-space:nowrap}
+.chip.s-ok{color:var(--ok);background:var(--okbg)}.chip.s-wa{color:var(--wa);background:var(--wabg);border-style:dashed}.chip.s-al{color:var(--al);background:var(--albg);border-width:2px}.chip.s-id{color:var(--id);background:var(--idbg)}.chip.s-dn{color:var(--dn);background:var(--dnbg)}
+.chk{list-style:none;margin:0;padding:0}
+.chk li{display:grid;grid-template-columns:1.4rem minmax(0,1fr);gap:.2rem .7rem;padding:.55rem .1rem;border-bottom:1px solid var(--rule)}
+.box{width:1.2rem;height:1.2rem;border:2px solid var(--ink);margin-top:.15rem;display:grid;place-items:center;font-size:.95rem;font-weight:800;line-height:1}
+.done .box{background:var(--okbg);color:var(--ok);border-color:var(--ok)}
+.done .box::after{content:"\2713"}
+.chk .n{grid-column:2;color:var(--mut);font-size:.88rem}
+.prog{display:grid;gap:.4rem}
+.prog-t{margin:0;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;font-weight:600}
+.prog-t span:last-child{font-family:ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;font-variant-numeric:tabular-nums}
+.bar{height:1.1rem;border:1px solid var(--ink);background:repeating-linear-gradient(90deg,transparent 0,transparent calc(10% - 1px),var(--rule) calc(10% - 1px),var(--rule) 10%)}
+.bar i{display:block;height:100%;background:var(--acc);border-right:2px solid var(--ink);print-color-adjust:exact;-webkit-print-color-adjust:exact}
+.tl{list-style:none;margin:0;padding:0}
+.tl li{display:grid;grid-template-columns:7.5rem 1.2rem minmax(0,1fr);gap:0 .6rem;position:relative}
+.tl .at{font:.82rem/1.9 ui-monospace,"SF Mono",Menlo,Consolas,"DejaVu Sans Mono",monospace;color:var(--mut);text-align:right}
+.tl .nd{position:relative;display:flex;justify-content:center;padding-top:.45rem}
+.tl .nd::before{content:"";position:absolute;top:0;bottom:0;left:50%;border-left:2px solid var(--rule)}
+.tl li:first-child .nd::before{top:.5rem}
+.tl li:last-child .nd::before{bottom:calc(100% - .8rem)}
+.tl .nd .g{position:relative;background-clip:padding-box;box-shadow:0 0 0 3px var(--paper);color:var(--id)}
+.tl .nd .g-id{background:var(--paper)}
+.tl .s-ok .g{color:var(--ok)}.tl .s-wa .g{color:var(--wa)}.tl .s-al .g{color:var(--al)}
+.tl .bd{padding-bottom:1rem}
+.tl .who{font-weight:700;font-size:.95rem}
+.tl .bd p{margin:0}
+@media(max-width:34rem){.tl li{grid-template-columns:1.2rem minmax(0,1fr)}.tl .at{grid-column:2;grid-row:1;text-align:left}.tl .nd{grid-column:1;grid-row:1/3}.tl .bd{grid-column:2}}
+.notes{margin:0;border:1px solid var(--rule);padding:0 1rem;background:repeating-linear-gradient(180deg,transparent 0,transparent calc(1.75rem - 1px),var(--hair) calc(1.75rem - 1px),var(--hair) 1.75rem) 0 0/100% 1.75rem}
+.notes p{margin:0 0 1.75rem;line-height:1.75rem;max-width:44rem}
+.notes p:last-child{margin-bottom:0}
+.notes .pad{height:1.75rem}
+.empty{color:var(--mut);margin:0}
+footer{padding:1rem 1.5rem 1.4rem;border-top:2px solid var(--ink);color:var(--mut);font-size:.88rem}
+@media(max-width:44rem){footer{padding:.9rem 1rem 1.2rem}}
+.vh{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+@media(forced-colors:active){.g,.bar i{forced-color-adjust:none}.chip,.box{border:2px solid CanvasText}}
+@media print{@page{size:A4;margin:14mm}body{background:#fff;color:#000;font-size:10.5pt}.sheet{border:0;box-shadow:none;max-width:none;margin:0;min-height:0;border-top:3pt solid #000}.skip,.tabs{display:none}main{padding:1rem 0}.hd{padding:1rem 0}footer{padding:.8rem 0}.sec,.vt,.tl li,.chk li,.prog,tr,caption{break-inside:avoid}h1,h2,h3,h4,h5,h6,caption{break-after:avoid}.tw{overflow:visible}a{color:#000}.notes p{border-bottom:1px dotted #777}.notes{background:none}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+@media(prefers-color-scheme:dark){:root{color-scheme:dark;--paper:#121a20;--desk:#0a0f13;--ink:#e6edf1;--mut:#a9b6bf;--rule:#4a5a65;--hair:#25313a;--acc:#6cc7d3;--accbg:#173238;--ok:#93e3ad;--okbg:#14331f;--wa:#f3cf78;--wabg:#3a2d0b;--al:#ffada2;--albg:#491a16;--id:#bac6ce;--idbg:#222d34;--dn:#adc9f6;--dnbg:#182a4a;--sh:rgba(0,0,0,.5)}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to chart</a>
+<div class="sheet">
+<header class="hd"><div><h1 dir="auto">Research department</h1><p class="sub" dir="auto">Measure first, claim second. Every figure names the command that produced it.</p></div><dl class="fields"><div><dt>Chart no.</dt><dd dir="auto">URIEL-0002-R</dd></div><div><dt>Ward</dt><dd dir="auto">Research</dd></div><div><dt>Attending</dt><dd dir="auto">Research agent</dd></div></dl></header><nav class="tabs" aria-label="Chart sections"><ul><li><a href="index.html">Chart</a></li><li><a aria-current="page" href="department-research.html">Research</a></li></ul></nav><main id="main"><section aria-label="Vitals"><dl class="vt"><div class="s-wa"><dt dir="auto">Open studies</dt><dd class="v" dir="auto">2</dd><dd class="st s-wa"><i class="g g-wa" aria-hidden="true"></i>Watch</dd><dd class="h" dir="auto">token cost, cache hit rate</dd></div><div class="s-ok"><dt dir="auto">Cache hit rate</dt><dd class="v" dir="auto">65.8<span class="u">%</span></dd><dd class="st s-ok"><i class="g g-ok" aria-hidden="true"></i>OK</dd><dd class="h" dir="auto">Zipf 1.0, gate on</dd></div><div class="s-ok"><dt dir="auto">Compact v3</dt><dd class="v" dir="auto">8.31<span class="u">% fewer tokens</span></dd><dd class="st s-ok"><i class="g g-ok" aria-hidden="true"></i>OK</dd><dd class="h" dir="auto">o200k, 100 frozen queries</dd></div></dl></section><section class="sec" aria-labelledby="c1-orders"><h2 id="c1-orders" dir="auto">Orders</h2><div class="tw" role="region" aria-labelledby="c2-studies-in-progress" tabindex="0"><table><caption id="c2-studies-in-progress" dir="auto">Studies in progress</caption><thead><tr><th scope="col" dir="auto">Study</th><th scope="col" dir="auto">Status</th><th scope="col" dir="auto">Evidence</th></tr></thead><tbody><tr><th scope="row" dir="auto">Tool-list cost</th><td dir="auto"><span class="chip s-dn"><i class="g g-dn" aria-hidden="true"></i>Measured <span class="vh">(done)</span></span></td><td dir="auto">tools/list plus instructions, 4 chars per token</td></tr><tr><th scope="row" dir="auto">Tier hit rate</th><td dir="auto"><span class="chip s-wa"><i class="g g-wa" aria-hidden="true"></i>Reading results <span class="vh">(watch)</span></span></td><td dir="auto">tier_stats over 20k nodes</td></tr><tr><th scope="row" dir="auto">Real tokenizer run</th><td dir="auto"><span class="chip s-al"><i class="g g-al" aria-hidden="true"></i>Needs tiktoken <span class="vh">(alert)</span></span></td><td dir="auto">token_dump, ignored by default</td></tr></tbody></table></div><section class="sec" aria-labelledby="c3-before-a-number-goes-in-a-readme"><h3 id="c3-before-a-number-goes-in-a-readme" dir="auto">Before a number goes in a README</h3><ul class="chk"><li class="done"><span class="box" aria-hidden="true"></span><span dir="auto"><span class="vh">Done: </span>Run it on the same machine twice</span><span class="n" dir="auto">Medians, not best runs</span></li><li class="done"><span class="box" aria-hidden="true"></span><span dir="auto"><span class="vh">Done: </span>Name the command that reproduces it</span><span class="n" dir="auto">Column Evidence</span></li><li><span class="box" aria-hidden="true"></span><span dir="auto"><span class="vh">Open: </span>State what was not measured</span><span class="n" dir="auto">Open</span></li></ul></section></section><section class="sec" aria-labelledby="c4-lab-notes"><h2 id="c4-lab-notes" dir="auto">Lab notes</h2><ol class="tl"><li class="s-ok"><span class="at" dir="auto">Mon</span><span class="nd"><i class="g g-ok" aria-hidden="true"></i></span><div class="bd"><span class="who" dir="auto">Research</span> <span class="vh">(OK)</span><p dir="auto">Froze 100 queries for the token study.</p></div></li><li class="s-ok"><span class="at" dir="auto">Tue</span><span class="nd"><i class="g g-ok" aria-hidden="true"></i></span><div class="bd"><span class="who" dir="auto">Research</span> <span class="vh">(OK)</span><p dir="auto">Compact v3 decodes to the same hits.</p></div></li><li class="s-wa"><span class="at" dir="auto">Wed</span><span class="nd"><i class="g g-wa" aria-hidden="true"></i></span><div class="bd"><span class="who" dir="auto">Review</span> <span class="vh">(Watch)</span><p dir="auto">Asked for the tokenizer run to be repeated.</p></div></li></ol></section><section class="sec" aria-labelledby="c5-open-questions"><h2 id="c5-open-questions" dir="auto">Open questions</h2><div class="notes"><p dir="auto">Does the cache gate still pay off when a scan burst arrives mid-run?</p><div class="pad"></div></div></section></main>
+<footer dir="auto">Sample department page built with uriel-page.</footer>
+</div>
+</body>
+</html>

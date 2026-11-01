@@ -1,3 +1,5 @@
+#![cfg_attr(not(windows), allow(dead_code))]
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};

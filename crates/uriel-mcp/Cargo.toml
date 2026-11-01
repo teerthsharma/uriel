@@ -24,13 +24,14 @@ uriel-ledger = { path = "../uriel-ledger" }
 uriel-query = { path = "../uriel-query" }
 uriel-rag = { path = "../uriel-rag" }
 uriel-house = { path = "../uriel-house" }
+uriel-dispatch = { path = "../uriel-dispatch" }
 uriel-place = { path = "../uriel-place" }
 uriel-terse = { path = "../uriel-terse" }
 uriel-topo = { path = "../uriel-topo" }
 serde = "1"
 serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2.0.21"
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -122,6 +122,7 @@ fn a_proactive_accept_needs_an_assessment_and_at_least_one_enabled_known_rule() 
                 scope: "w".into(),
                 rules: vec!["deps".into()],
                 assessed: false,
+                dept: None,
             },
             Refusal::NotExplicit,
         ),

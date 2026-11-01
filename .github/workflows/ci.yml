@@ -1,0 +1,133 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --no-deps -- -D warnings
+      - name: build
+        run: cargo build --workspace --all-targets
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test
+        run: cargo test --workspace --no-fail-fast
+
+  msrv:
+    name: msrv (1.90)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.120
+      - uses: Swatinem/rust-cache@v2
+      - name: check
+        run: cargo +1.90 check --workspace
+
+  fmt-new:
+    name: fmt (gated crates)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: rustfmt
+        run: cargo fmt -p uriel-dispatch -p uriel-page -- --check
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          command-arguments: --config deny.toml
+
+  mcp-token-gate:
+    name: mcp token gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build -p uriel-mcp
+      - name: revamp gate
+        run: cargo test -p uriel-mcp --test revamp
+
+  docs-pages:
+    name: generated pages committed
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: regenerate pages
+        if: hashFiles('crates/uriel-page/Cargo.toml') != ''
+        run: cargo run -p uriel-page --example demo
+      - name: pages are committed and deterministic
+        if: hashFiles('crates/uriel-page/Cargo.toml') != ''
+        run: git diff --exit-code docs/pages
+
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [check, test, msrv, fmt-new, deny, mcp-token-gate, docs-pages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: all jobs succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for r in $RESULTS; do
+            if [ "$r" != "success" ]; then
+              echo "a required job did not succeed"
+              exit 1
+            fi
+          done
