@@ -22,11 +22,7 @@ Uriel is the graph database, the scheduler and the retrieval engine that make th
   <img src="https://img.shields.io/badge/clippy-clean-2ea44f?style=flat-square" alt="clippy clean with warnings denied">
   <img src="https://img.shields.io/badge/recall%405-1.000-2ea44f?style=flat-square" alt="recall at 5 on 100 frozen queries">
   <img src="https://img.shields.io/badge/server%20peak-52.7%20MiB-2ea44f?style=flat-square" alt="release peak working set">
-<<<<<<< HEAD
-  <img src="https://img.shields.io/badge/MCP%20tools-33%20normal%20%C2%B7%2050%20house-5b6b91?style=flat-square" alt="33 tools in normal mode, 50 in house mode">
-=======
-  <img src="https://img.shields.io/badge/MCP%20tools-30%20normal%20%C2%B7%2051%20house-5b6b91?style=flat-square" alt="30 tools in normal mode, 51 in house mode; 11 and 13 listed at start">
->>>>>>> origin/master
+  <img src="https://img.shields.io/badge/MCP%20tools-36%20normal%20%C2%B7%2060%20house-5b6b91?style=flat-square" alt="36 tools in normal mode, 60 in house mode; 17 and 22 listed at start">
 </p>
 
 ---
@@ -94,7 +90,7 @@ The server has exactly two modes, chosen at start. A normal server neither lists
 | Flag | `--mode normal` or `URIEL_MODE=normal` | `--mode house` or `URIEL_MODE=house` |
 | What it is | The cheap, fast mode: cached and stored context, a working RAG, one cited answer | Pure graph and harness engineering: a differential kept as a graph, with gates, charts and a resource governor |
 | Sub-agents | Only mechanical readers, always on a strictly smaller model than the session (the contract of the `/seal` driver command; the server does not dispatch agents) | The charted fellows, residents and workers, scheduled by the harness |
-| Tools | **33**: Cypher, memory, `rag_*`, `seal_remember` and `seal_recall`, `view`, `soul`, placement, `fleet_*` and `ledger_*` | **50**: the 33, plus 11 `house_*`, the 3 Inspector-only `research_*` tools and the 3 experimental `genius_*` tools |
+| Tools | **36**: Cypher, memory, `rag_*`, `seal_remember` and `seal_recall`, `view`, `soul`, placement, `fleet_*`, `ledger_*` and `more`, `usage`, `tools_enable` | **60**: the 36, plus 11 `house_*`, the 3 Inspector-only `research_*` tools, the 3 experimental `genius_*` tools and 7 `dispatch_*` |
 | Read-only (`--read-only`) | 18 | 26 |
 
 The tool counts are what `tools/list` returns at `7d74e6c`. Mode names appear in the scaffold fingerprint, so the two modes never share a stable prefix.
@@ -263,7 +259,7 @@ The shipped server runs a single node. Ranges are not yet wired to Raft groups, 
 
 ## Tools
 
-**Both modes (33).**
+**Both modes (36).**
 
 | Group | Tools |
 |---|---|
@@ -274,12 +270,9 @@ The shipped server runs a single node. Ranges are not yet wired to Raft groups, 
 | Placement | `calibrate`, `why_hot`, `pin`, `unpin`, `replay`, `tier_stats` |
 | Agents | `fleet_admit`, `fleet_event`, `fleet_trace` |
 | Ledger | `ledger_add`, `ledger_next`, `ledger_done` |
+| Adaptive listing | `more`, `usage`, `tools_enable` |
 
-<<<<<<< HEAD
-**House mode only (14 more, 50 in total).**
-=======
-**House mode only (21 more, 51 in total).** Also in every mode: `more`, `usage`, `tools_enable` (see [`docs/REVAMP.md`](docs/REVAMP.md)). The default `--tools adaptive` lists 11 tools at start (13 in house mode) and reveals the rest as they are used; `--tools full` lists all.
->>>>>>> origin/master
+**House mode only (24 more, 60 in total):** the 11 `house_*`, the 3 `research_*`, the 3 experimental `genius_*` and the 7 `dispatch_*` tools. Also in every mode: `more`, `usage`, `tools_enable` (see [`docs/REVAMP.md`](docs/REVAMP.md)). The default `--tools adaptive` lists 17 tools at start (22 in house mode) and reveals the rest as they are used; `--tools full` lists all.
 
 | Group | Tools |
 |---|---|
@@ -390,12 +383,8 @@ Every row was produced on one machine (Intel Core i7-14700HX, 15.7 GB RAM, Windo
 | Islands | `view` recall at 5: 84/100 off; 92, 94, 94 on (budgets 300, 800, 4,000). Mean proxy tokens 148.6 off; 196.4, 257.6, 274.6 on | `cargo test --release -p uriel-mcp --test view_frozen_tool -- --nocapture` |
 | Soul | Gold chunk inside the guide for 0, 3, 7 of 100 queries at budgets 300, 1,200, 4,000; plain top-by-salience of equal size 0, 2, 7; chance 0.34, 1.27, 3.99 (run after refreshing the corpus digest in `eval_queries.json`, see the workspace row) | `cargo test --release -p uriel-rag --test eval soul_guide -- --ignored --nocapture` |
 | Terse | Total proxy tokens over 30 calls: 5,543 off, 5,350 `data` (-3.5 %), 5,340 `prose` (-3.7 %); with `format=json` 14,779 off, 11,009 `data` (-25.5 %) | `TERSE_MEASURE_ROOT=. cargo test --release -p uriel-mcp --test terse_measure -- --ignored --nocapture` |
-<<<<<<< HEAD
-| Tools | 33 in normal mode, 50 in house mode; 18 and 26 with `--read-only` (the three ledger tools write files, so they are hidden there) | `tools/list` sent to `uriel mcp --db <db> [--mode house] [--read-only]` |
+| Tools | 36 in normal mode, 60 in house mode; 21 and 29 with `--read-only` (`--tools full`; the three ledger tools write files, so they are hidden there); 17 and 22 listed at start by default | `tools/list` sent to `uriel mcp --db <db> [--mode house] [--read-only]` |
 | Genius, fleet, ledger | `uriel-fleet` 61 tests (admission limits, the observation deck, hash chain, sanitiser: idempotent over 3,000 seeded inputs, panic-free on 2,000 random byte strings, linear on 1.1 MB of near-miss prefixes); `uriel-genius` 40 (ring and axes, byte-stable plans, every validator rule, verdict independent of arrival order, and a worst-case gate that maximal claims from all six lenses keep every brief and verdict under the 20,000-character server output limit); `uriel-ledger` 30 (topological layers independent of insertion order, drains of random DAGs in waves, and a differential test that the Python script and the Rust code agree on layers and the ready set at every step of a drain over 25 DAGs); 35 stdio tests. 12 of 12 mutations of load-bearing rules turn their suite red. Linux cloud container, dev profile, tree on top of `6232c71`; not the Windows machine of the other rows | `cargo test -p uriel-fleet -p uriel-genius -p uriel-ledger` and `cargo test -p uriel-mcp --test agent_wire` |
-=======
-| Tools | 30 in normal mode, 51 in house mode; 18 and 23 with `--read-only` (`--tools full`); 11 and 13 listed at start by default | `tools/list` sent to `uriel mcp --db <db> [--mode house] [--read-only]` |
->>>>>>> origin/master
 | Raft simulation | 50 seeds x 3,000 steps on 3 nodes and 20 seeds x 3,000 steps on 5 nodes with membership changes hold every invariant; a crash at every write boundary loses no committed entry; 124 `uriel-kv` tests pass | `cargo test --release -p uriel-kv` |
 | Replicated graph | 30 seeds x 2,000 steps keep every replica equal and lose no acknowledged write; 6 seeded mutations are each caught | `cargo test --release -p uriel-repl --features mutations` |
 | Crash safety | Every write boundary of a 500-operation workload reopens to a committed prefix | `cargo test --release -p uriel-core crash` |

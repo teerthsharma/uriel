@@ -76,16 +76,17 @@ fn normal_lists_no_house_or_research_tool_in_either_write_mode() {
 }
 
 #[test]
-fn house_lists_every_normal_tool_plus_twenty_one_more() {
+fn house_lists_every_normal_tool_plus_twenty_four_more() {
     let normal = names(false, Mode::Normal);
     let house = names(false, Mode::House);
-    assert_eq!(house.len(), normal.len() + 21);
+    assert_eq!(house.len(), normal.len() + 24);
     for n in &normal {
         assert!(house.contains(n), "{n}");
     }
     assert_eq!(house.iter().filter(|n| n.starts_with("research_")).count(), 3);
     assert_eq!(house.iter().filter(|n| n.starts_with("house_")).count(), 11);
     assert_eq!(house.iter().filter(|n| n.starts_with("dispatch_")).count(), 7);
+    assert_eq!(house.iter().filter(|n| n.starts_with("genius_")).count(), 3);
 }
 
 #[test]

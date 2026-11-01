@@ -23,6 +23,7 @@ const HOUSE: [&str; 11] = [
     "house_config",
 ];
 
+const GENIUS: [&str; 3] = ["genius_plan", "genius_brief", "genius_submit"];
 const DISPATCH: [&str; 7] = ["dispatch_open", "dispatch_plan", "dispatch_check", "dispatch_add", "dispatch_report", "dispatch_status", "dispatch_close"];
 const RESEARCH: [&str; 3] = [
     "research_orbit_audit",
@@ -84,6 +85,7 @@ fn house_mode_adds_exactly_the_house_and_research_tools() {
         .iter()
         .chain(&RESEARCH)
         .chain(&DISPATCH)
+        .chain(&GENIUS)
         .map(|s| s.to_string())
         .collect();
     assert_eq!(extra, want);

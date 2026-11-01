@@ -9,3 +9,4 @@ docs/HOUSE-SEAL.md
 .uriel/
 prompt-cache/
 uriel-ledger/
+!crates/uriel-ledger/

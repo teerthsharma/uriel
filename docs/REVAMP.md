@@ -17,7 +17,7 @@ Each finding below was deduced from the code and, where it could be, reproduced 
 
 ## Activation: threshold and sequence
 
-- **Core, always listed:** `get_neo4j_schema`, `read_neo4j_cypher`, `rag_index`, `rag_search`, `rag_expand`, `seal_remember`, `seal_recall`, `view`, `more`, `usage`, `tools_enable`; in house mode also `house_need` and `dispatch_open`.
+- **Core, always listed:** `get_neo4j_schema`, `read_neo4j_cypher`, `rag_index`, `rag_search`, `rag_expand`, `seal_remember`, `seal_recall`, `view`, `more`, `usage`, `tools_enable`, `fleet_admit`, `fleet_event`, `fleet_trace`, `ledger_add`, `ledger_next`, `ledger_done`; in house mode also `house_need`, `dispatch_open`, `genius_plan`, `genius_brief`, `genius_submit`.
 - **Groups, listed on demand:** `write`, `memory`, `place`, `rag` (feedback, soul, session_reset), `house`, `research`, `dispatch`.
 - **Sequential:** `house_need` reveals `house` and `research`; `dispatch_open` reveals `dispatch` and `dispatch_close` hides it again; calling any tool of a group reveals the rest of its group; a failed entry call reveals nothing. `tools_enable(group[, off])` does it by hand.
 - **Threshold:** the soft and hard token thresholds above.
@@ -28,7 +28,7 @@ Each finding below was deduced from the code and, where it could be, reproduced 
 
 ## Counts
 
-Full list: 30 tools in normal mode (27 + `more`, `usage`, `tools_enable`), 51 in house mode (+11 house, +3 research, +7 dispatch: open, plan, check, add, report, status, close). Listed at start in adaptive mode: 11 and 13.
+Full list: 36 tools in normal mode (27 + `more`, `usage`, `tools_enable` + 3 `fleet_*` + 3 `ledger_*`), 60 in house mode (+11 house, +3 research, +3 genius, +7 dispatch: open, plan, check, add, report, status, close). Listed at start in adaptive mode: 17 and 22 (the six `fleet_*` and `ledger_*` tools and, in house mode, the three `genius_*` tools are in no group, so they count as core and are always listed).
 
 ## Token counting and the reducer (second pass)
 
