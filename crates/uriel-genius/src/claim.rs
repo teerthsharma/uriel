@@ -121,6 +121,7 @@ pub struct Claim {
     pub evidence: Vec<String>,
     pub targets: Vec<String>,
     pub stance: Option<Stance>,
+    pub goal: Option<String>,
 }
 
 impl Claim {
@@ -135,7 +136,8 @@ impl Claim {
             "confidence": self.confidence,
             "evidence": self.evidence,
             "targets": self.targets,
-            "stance": self.stance.map(Stance::name)
+            "stance": self.stance.map(Stance::name),
+            "goal": self.goal
         })
     }
 
@@ -210,6 +212,10 @@ fn list_field(
     }
 }
 
+pub fn goal_ok(g: &str) -> bool {
+    (1..=24).contains(&g.len()) && g.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.')
+}
+
 pub fn id_shape(owner: Vertex, round: u8) -> String {
     format!("{}.{}<N>", owner.name(), if round == 1 { "c" } else { "d" })
 }
@@ -276,6 +282,14 @@ pub fn parse(raw: &Json, owner: Vertex, round: u8, report: &mut Report) -> Resul
         })?),
         Some(_) => return Err(Error::Field { claim: id, field: "stance", problem: "not a string" }),
     };
+    let goal = match obj.get("goal") {
+        None | Some(Json::Null) => None,
+        Some(Json::String(g)) if kind.testable() && goal_ok(g) => Some(g.clone()),
+        Some(Json::String(_)) if !kind.testable() => {
+            return Err(Error::Field { claim: id, field: "goal", problem: "allowed only on conjecture and wild claims" })
+        }
+        Some(_) => return Err(Error::Field { claim: id, field: "goal", problem: "not a house goal id such as G1.2 or N2.G0" }),
+    };
     if !targets.is_empty() && stance.is_none() {
         return Err(Error::Field { claim: id, field: "stance", problem: "required when targets are given" });
     }
@@ -308,5 +322,5 @@ pub fn parse(raw: &Json, owner: Vertex, round: u8, report: &mut Report) -> Resul
     if stance == Some(Stance::Attack) && evidence.is_empty() && falsifier.is_empty() {
         return Err(Error::AttackNeedsGround(id));
     }
-    Ok(Claim { id, owner, round, kind, text, falsifier, test, cost, confidence, evidence, targets, stance })
+    Ok(Claim { id, owner, round, kind, text, falsifier, test, cost, confidence, evidence, targets, stance, goal })
 }

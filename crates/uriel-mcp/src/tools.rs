@@ -290,7 +290,7 @@ pub fn all() -> impl Iterator<Item = &'static ToolDef> {
 }
 
 pub fn house_only(name: &str) -> bool {
-    name.starts_with("house_") || name.starts_with("research_")
+    name.starts_with("house_") || name.starts_with("research_") || name.starts_with("genius_")
 }
 
 pub fn visible(

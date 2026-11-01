@@ -1,5 +1,7 @@
 # Genius and the fleet
 
+> **Status: experimental and unproven.** No benchmark shows that genius beats a single prompt, and a run is not cheap: round-1 briefs alone are about 10 KB (roughly 2.5K input tokens), each round-2 brief adds up to three neighbours' claims (up to about 4K tokens each in the worst case), and there are up to 12 JSON submissions to write, so expect on the order of 10 to 40K tokens per run. That is an estimate from byte counts, not a measurement. It is available **only in house mode**, where its job is to feed the differential (section 1a). Do not use it where one good prompt would do.
+
 Two features, one idea: an agent is only as good as the structure around it, and structure belongs in code, not in a prompt. `genius` structures how a model reasons; `fleet` structures how many models run and what is seen of them.
 
 ## 1. What `/genius` does
@@ -7,6 +9,17 @@ Two features, one idea: an agent is only as good as the structure around it, and
 `/genius <idea>` runs the idea through six lenses placed on a hexagon, then hands the result to the session model, which sits at the centre and **tests the strange parts instead of throwing them away**.
 
 The working definition: a hallucination is an unlabeled conjecture. A model says "the cache is cold because compaction reorders the prefix" with the same voice it uses for `file:line` facts, and the reader cannot tell them apart. Genius makes the label mandatory and enforces it in code. A strange idea is accepted as a `wild` claim if, and only if, it carries the observation that would kill it, the cheapest way to look, and a cost of S or M. A crazy idea that cannot be cheaply tested is refused, because that is the one that is a hallucination.
+
+### 1a. How it plugs into house mode
+
+House mode already does a differential: a goal tree, facts that kill subtrees, and a RED-first gate. Genius supplies the hypotheses and the structured doubt; house keeps the record.
+
+- A `conjecture` or `wild` claim may carry `goal`, the id of a live house goal it would explain or refute (`G1.2`). The id is checked against the Need's goal list when the claim is submitted; an unknown, retired or already refuted goal is refused before anything is stored.
+- When an experiment result is reported for a bound claim, the server records a house **fact** (`GX.<claim id>`, by `genius`, source = the first evidence line). `killed` makes the fact refute the goal, which blocks it and its subtree through the existing house mechanism; `survived` records a fact that refutes nothing.
+- The verdict's `test_queue` shows each queued test's `goal`.
+- Genius tools and the `genius` prompt are listed only with `--mode house`. In normal mode they answer the same typed `wrong_mode` error as the `house_*` tools, the server advertises no `prompts` capability and its `initialize` reply is the same as before this work.
+
+What this is not: genius does not run house's RED-first gate. A hypothesis test is not a code test, so I did not pretend the two are the same; a killed claim refutes a goal, and reaching a goal still needs a RED then GREEN test through `house_test_run`.
 
 ### The thinkers, and why they are the vertices
 
@@ -53,8 +66,8 @@ The server cannot force a model to think. It can refuse everything that is not s
 
 ### The KV-cache and tier tricks, with their limits
 
-- **Shared prefix first.** Every brief is `shared text + lens block`, and the shared text is byte-identical for the six lenses. A round-2 brief extends its own round-1 brief byte for byte. On the example idea the shared part is 1,153 bytes (about 287 tokens) and 73 % of the bytes of the six briefs. Self-hosted prefix caches (vLLM and SGLang are the usual examples) are the target; as far as I know they match at block granularity rather than with a per-model minimum, which I have not measured here.
-- **Provider minimums apply.** A hosted cache has a minimum cacheable length per model. 287 tokens is probably under it, so `tier` mode should not be expected to hit a hosted cache. This was not measured against a hosted API.
+- **Shared prefix first.** Every brief is `shared text + lens block`, and the shared text is byte-identical for the six lenses. A round-2 brief extends its own round-1 brief byte for byte. On the example idea the shared part is 1,249 bytes (about 311 tokens) and 75 % of the bytes of the six briefs. Self-hosted prefix caches (vLLM and SGLang are the usual examples) are the target; as far as I know they match at block granularity rather than with a per-model minimum, which I have not measured here.
+- **Provider minimums apply.** A hosted cache has a minimum cacheable length per model. 311 tokens is probably under it, so `tier` mode should not be expected to hit a hosted cache. This was not measured against a hosted API.
 - **`warm`.** A hosted cache entry only exists once the first response has begun, so six simultaneous calls all miss. `warm` runs the first lens alone. It costs one sequential step and only pays if the prefix is cacheable.
 - **`fork` mode.** `genius_brief {plan}` returns the shared text once, into the session's context; `genius_brief {plan, vertex}` returns each short lens block, and the lenses are forks of that context. The prefix cache is then the session's whole cached context, which is large enough to count. The cost is that a fork runs on the session's own model, so there is no smaller tier. This is the real trade: **cache or tier, not both.**
 - **Tier.** In `tier` mode lenses run on a model strictly smaller than the session (the same contract the `/seal` driver already uses), and only the centre runs on the large one. If no smaller model exists, the session answers the briefs itself, in order.

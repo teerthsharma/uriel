@@ -156,11 +156,12 @@ fn submit_schema() -> Json {
             "round": {"type": "integer", "enum": [1, 2], "description": "Optional; must match the open round."},
             "vertex": str_prop("abduce, analogize, question, refute, eliminate or monitor."),
             "claims": {"type": "array", "items": {"type": "object"},
-                "description": "The lens's claims, exactly as its brief asks."},
+                "description": "The lens's claims, exactly as its brief asks. A conjecture or wild claim may carry `goal`, a live house goal id."},
             "unknowns": str_list("What the lens could not determine."),
             "experiment": {"type": "array", "items": {"type": "object"},
                 "description": "Results of tests from the verdict's test_queue: {claim, outcome: survived|killed, evidence: [..]}. Send instead of claims, once both rounds are complete."},
-            "agent": str_prop("Fleet agent id (from fleet_admit) that produced this; its slot is released and the submission is traced.")
+            "agent": str_prop("Fleet agent id (from fleet_admit) that produced this; its slot is released and the submission is traced."),
+            "need": str_prop("House Need id. A claim's `goal` is checked against this Need's graph (default: the newest open Need), and a tested claim bound to a goal is recorded as a house fact; a killed one refutes the goal and its subtree.")
         }),
         &["plan"],
     )
@@ -270,7 +271,7 @@ pub fn call(ctx: &Context, name: &str, args: &Json) -> ToolResult {
     match name {
         "genius_plan" => plan(hub, args),
         "genius_brief" => brief(hub, args),
-        "genius_submit" => submit(hub, args),
+        "genius_submit" => submit(ctx, args),
         "fleet_admit" => admit(hub, args),
         "fleet_event" => event(hub, args),
         "fleet_trace" => trace(hub, args),
@@ -321,7 +322,81 @@ fn brief(hub: &Hub, args: &Json) -> ToolResult {
         .map_err(|e| fail(e.code(), e))
 }
 
-fn submit(hub: &Hub, args: &Json) -> ToolResult {
+fn need_of(args: &Json) -> Result<Option<uriel_house::GoalId>, String> {
+    match args.get("need") {
+        None | Some(Json::Null) => Ok(None),
+        Some(Json::String(s)) if !s.trim().is_empty() => Ok(Some(uriel_house::GoalId::new(s.trim()))),
+        Some(_) => Err("'need' must be a non-empty string".into()),
+    }
+}
+
+fn check_bound_goals(ctx: &Context, args: &Json) -> Result<(), String> {
+    let wanted: Vec<&str> = args
+        .get("claims")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.get("goal").and_then(Json::as_str))
+        .filter(|g| uriel_genius::goal_ok(g))
+        .collect();
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let status = ctx
+        .house()?
+        .status_in(need_of(args)?.as_ref())
+        .map_err(|e| fail("house", e))?;
+    let live: std::collections::BTreeSet<&str> = status["goal_list"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|g| g["status"] != "retired" && g["blocked_reason"] != "refuted")
+        .filter_map(|g| g["id"].as_str())
+        .collect();
+    match wanted.iter().find(|g| !live.contains(**g)) {
+        Some(g) => Err(fail("unknown_goal", format!("house goal '{g}' does not exist, is retired or was refuted"))),
+        None => Ok(()),
+    }
+}
+
+fn record_house_facts(ctx: &Context, plan: &str, args: &Json) -> Json {
+    let need = match need_of(args) {
+        Ok(n) => n,
+        Err(e) => return json!([{"error": e}]),
+    };
+    let mut out = Vec::new();
+    for item in args.get("experiment").and_then(Json::as_array).into_iter().flatten() {
+        let Some(claim) = item.get("claim").and_then(Json::as_str) else { continue };
+        let Some((goal, text)) = ctx.agents.book().bound_goal(plan, claim) else { continue };
+        let killed = item.get("outcome").and_then(Json::as_str) == Some("killed");
+        let source = item
+            .get("evidence")
+            .and_then(Json::as_array)
+            .and_then(|e| e.first())
+            .and_then(Json::as_str)
+            .map(|e| uriel_fleet::sanitize(e, &uriel_fleet::Policy::new(240)).text)
+            .unwrap_or_default();
+        let fact = uriel_house::Fact {
+            id: format!("GX.{claim}"),
+            by: "genius".to_string(),
+            refutes: killed.then(|| uriel_house::GoalId::new(goal.clone())),
+            source,
+            text: format!("{}: {text}", if killed { "killed" } else { "survived" }),
+        };
+        let result = ctx
+            .house()
+            .and_then(|h| h.add_fact_in(need.as_ref(), fact).map_err(|e| e.to_string()));
+        out.push(match result {
+            Ok(()) => json!({"claim": claim, "goal": goal, "fact": format!("GX.{claim}"), "refuted": killed}),
+            Err(e) => json!({"claim": claim, "goal": goal, "error": e}),
+        });
+    }
+    Json::Array(out)
+}
+
+fn submit(ctx: &Context, args: &Json) -> ToolResult {
+    let hub = &ctx.agents;
+    check_bound_goals(ctx, args)?;
     let plan = req_str(args, "plan")?;
     let agent = args.get("agent").and_then(Json::as_str).filter(|a| !a.is_empty());
     let is_claims = args.get("experiment").is_none();
@@ -331,6 +406,12 @@ fn submit(hub: &Hub, args: &Json) -> ToolResult {
             let mut json = done.to_json();
             if let Some(agent) = agent.filter(|_| is_claims) {
                 json["fleet"] = trace_submission(hub, plan, agent, args, &done.report);
+            }
+            if !is_claims {
+                let facts = record_house_facts(ctx, plan, args);
+                if facts.as_array().is_some_and(|a| !a.is_empty()) {
+                    json["house"] = facts;
+                }
             }
             let mut fleet = hub.fleet();
             if done.round2_ready {

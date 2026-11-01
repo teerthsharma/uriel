@@ -22,7 +22,7 @@ Uriel is the graph database, the scheduler and the retrieval engine that make th
   <img src="https://img.shields.io/badge/clippy-clean-2ea44f?style=flat-square" alt="clippy clean with warnings denied">
   <img src="https://img.shields.io/badge/recall%405-1.000-2ea44f?style=flat-square" alt="recall at 5 on 100 frozen queries">
   <img src="https://img.shields.io/badge/server%20peak-52.7%20MiB-2ea44f?style=flat-square" alt="release peak working set">
-  <img src="https://img.shields.io/badge/MCP%20tools-36%20normal%20%C2%B7%2050%20house-5b6b91?style=flat-square" alt="36 tools in normal mode, 50 in house mode">
+  <img src="https://img.shields.io/badge/MCP%20tools-33%20normal%20%C2%B7%2050%20house-5b6b91?style=flat-square" alt="33 tools in normal mode, 50 in house mode">
 </p>
 
 ---
@@ -90,8 +90,8 @@ The server has exactly two modes, chosen at start. A normal server neither lists
 | Flag | `--mode normal` or `URIEL_MODE=normal` | `--mode house` or `URIEL_MODE=house` |
 | What it is | The cheap, fast mode: cached and stored context, a working RAG, one cited answer | Pure graph and harness engineering: a differential kept as a graph, with gates, charts and a resource governor |
 | Sub-agents | Only mechanical readers, always on a strictly smaller model than the session (the contract of the `/seal` driver command; the server does not dispatch agents) | The charted fellows, residents and workers, scheduled by the harness |
-| Tools | **36**: Cypher, memory, `rag_*`, `seal_remember` and `seal_recall`, `view`, `soul`, placement, `genius_*` and `fleet_*` | **50**: the 36, plus 11 `house_*` and the 3 Inspector-only `research_*` tools |
-| Read-only (`--read-only`) | 21 | 26 |
+| Tools | **33**: Cypher, memory, `rag_*`, `seal_remember` and `seal_recall`, `view`, `soul`, placement, `fleet_*` and `ledger_*` | **50**: the 33, plus 11 `house_*`, the 3 Inspector-only `research_*` tools and the 3 experimental `genius_*` tools |
+| Read-only (`--read-only`) | 18 | 26 |
 
 The tool counts are what `tools/list` returns at `7d74e6c`. Mode names appear in the scaffold fingerprint, so the two modes never share a stable prefix.
 
@@ -138,7 +138,7 @@ flowchart LR
 
 Two features that put structure in code instead of in a prompt. Full design, with the thinkers behind it and every limit: [`docs/GENIUS.md`](docs/GENIUS.md).
 
-**`/genius <idea>`** (the MCP prompt `genius`, the file `.claude/commands/genius.md`, or `uriel genius`). Six lenses on smaller models sit on a hexagon around the idea, one per thinker: Peirce (abduce), Koestler and Gentner (analogize), Socrates (question), Popper (refute), Holmes and Bayes (eliminate), Flavell and Nelson and Narens (monitor). Opposite vertices are the three tensions; each lens sees its two neighbours and its opposite in round 2. The session model is the centre: it receives a verdict whose test queue lists the wild claims first, and **runs the tests for the strange claims** instead of discarding them. A hallucination is treated as an unlabeled conjecture, so the server refuses any claim that has no falsifier, no cheap test or no evidence, and nothing is ever marked true, only `corroborated`, `grounded`, `quarantined` or `refuted`. The plan, briefs, validation and verdict are pure functions; the same idea gives the same bytes and the verdict does not depend on which lens finishes first.
+**`/genius <idea>`** (house mode only; the MCP prompt `genius`, the file `.claude/commands/genius.md`, or `uriel genius`). **Experimental and unproven**: no benchmark shows it beats a single prompt, and a run costs roughly 10 to 40K tokens (an estimate from byte counts). It exists to feed the house differential: a claim can name the house goal it would explain or refute, and a killed claim is recorded as a house fact that blocks that goal and its subtree. Six lenses on smaller models sit on a hexagon around the idea, one per thinker: Peirce (abduce), Koestler and Gentner (analogize), Socrates (question), Popper (refute), Holmes and Bayes (eliminate), Flavell and Nelson and Narens (monitor). Opposite vertices are the three tensions; each lens sees its two neighbours and its opposite in round 2. The session model is the centre: it receives a verdict whose test queue lists the wild claims first, and **runs the tests for the strange claims** instead of discarding them. A hallucination is treated as an unlabeled conjecture, so the server refuses any claim that has no falsifier, no cheap test or no evidence, and nothing is ever marked true, only `corroborated`, `grounded`, `quarantined` or `refuted`. The plan, briefs, validation and verdict are pure functions; the same idea gives the same bytes and the verdict does not depend on which lens finishes first.
 
 **The fleet** (`fleet_admit`, `fleet_event`, `fleet_trace`). `fleet_admit {max: true}` grants as many agents as the concurrency (`URIEL_FLEET_MAX`, default 8), depth, lifetime and token limits allow, and names the limit that bound. Every agent event goes into a per-run hash chain, so an edited, deleted or reordered event is detected. Everything an agent produces is sanitised first: terminal escapes, bidi and zero-width characters, Unicode tag smuggling, and secrets. Text that re-enters a prompt is fenced with a content-hash nonce. The server still does not start agents; the harness does.
 
@@ -146,7 +146,7 @@ Two features that put structure in code instead of in a prompt. Full design, wit
 
 **The goal ledger** (`ledger_add`, `ledger_next`, `ledger_done`) keeps up to 256 tiny goals with dependencies, ordered by a topological sort with a deterministic tie-break, and feeds the ready frontier into the deck's backlog. `scripts/ledger_next.py` (Python, standard library only) independently recomputes the layers and renders the next prompts, cached by content in `prompt-cache/`; a differential test checks it against the Rust implementation at every step of a drain. Threat model and every control with its test: [`docs/SAFETY.md`](docs/SAFETY.md). A particle-physics-shaped retrieval is a [future plan](docs/PHYSICS-RAG.md), not built.
 
-Honest limits: there is no benchmark here showing that six small lenses beat one prompt; a 287-token shared prefix is likely under a hosted cache's minimum, so the cache saving is for self-hosted prefix caches and `fork` mode; and the trace is shaped like NeMo Relay's agent trajectories but has not been checked against its schema.
+Honest limits: there is no benchmark here showing that six small lenses beat one prompt; a 311-token shared prefix is likely under a hosted cache's minimum, so the cache saving is for self-hosted prefix caches and `fork` mode; and the trace is shaped like NeMo Relay's agent trajectories but has not been checked against its schema.
 
 ---
 
@@ -259,7 +259,7 @@ The shipped server runs a single node. Ranges are not yet wired to Raft groups, 
 
 ## Tools
 
-**Both modes (36).**
+**Both modes (33).**
 
 | Group | Tools |
 |---|---|
@@ -268,7 +268,7 @@ The shipped server runs a single node. Ranges are not yet wired to Raft groups, 
 | Retrieval | `rag_index`, `rag_search`, `rag_expand`, `rag_feedback`, `seal_remember`, `seal_recall`, `session_reset` |
 | View | `view`, `soul` |
 | Placement | `calibrate`, `why_hot`, `pin`, `unpin`, `replay`, `tier_stats` |
-| Agents | `genius_plan`, `genius_brief`, `genius_submit`, `fleet_admit`, `fleet_event`, `fleet_trace`; the MCP prompt `genius` |
+| Agents | `fleet_admit`, `fleet_event`, `fleet_trace` |
 | Ledger | `ledger_add`, `ledger_next`, `ledger_done` |
 
 **House mode only (14 more, 50 in total).**
@@ -379,8 +379,8 @@ Every row was produced on one machine (Intel Core i7-14700HX, 15.7 GB RAM, Windo
 | Islands | `view` recall at 5: 84/100 off; 92, 94, 94 on (budgets 300, 800, 4,000). Mean proxy tokens 148.6 off; 196.4, 257.6, 274.6 on | `cargo test --release -p uriel-mcp --test view_frozen_tool -- --nocapture` |
 | Soul | Gold chunk inside the guide for 0, 3, 7 of 100 queries at budgets 300, 1,200, 4,000; plain top-by-salience of equal size 0, 2, 7; chance 0.34, 1.27, 3.99 (run after refreshing the corpus digest in `eval_queries.json`, see the workspace row) | `cargo test --release -p uriel-rag --test eval soul_guide -- --ignored --nocapture` |
 | Terse | Total proxy tokens over 30 calls: 5,543 off, 5,350 `data` (-3.5 %), 5,340 `prose` (-3.7 %); with `format=json` 14,779 off, 11,009 `data` (-25.5 %) | `TERSE_MEASURE_ROOT=. cargo test --release -p uriel-mcp --test terse_measure -- --ignored --nocapture` |
-| Tools | 36 in normal mode, 50 in house mode; 21 and 26 with `--read-only` (the three ledger tools write files, so they are hidden there) | `tools/list` sent to `uriel mcp --db <db> [--mode house] [--read-only]` |
-| Genius, fleet, ledger | `uriel-fleet` 61 tests (admission limits, the observation deck, hash chain, sanitiser: idempotent over 3,000 seeded inputs, panic-free on 2,000 random byte strings, linear on 1.1 MB of near-miss prefixes); `uriel-genius` 40 (ring and axes, byte-stable plans, every validator rule, verdict independent of arrival order, and a worst-case gate that maximal claims from all six lenses keep every brief and verdict under the 20,000-character server output limit); `uriel-ledger` 30 (topological layers independent of insertion order, drains of random DAGs in waves, and a differential test that the Python script and the Rust code agree on layers and the ready set at every step of a drain over 25 DAGs); 28 stdio tests. 12 of 12 mutations of load-bearing rules turn their suite red. Linux cloud container, dev profile, tree on top of `6232c71`; not the Windows machine of the other rows | `cargo test -p uriel-fleet -p uriel-genius -p uriel-ledger` and `cargo test -p uriel-mcp --test agent_wire` |
+| Tools | 33 in normal mode, 50 in house mode; 18 and 26 with `--read-only` (the three ledger tools write files, so they are hidden there) | `tools/list` sent to `uriel mcp --db <db> [--mode house] [--read-only]` |
+| Genius, fleet, ledger | `uriel-fleet` 61 tests (admission limits, the observation deck, hash chain, sanitiser: idempotent over 3,000 seeded inputs, panic-free on 2,000 random byte strings, linear on 1.1 MB of near-miss prefixes); `uriel-genius` 40 (ring and axes, byte-stable plans, every validator rule, verdict independent of arrival order, and a worst-case gate that maximal claims from all six lenses keep every brief and verdict under the 20,000-character server output limit); `uriel-ledger` 30 (topological layers independent of insertion order, drains of random DAGs in waves, and a differential test that the Python script and the Rust code agree on layers and the ready set at every step of a drain over 25 DAGs); 35 stdio tests. 12 of 12 mutations of load-bearing rules turn their suite red. Linux cloud container, dev profile, tree on top of `6232c71`; not the Windows machine of the other rows | `cargo test -p uriel-fleet -p uriel-genius -p uriel-ledger` and `cargo test -p uriel-mcp --test agent_wire` |
 | Raft simulation | 50 seeds x 3,000 steps on 3 nodes and 20 seeds x 3,000 steps on 5 nodes with membership changes hold every invariant; a crash at every write boundary loses no committed entry; 124 `uriel-kv` tests pass | `cargo test --release -p uriel-kv` |
 | Replicated graph | 30 seeds x 2,000 steps keep every replica equal and lose no acknowledged write; 6 seeded mutations are each caught | `cargo test --release -p uriel-repl --features mutations` |
 | Crash safety | Every write boundary of a 500-operation workload reopens to a committed prefix | `cargo test --release -p uriel-core crash` |

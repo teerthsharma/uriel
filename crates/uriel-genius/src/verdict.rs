@@ -203,6 +203,7 @@ pub(crate) fn compute(st: &State) -> Json {
                 "id": r.claim.id,
                 "kind": r.claim.kind.name(),
                 "cost": r.claim.cost.map(Cost::name),
+                "goal": r.claim.goal,
                 "status": r.status().name(),
                 "test": short(&r.claim.test),
                 "falsifier": short(&r.claim.falsifier)

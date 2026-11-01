@@ -28,9 +28,9 @@ fn r2(plan: &str, i: usize) -> Value {
 }
 
 #[test]
-fn initialize_advertises_prompts_and_the_genius_prompt_is_listed() {
+fn house_mode_advertises_prompts_and_lists_the_genius_prompt() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[]);
+    let mut s = start(&p, &["--mode", "house"], &[]);
     let init = s.rpc("initialize", json!({"protocolVersion": "2025-06-18"}));
     assert_eq!(init["result"]["capabilities"]["prompts"]["listChanged"], false);
     assert_eq!(init["result"]["capabilities"]["tools"]["listChanged"], false);
@@ -39,12 +39,30 @@ fn initialize_advertises_prompts_and_the_genius_prompt_is_listed() {
     assert_eq!(prompts.len(), 1);
     assert_eq!(prompts[0]["name"], "genius");
     assert_eq!(prompts[0]["arguments"][0]["required"], true);
+    assert!(prompts[0]["description"].as_str().unwrap().contains("unproven"));
+}
+
+#[test]
+fn normal_mode_is_unchanged_it_has_no_prompts_and_refuses_genius_with_a_typed_wrong_mode() {
+    let p = Proj::new();
+    let mut s = start(&p, &[], &[]);
+    let init = s.rpc("initialize", json!({"protocolVersion": "2025-06-18"}));
+    assert!(init["result"]["capabilities"].get("prompts").is_none());
+    assert_eq!(s.rpc("prompts/list", json!({}))["result"]["prompts"], json!([]));
+    let r = s.rpc("prompts/get", json!({"name": "genius", "arguments": {"idea": "x"}}));
+    assert_eq!(r["error"]["code"], -32602);
+    assert!(r["error"]["message"].as_str().unwrap().contains("house mode"));
+    for tool in ["genius_plan", "genius_brief", "genius_submit"] {
+        let e = s.err(tool, json!({"idea": "x", "plan": "p"}));
+        let v: Value = serde_json::from_str(&e).unwrap();
+        assert_eq!((v["error"].as_str(), v["requires"].as_str()), (Some("wrong_mode"), Some("house")), "{tool}");
+    }
 }
 
 #[test]
 fn the_genius_prompt_is_byte_identical_for_the_same_idea_and_names_the_tools() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[]);
+    let mut s = start(&p, &["--mode", "house"], &[]);
     let get = |s: &mut Session| s.rpc("prompts/get", json!({"name": "genius", "arguments": {"idea": "why is it slow?"}}));
     let a = get(&mut s);
     let b = get(&mut s);
@@ -60,7 +78,7 @@ fn the_genius_prompt_is_byte_identical_for_the_same_idea_and_names_the_tools() {
 #[test]
 fn the_genius_prompt_strips_control_bytes_and_secrets_from_the_idea() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[]);
+    let mut s = start(&p, &["--mode", "house"], &[]);
     let idea = "bug \u{1b}[31m sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 \u{202E}x";
     let r = s.rpc("prompts/get", json!({"name": "genius", "arguments": {"idea": idea}}));
     let text = r["result"]["messages"][0]["content"]["text"].as_str().unwrap();
@@ -70,7 +88,7 @@ fn the_genius_prompt_strips_control_bytes_and_secrets_from_the_idea() {
 #[test]
 fn prompt_errors_are_typed_invalid_params() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[]);
+    let mut s = start(&p, &["--mode", "house"], &[]);
     for params in [
         json!({"name": "nope", "arguments": {"idea": "x"}}),
         json!({"name": "genius"}),
@@ -83,23 +101,21 @@ fn prompt_errors_are_typed_invalid_params() {
 }
 
 #[test]
-fn the_six_new_tools_are_listed_in_both_modes_and_survive_read_only() {
-    for (extra, base, ledger) in [
-        (vec![], 27usize, 3usize),
-        (vec!["--mode", "house"], 41, 3),
-        (vec!["--read-only"], 15, 0),
-        (vec!["--mode", "house", "--read-only"], 20, 0),
+fn fleet_and_ledger_tools_are_in_both_modes_genius_only_in_house_and_ledger_not_in_read_only() {
+    for (extra, base, fleet, ledger, genius) in [
+        (vec![], 27usize, 3usize, 3usize, 0usize),
+        (vec!["--mode", "house"], 41, 3, 3, 3),
+        (vec!["--read-only"], 15, 3, 0, 0),
+        (vec!["--mode", "house", "--read-only"], 20, 3, 0, 3),
     ] {
         let p = Proj::new();
         let mut s = start(&p, &extra, &[]);
         let names = s.names();
-        for t in NEW_TOOLS {
-            assert!(names.iter().any(|n| n == t), "{t} missing with {extra:?}");
-        }
-        for t in LEDGER_TOOLS {
-            assert_eq!(names.iter().any(|n| n == t), ledger > 0, "{t} with {extra:?}");
-        }
-        assert_eq!(names.len(), base + 6 + ledger, "{extra:?}");
+        let has = |group: &[&str]| group.iter().filter(|t| names.iter().any(|n| n == *t)).count();
+        assert_eq!(has(&["fleet_admit", "fleet_event", "fleet_trace"]), fleet, "{extra:?}");
+        assert_eq!(has(&LEDGER_TOOLS), ledger, "{extra:?}");
+        assert_eq!(has(&["genius_plan", "genius_brief", "genius_submit"]), genius, "{extra:?}");
+        assert_eq!(names.len(), base + fleet + ledger + genius, "{extra:?}");
     }
 }
 
@@ -181,7 +197,7 @@ fn reap_frees_agents_that_never_reported() {
 #[test]
 fn waves_under_a_cap_of_three_admit_release_and_trace_every_lens() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[("URIEL_FLEET_MAX", "3")]);
+    let mut s = start(&p, &["--mode", "house"], &[("URIEL_FLEET_MAX", "3")]);
     let plan = s.ok("genius_plan", json!({"idea": "why do short tables cost more tokens?"}));
     let id = plan["plan"].as_str().unwrap().to_string();
     let waves = plan["waves"].as_array().unwrap();
@@ -214,7 +230,7 @@ fn waves_under_a_cap_of_three_admit_release_and_trace_every_lens() {
 #[test]
 fn rejected_submissions_come_back_typed_and_are_traced_without_releasing_the_slot() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[]);
+    let mut s = start(&p, &["--mode", "house"], &[]);
     let plan = s.ok("genius_plan", json!({"idea": "x marks the spot"}));
     let id = plan["plan"].as_str().unwrap().to_string();
     let g = s.ok("fleet_admit", json!({"run": id, "count": 1}));
@@ -233,7 +249,7 @@ fn rejected_submissions_come_back_typed_and_are_traced_without_releasing_the_slo
 #[test]
 fn the_full_twelve_submission_run_over_stdio_ends_in_a_verdict_with_a_test_queue() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[]);
+    let mut s = start(&p, &["--mode", "house"], &[]);
     let id = s.ok("genius_plan", json!({"idea": "the cache is cold after compaction"}))["plan"].as_str().unwrap().to_string();
     assert!(s.err("genius_brief", json!({"plan": id, "vertex": "abduce", "round": 2})).contains("wrong_round"));
     let mut ready = false;
@@ -260,7 +276,7 @@ fn the_full_twelve_submission_run_over_stdio_ends_in_a_verdict_with_a_test_queue
 #[test]
 fn fork_mode_serves_the_shared_text_once_and_the_lens_blocks_after_it() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[]);
+    let mut s = start(&p, &["--mode", "house"], &[]);
     let id = s.ok("genius_plan", json!({"idea": "x", "mode": "fork", "warm": true}))["plan"].as_str().unwrap().to_string();
     let shared = s.text("genius_brief", json!({"plan": id}));
     assert!(shared.contains("IDEA:") && !shared.contains("LENS 1/6"));
@@ -273,7 +289,7 @@ fn fork_mode_serves_the_shared_text_once_and_the_lens_blocks_after_it() {
 fn the_same_idea_over_two_servers_gives_the_same_plan_bytes() {
     let plan = |idea: &str| {
         let p = Proj::new();
-        let mut s = start(&p, &[], &[]);
+        let mut s = start(&p, &["--mode", "house"], &[]);
         s.text("genius_plan", json!({"idea": idea}))
     };
     assert_eq!(plan("same idea"), plan("same idea"));
@@ -283,7 +299,7 @@ fn the_same_idea_over_two_servers_gives_the_same_plan_bytes() {
 #[test]
 fn plan_arguments_are_validated() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[]);
+    let mut s = start(&p, &["--mode", "house"], &[]);
     assert!(s.err("genius_plan", json!({"idea": "x", "mode": "hex"})).contains("'mode'"));
     assert!(s.err("genius_plan", json!({"idea": "  "})).contains("'idea'"));
     let fork = s.ok("genius_plan", json!({"idea": "x", "mode": "fork", "warm": true}));
@@ -294,7 +310,7 @@ fn plan_arguments_are_validated() {
 #[test]
 fn every_new_tool_has_an_object_schema_with_the_right_required_fields_and_no_extra_properties() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[]);
+    let mut s = start(&p, &["--mode", "house"], &[]);
     let list = s.rpc("tools/list", json!({}));
     let want = [
         ("genius_plan", vec!["idea"]),
@@ -474,7 +490,7 @@ fn ledger_text_is_sanitised_before_it_is_stored_or_returned() {
 #[test]
 fn genius_seeds_the_deck_so_the_first_call_already_says_how_many_lenses_to_launch() {
     let p = Proj::new();
-    let mut s = start(&p, &[], &[("URIEL_FLEET_MAX", "3")]);
+    let mut s = start(&p, &["--mode", "house"], &[("URIEL_FLEET_MAX", "3")]);
     let plan = s.ok("genius_plan", json!({"idea": "why is the deck empty"}));
     let id = plan["plan"].as_str().unwrap().to_string();
     assert!(plan["deck"].as_str().unwrap().contains("launch 3 now"), "{plan}");
@@ -500,4 +516,124 @@ fn max_policy_over_stdio_reports_the_split_the_model_must_make() {
     let d = s.ok("fleet_trace", json!({"run": "m", "format": "deck"}));
     assert_eq!((d["policy"].as_str(), d["split_needed"].as_u64()), (Some("max"), Some(4)));
     assert!(d["line"].as_str().unwrap().contains("split work into 4 more independent units"));
+}
+
+fn goal_claim(owner: &str, goal: &str) -> Value {
+    json!({"id": format!("{owner}.c1"), "kind": "conjecture", "text": "G1 is the real cause", "falsifier": "f", "test": "t", "cost": "S", "goal": goal})
+}
+
+fn house_with_goals(p: &Proj) -> Session {
+    let mut s = start(p, &["--mode", "house"], &[("SEAL_MCP_FAKE_PROBE", "16000,16000")]);
+    common::need(&mut s);
+    common::chart_and_merge(&mut s, common::tiny());
+    s
+}
+
+fn finish_to_review(s: &mut Session, id: &str, bound: &str) {
+    for v in VERTICES {
+        let mut sub = r1(id, v);
+        if v == "abduce" {
+            sub["claims"][0] = goal_claim("abduce", bound);
+        }
+        s.ok("genius_submit", sub);
+    }
+    for i in 0..6 {
+        s.ok("genius_submit", r2(id, i));
+    }
+}
+
+#[test]
+fn a_killed_claim_bound_to_a_house_goal_records_a_fact_that_refutes_the_goal() {
+    let p = Proj::new();
+    let mut s = house_with_goals(&p);
+    let id = s.ok("genius_plan", json!({"idea": "why is G1 failing"}))["plan"].as_str().unwrap().to_string();
+    finish_to_review(&mut s, &id, "G1");
+    let done = s.ok("genius_submit", json!({"plan": id, "experiment": [{"claim": "abduce.c1", "outcome": "killed", "evidence": ["ran G1 test, passes without the suspect"]}]}));
+    assert_eq!(done["house"][0]["goal"], "G1");
+    assert_eq!(done["house"][0]["refuted"], true);
+    let st = s.ok("house_status", json!({}));
+    let fact = st["facts"].as_array().unwrap().iter().find(|f| f["id"] == "GX.abduce.c1").unwrap();
+    assert_eq!((fact["refutes"].as_str(), fact["by"].as_str()), (Some("G1"), Some("genius")));
+    assert!(fact["source"].as_str().unwrap().contains("ran G1 test"));
+    let g1 = st["goal_list"].as_array().unwrap().iter().find(|g| g["id"] == "G1").unwrap();
+    assert_eq!((g1["status"].as_str(), g1["blocked_reason"].as_str()), (Some("blocked"), Some("refuted")), "{g1}");
+}
+
+#[test]
+fn a_survived_claim_records_a_fact_that_does_not_refute_anything() {
+    let p = Proj::new();
+    let mut s = house_with_goals(&p);
+    let id = s.ok("genius_plan", json!({"idea": "why is G1 failing"}))["plan"].as_str().unwrap().to_string();
+    finish_to_review(&mut s, &id, "G2");
+    let done = s.ok("genius_submit", json!({"plan": id, "experiment": [{"claim": "abduce.c1", "outcome": "survived", "evidence": ["bench.txt:3"]}]}));
+    assert_eq!(done["house"][0]["refuted"], false);
+    let st = s.ok("house_status", json!({}));
+    let fact = st["facts"].as_array().unwrap().iter().find(|f| f["id"] == "GX.abduce.c1").unwrap();
+    assert!(fact["refutes"].is_null());
+    let g2 = st["goal_list"].as_array().unwrap().iter().find(|g| g["id"] == "G2").unwrap();
+    assert_ne!(g2["status"], "retired");
+}
+
+#[test]
+fn a_claim_bound_to_a_goal_that_does_not_exist_is_refused_before_anything_is_stored() {
+    let p = Proj::new();
+    let mut s = house_with_goals(&p);
+    let id = s.ok("genius_plan", json!({"idea": "x"}))["plan"].as_str().unwrap().to_string();
+    let mut sub = r1(&id, "abduce");
+    sub["claims"][0] = goal_claim("abduce", "G99");
+    assert!(s.err("genius_submit", sub.clone()).contains("unknown_goal"));
+    sub["claims"][0] = goal_claim("abduce", "G1");
+    assert_eq!(s.ok("genius_submit", sub)["accepted"], 2, "the refused attempt stored nothing");
+}
+
+#[test]
+fn a_goal_may_only_ride_on_a_conjecture_or_wild_claim_and_must_look_like_a_goal_id() {
+    let p = Proj::new();
+    let mut s = house_with_goals(&p);
+    let id = s.ok("genius_plan", json!({"idea": "x"}))["plan"].as_str().unwrap().to_string();
+    let mut obs = r1(&id, "abduce");
+    obs["claims"] = json!([{"id": "abduce.c1", "kind": "observation", "text": "saw", "evidence": ["a:1"], "goal": "G1"}]);
+    assert!(s.err("genius_submit", obs).contains("bad_field"));
+    for bad in ["../x", "G1 G2", ""] {
+        let mut sub = r1(&id, "abduce");
+        sub["claims"][0] = goal_claim("abduce", bad);
+        assert!(s.err("genius_submit", sub).contains("bad_field"), "{bad:?}");
+    }
+}
+
+#[test]
+fn unbound_experiments_touch_nothing_in_the_house() {
+    let p = Proj::new();
+    let mut s = house_with_goals(&p);
+    let id = s.ok("genius_plan", json!({"idea": "x"}))["plan"].as_str().unwrap().to_string();
+    for v in VERTICES {
+        s.ok("genius_submit", r1(&id, v));
+    }
+    for i in 0..6 {
+        s.ok("genius_submit", r2(&id, i));
+    }
+    let done = s.ok("genius_submit", json!({"plan": id, "experiment": [{"claim": "abduce.c1", "outcome": "killed", "evidence": ["x:1"]}]}));
+    assert!(done.get("house").is_none());
+    assert!(s.ok("house_status", json!({}))["facts"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn the_verdict_shows_which_house_goal_each_queued_test_is_about() {
+    let p = Proj::new();
+    let mut s = house_with_goals(&p);
+    let id = s.ok("genius_plan", json!({"idea": "x"}))["plan"].as_str().unwrap().to_string();
+    let mut verdict = Value::Null;
+    for v in VERTICES {
+        let mut sub = r1(&id, v);
+        if v == "abduce" {
+            sub["claims"][0] = goal_claim("abduce", "G1");
+        }
+        s.ok("genius_submit", sub);
+    }
+    for i in 0..6 {
+        verdict = s.ok("genius_submit", r2(&id, i))["verdict"].clone();
+    }
+    let q = verdict["test_queue"].as_array().unwrap();
+    let bound = q.iter().find(|e| e["id"] == "abduce.c1").unwrap();
+    assert_eq!(bound["goal"], "G1");
 }

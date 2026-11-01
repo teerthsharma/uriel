@@ -209,6 +209,13 @@ impl Book {
         }
     }
 
+    pub fn bound_goal(&self, plan: &str, claim: &str) -> Option<(String, String)> {
+        let st = self.plans.get(plan)?;
+        st.all_claims()
+            .find(|c| c.id == claim)
+            .and_then(|c| c.goal.clone().map(|g| (g, c.text.clone())))
+    }
+
     pub fn verdict(&self, id: &str) -> Result<Json, Error> {
         let st = self
             .plans
