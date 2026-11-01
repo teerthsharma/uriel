@@ -20,6 +20,7 @@ uriel-algo = { path = "../uriel-algo" }
 uriel-core = { path = "../uriel-core" }
 uriel-fleet = { path = "../uriel-fleet" }
 uriel-genius = { path = "../uriel-genius" }
+uriel-ledger = { path = "../uriel-ledger" }
 uriel-query = { path = "../uriel-query" }
 uriel-rag = { path = "../uriel-rag" }
 uriel-house = { path = "../uriel-house" }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde_json::{json, Value as Json};
@@ -14,10 +15,19 @@ pub const MAX_FLEET_MAX: usize = 256;
 pub struct Hub {
     fleet: Mutex<Fleet>,
     book: Mutex<Book>,
+    ledgers: Mutex<BTreeMap<String, uriel_ledger::Ledger>>,
+    dir: Option<PathBuf>,
 }
+
+const MAX_LEDGERS: usize = 16;
+const LEDGER_DIR: &str = "uriel-ledger";
 
 impl Hub {
     pub fn new(max_concurrent: usize) -> Hub {
+        Hub::with_dir(max_concurrent, None)
+    }
+
+    pub fn with_dir(max_concurrent: usize, dir: Option<PathBuf>) -> Hub {
         let limits = Limits {
             max_concurrent: max_concurrent.clamp(1, MAX_FLEET_MAX),
             ..Limits::default()
@@ -25,7 +35,77 @@ impl Hub {
         Hub {
             fleet: Mutex::new(Fleet::new(limits)),
             book: Mutex::new(Book::new()),
+            ledgers: Mutex::new(BTreeMap::new()),
+            dir,
         }
+    }
+
+    pub fn from_env_in(dir: Option<PathBuf>) -> Hub {
+        let max = std::env::var(FLEET_ENV)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(DEFAULT_FLEET_MAX);
+        Hub::with_dir(max, dir)
+    }
+
+    pub fn ledger_file(&self, name: &str) -> Option<PathBuf> {
+        self.dir.as_ref().map(|d| d.join(LEDGER_DIR).join(format!("{name}.json")))
+    }
+
+    pub(crate) fn ledgers(&self) -> MutexGuard<'_, BTreeMap<String, uriel_ledger::Ledger>> {
+        self.ledgers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn load_ledger(
+        &self,
+        map: &mut BTreeMap<String, uriel_ledger::Ledger>,
+        name: &str,
+        create: bool,
+    ) -> Result<(), String> {
+        if map.contains_key(name) {
+            return Ok(());
+        }
+        let fresh = uriel_ledger::Ledger::new(name).map_err(|e| fail(e.code(), e))?;
+        let from_disk = match self.ledger_file(name) {
+            Some(path) if path.is_file() => {
+                let bytes = std::fs::read(&path).map_err(|e| fail("io", format!("cannot read ledger: {e}")))?;
+                if bytes.len() > 1 << 20 {
+                    return Err(fail("malformed", "ledger file is larger than 1 MiB"));
+                }
+                let raw: Json = serde_json::from_slice(&bytes).map_err(|e| fail("malformed", e))?;
+                let ledger = uriel_ledger::Ledger::from_json(&raw).map_err(|e| fail(e.code(), e))?;
+                if ledger.name() != name {
+                    return Err(fail("malformed", "ledger file name does not match its content"));
+                }
+                Some(ledger)
+            }
+            _ => None,
+        };
+        let ledger = match from_disk {
+            Some(l) => l,
+            None if create => fresh,
+            None => return Err(fail("unknown_ledger", format!("no ledger '{name}': call ledger_add first"))),
+        };
+        if map.len() >= MAX_LEDGERS {
+            return Err(fail("too_many_ledgers", format!("at most {MAX_LEDGERS} ledgers are open")));
+        }
+        map.insert(name.to_string(), ledger);
+        Ok(())
+    }
+
+    pub(crate) fn persist_ledger(&self, ledger: &uriel_ledger::Ledger) -> Result<Option<PathBuf>, String> {
+        let Some(path) = self.ledger_file(ledger.name()) else { return Ok(None) };
+        let dir = path.parent().map(PathBuf::from).unwrap_or_default();
+        std::fs::create_dir_all(&dir).map_err(|e| fail("io", format!("cannot create {}: {e}", dir.display())))?;
+        let tmp = dir.join(format!("{}.json.tmp{}", ledger.name(), std::process::id()));
+        std::fs::write(&tmp, ledger.to_json().to_string()).map_err(|e| fail("io", e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        std::fs::rename(&tmp, &path).map_err(|e| fail("io", e))?;
+        Ok(Some(path))
     }
 
     pub fn from_env() -> Hub {
@@ -36,11 +116,11 @@ impl Hub {
         Hub::new(max)
     }
 
-    fn fleet(&self) -> MutexGuard<'_, Fleet> {
+    pub(crate) fn fleet(&self) -> MutexGuard<'_, Fleet> {
         self.fleet.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn book(&self) -> MutexGuard<'_, Book> {
+    pub(crate) fn book(&self) -> MutexGuard<'_, Book> {
         self.book.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -125,8 +205,8 @@ fn trace_schema() -> Json {
     object(
         json!({
             "run": str_prop("Run id."),
-            "format": {"type": "string", "enum": ["summary", "jsonl"],
-                "description": "summary (default): counts, tokens, limits and the chain head. jsonl: every event, hash-chained."}
+            "format": {"type": "string", "enum": ["summary", "jsonl", "deck"],
+                "description": "summary (default): counts, tokens, limits, the chain head and the deck. jsonl: every event, hash-chained. deck: only the observation deck, how many agents to launch now."}
         }),
         &["run"],
     )
@@ -181,6 +261,10 @@ fn fail(code: &str, message: impl std::fmt::Display) -> String {
     json!({"error": code, "message": message.to_string()}).to_string()
 }
 
+pub(crate) fn deck_line(fleet: &Fleet, run: &str) -> String {
+    fleet.deck(run).map_or_else(|_| "deck: no such run".to_string(), |d| d.line())
+}
+
 pub fn call(ctx: &Context, name: &str, args: &Json) -> ToolResult {
     let hub = &ctx.agents;
     match name {
@@ -207,7 +291,11 @@ fn plan(hub: &Hub, args: &Json) -> ToolResult {
         .map_err(|e| fail(e.code(), e))?;
     let mut json = plan.to_json();
     json["limits"] = hub.fleet().limits().to_json();
+    let id = plan.id.clone();
     hub.book().open(plan);
+    let mut fleet = hub.fleet();
+    fleet.seed_backlog(&id, 6).map_err(|e| fail("fleet", e))?;
+    json["deck"] = Json::String(deck_line(&fleet, &id));
     Ok(json.to_string())
 }
 
@@ -244,6 +332,11 @@ fn submit(hub: &Hub, args: &Json) -> ToolResult {
             if let Some(agent) = agent.filter(|_| is_claims) {
                 json["fleet"] = trace_submission(hub, plan, agent, args, &done.report);
             }
+            let mut fleet = hub.fleet();
+            if done.round2_ready {
+                let _ = fleet.enqueue(plan, 6);
+            }
+            json["deck"] = Json::String(deck_line(&fleet, plan));
             Ok(json.to_string())
         }
         Err(e) => {
@@ -294,6 +387,7 @@ fn admit(hub: &Hub, args: &Json) -> ToolResult {
         .map_err(|e| fail("admit_failed", e))?;
     let mut json = admission.to_json();
     json["limits"] = fleet.limits().to_json();
+    json["deck"] = Json::String(deck_line(&fleet, run));
     Ok(json.to_string())
 }
 
@@ -311,7 +405,7 @@ fn event(hub: &Hub, args: &Json) -> ToolResult {
     let mut fleet = hub.fleet();
     if kind == "reap" {
         let n = fleet.reap(run).map_err(|e| fail("reap_failed", e))?;
-        return Ok(json!({"run": run, "reaped": n}).to_string());
+        return Ok(json!({"run": run, "reaped": n, "deck": deck_line(&fleet, run)}).to_string());
     }
     let agent = agent.ok_or_else(|| "'agent' is required unless kind is reap".to_string())?;
     if kind == "end" {
@@ -322,7 +416,7 @@ fn event(hub: &Hub, args: &Json) -> ToolResult {
             .ok_or_else(|| "'status' must be done, failed or cancelled".to_string())?;
         let note = args.get("note").and_then(Json::as_str).unwrap_or("");
         let ev = fleet.end(run, agent, status, note).map_err(|e| fail("event_failed", e))?;
-        return Ok(json!({"event": ev.to_json()}).to_string());
+        return Ok(json!({"event": ev.to_json(), "deck": deck_line(&fleet, run)}).to_string());
     }
     let kind = Kind::parse(kind)
         .filter(|k| matches!(k, Kind::Llm | Kind::Tool | Kind::Mark))
@@ -348,7 +442,7 @@ fn event(hub: &Hub, args: &Json) -> ToolResult {
         attrs,
     };
     let (ev, report) = fleet.observe(run, agent, obs).map_err(|e| fail("event_failed", e))?;
-    Ok(json!({"event": ev.to_json(), "sanitised": report.to_json()}).to_string())
+    Ok(json!({"event": ev.to_json(), "sanitised": report.to_json(), "deck": deck_line(&fleet, run)}).to_string())
 }
 
 fn trace(hub: &Hub, args: &Json) -> ToolResult {
@@ -360,6 +454,10 @@ fn trace(hub: &Hub, args: &Json) -> ToolResult {
             .map(|s| s.to_string())
             .map_err(|e| fail("unknown_run", e)),
         "jsonl" => fleet.trace_jsonl(run).map_err(|e| fail("unknown_run", e)),
-        _ => Err("'format' must be \"summary\" or \"jsonl\"".into()),
+        "deck" => fleet
+            .deck(run)
+            .map(|d| d.to_json().to_string())
+            .map_err(|e| fail("unknown_run", e)),
+        _ => Err("'format' must be \"summary\", \"jsonl\" or \"deck\"".into()),
     }
 }

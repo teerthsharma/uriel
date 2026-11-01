@@ -131,7 +131,7 @@ impl Trace {
         }
     }
 
-    pub fn push(&mut self, mut ev: Event) -> &Event {
+    pub fn push(&mut self, mut ev: Event) -> Event {
         ev.seq = self.next_seq;
         self.next_seq += 1;
         ev.prev = self
@@ -139,6 +139,7 @@ impl Trace {
             .back()
             .map_or_else(|| self.anchor.clone(), |last| last.hash.clone());
         ev.hash = ev.digest();
+        let stamped = ev.clone();
         self.events.push_back(ev);
         while self.events.len() > self.cap {
             if let Some(old) = self.events.pop_front() {
@@ -146,7 +147,7 @@ impl Trace {
                 self.dropped += 1;
             }
         }
-        self.events.back().expect("an event was just pushed")
+        stamped
     }
 
     pub fn len(&self) -> usize {

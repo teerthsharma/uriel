@@ -1032,6 +1032,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "uriel-ledger"
+version = "0.2.1"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "uriel-fleet",
+]
+
+[[package]]
 name = "uriel-mcp"
 version = "0.2.1"
 dependencies = [
@@ -1046,6 +1056,7 @@ dependencies = [
  "uriel-fleet",
  "uriel-genius",
  "uriel-house",
+ "uriel-ledger",
  "uriel-place",
  "uriel-query",
  "uriel-rag",

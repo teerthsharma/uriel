@@ -21,6 +21,7 @@ members = [
     "crates/uriel-terse",
     "crates/uriel-fleet",
     "crates/uriel-genius",
+    "crates/uriel-ledger",
 ]
 
 [workspace.package]

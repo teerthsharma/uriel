@@ -5,6 +5,7 @@ pub mod compact;
 pub mod config;
 pub mod db;
 pub mod house_tools;
+pub mod ledger_tools;
 pub mod memory;
 pub mod place_tools;
 pub mod placement;
@@ -51,7 +52,7 @@ pub fn build_server(cfg: &Config) -> Result<Server, String> {
         format: cfg.format,
         session: session::Session::for_budget(cfg.memory),
         placement: placement::PlaceState::new(cfg.placement, persist_dir(cfg)),
-        agents: agent_tools::Hub::from_env(),
+        agents: agent_tools::Hub::from_env_in(persist_dir(cfg)),
     };
     let idle = (cfg.idle_release_secs > 0).then(|| Duration::from_secs(cfg.idle_release_secs));
     Ok(Server::new(ctx, cfg.token_limit, idle))

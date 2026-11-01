@@ -204,7 +204,7 @@ fn tier_mode_serves_full_briefs_and_fork_mode_serves_the_shared_text_once_then_l
         tier_bytes += plan.brief1(v).len();
         fork_bytes += lens.len();
     }
-    assert!(fork_bytes * 2 < tier_bytes * 1, "fork {fork_bytes} against tier {tier_bytes}");
+    assert!(fork_bytes * 2 < tier_bytes, "fork {fork_bytes} against tier {tier_bytes}");
 }
 
 #[test]
@@ -591,7 +591,7 @@ const DEFAULT_SERVER_OUTPUT_LIMIT: usize = 20_000;
 fn maximal_claim(owner: &str, round: char, n: usize, attack: Option<&str>) -> Json {
     let mut c = json!({
         "id": format!("{owner}.{round}{n}"),
-        "kind": if n % 2 == 0 { "wild" } else { "conjecture" },
+        "kind": if n.is_multiple_of(2) { "wild" } else { "conjecture" },
         "text": "t".repeat(400), "falsifier": "f".repeat(240), "test": "x".repeat(240),
         "cost": "S", "confidence": 0.5,
         "evidence": (0..6).map(|i| format!("{}{}", "e".repeat(238), i)).collect::<Vec<_>>()

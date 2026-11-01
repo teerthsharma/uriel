@@ -334,7 +334,7 @@ const MODE_TOOLS: &[&str] = &[
     "tier_stats",
 ];
 
-const AGENT_TOOLS: &[&str] = &["genius_plan", "genius_brief", "genius_submit", "fleet_admit", "fleet_event", "fleet_trace"];
+const AGENT_TOOLS: &[&str] = &["genius_plan", "genius_brief", "genius_submit", "fleet_admit", "fleet_event", "fleet_trace", "ledger_add", "ledger_next", "ledger_done"];
 
 const HOUSE_TOOLS: &[&str] = &[
     "house_need",

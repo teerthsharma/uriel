@@ -247,3 +247,127 @@ fn limits_are_clamped_so_zero_cannot_deadlock_the_fleet() {
     let l = f.limits();
     assert!(l.max_concurrent >= 1 && l.max_depth >= 1 && l.max_total >= 1 && l.max_tokens >= 1 && l.max_events >= 16 && l.max_runs >= 1);
 }
+
+fn deck(f: &Fleet) -> uriel_fleet::Deck {
+    f.deck("r1").unwrap()
+}
+
+#[test]
+fn a_request_over_the_cap_leaves_a_backlog_and_the_deck_says_to_launch_as_slots_free() {
+    let mut f = Fleet::new(limits(4, 2, 64));
+    admit(&mut f, Want::Count(7));
+    let d = deck(&f);
+    assert_eq!((d.running, d.backlog, d.launch_now), (4, 3, 0));
+    assert_eq!(d.status.name(), "saturated");
+    f.end("r1", "a1", Status::Done, "").unwrap();
+    f.end("r1", "a2", Status::Done, "").unwrap();
+    let d = deck(&f);
+    assert_eq!((d.free, d.launch_now), (2, 2));
+    assert_eq!(d.status.name(), "underutilised");
+    assert!(d.line().contains("launch 2 now"));
+}
+
+#[test]
+fn admitting_the_launchable_units_drains_the_backlog_and_the_deck_goes_quiet() {
+    let mut f = Fleet::new(limits(8, 2, 64));
+    f.seed_backlog("r1", 6).unwrap();
+    assert_eq!(deck(&f).launch_now, 6);
+    admit(&mut f, Want::Count(6));
+    let d = deck(&f);
+    assert_eq!((d.backlog, d.launch_now), (0, 0));
+    assert_eq!(d.status.name(), "working");
+}
+
+#[test]
+fn the_deck_never_asks_for_more_than_the_free_slots_the_lifetime_total_or_the_backlog() {
+    let mut f = Fleet::new(limits(8, 2, 5));
+    f.enqueue("r1", 100).unwrap();
+    assert_eq!(deck(&f).launch_now, 5);
+    admit(&mut f, Want::Count(3));
+    let d = deck(&f);
+    assert!(d.launch_now <= d.free && d.launch_now <= 2, "{d:?}");
+}
+
+#[test]
+fn seeding_a_backlog_twice_does_not_double_count_and_never_overwrites_started_work() {
+    let mut f = Fleet::new(limits(8, 2, 64));
+    f.seed_backlog("r1", 6).unwrap();
+    f.seed_backlog("r1", 6).unwrap();
+    assert_eq!(deck(&f).backlog, 6);
+    admit(&mut f, Want::Count(2));
+    f.seed_backlog("r1", 6).unwrap();
+    assert_eq!(deck(&f).backlog, 4);
+    f.enqueue("r1", 6).unwrap();
+    assert_eq!(deck(&f).backlog, 10);
+}
+
+#[test]
+fn max_policy_is_sticky_and_asks_for_more_independent_units_when_the_backlog_is_short() {
+    let mut f = Fleet::new(limits(8, 2, 64));
+    f.seed_backlog("r1", 3).unwrap();
+    assert_eq!(admit(&mut f, Want::Max).granted.len(), 8);
+    for id in ["a1", "a2", "a3", "a4", "a5"] {
+        f.end("r1", id, Status::Done, "").unwrap();
+    }
+    f.enqueue("r1", 2).unwrap();
+    let d = deck(&f);
+    assert_eq!(d.policy.name(), "max");
+    assert_eq!((d.free, d.launch_now, d.split_needed), (5, 2, 3));
+    assert_eq!(d.status.name(), "underutilised");
+    assert!(d.line().contains("split work into 3 more independent units"));
+}
+
+#[test]
+fn demand_policy_never_asks_for_a_split() {
+    let mut f = Fleet::new(limits(8, 2, 64));
+    f.seed_backlog("r1", 2).unwrap();
+    admit(&mut f, Want::Count(1));
+    assert_eq!(deck(&f).split_needed, 0);
+}
+
+#[test]
+fn an_exhausted_budget_blocks_the_deck_instead_of_asking_for_launches() {
+    let mut f = Fleet::new(Limits { max_tokens: 10, ..Limits::default() });
+    admit(&mut f, Want::Count(1));
+    f.observe("r1", "a1", Obs { kind: Some(Kind::Llm), name: "m".into(), tokens_in: 50, ..Obs::default() }).unwrap();
+    f.enqueue("r1", 4).unwrap();
+    let d = deck(&f);
+    assert_eq!(d.launch_now, 0);
+    assert_eq!(d.status.name(), "blocked:token_budget");
+}
+
+#[test]
+fn slot_ticks_lost_while_work_waited_are_counted_and_idle_time_without_work_is_not() {
+    let mut f = Fleet::new(limits(4, 2, 64));
+    admit(&mut f, Want::Count(1));
+    for _ in 0..10 {
+        f.observe("r1", "a1", Obs { name: "idle".into(), ..Obs::default() }).unwrap();
+    }
+    assert_eq!(deck(&f).lost_permille, 0);
+    f.enqueue("r1", 3).unwrap();
+    for _ in 0..10 {
+        f.observe("r1", "a1", Obs { name: "starved".into(), ..Obs::default() }).unwrap();
+    }
+    let d = deck(&f);
+    assert!(d.lost_permille > 300, "{d:?}");
+    assert!(d.busy_permille > 0 && d.busy_permille <= 1000);
+}
+
+#[test]
+fn deck_accounting_is_identical_for_identical_call_sequences() {
+    let run = || {
+        let mut f = Fleet::new(limits(4, 2, 64));
+        f.seed_backlog("r1", 6).unwrap();
+        admit(&mut f, Want::Count(2));
+        f.observe("r1", "a1", Obs { name: "x".into(), ..Obs::default() }).unwrap();
+        f.end("r1", "a2", Status::Done, "").unwrap();
+        deck(&f)
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn an_unknown_run_has_no_deck() {
+    let f = Fleet::new(Limits::default());
+    assert!(matches!(f.deck("nope"), Err(Error::UnknownRun(_))));
+}

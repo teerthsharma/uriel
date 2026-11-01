@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 const VERTICES: [&str; 6] = ["abduce", "analogize", "question", "refute", "eliminate", "monitor"];
 const NEW_TOOLS: [&str; 6] = ["genius_plan", "genius_brief", "genius_submit", "fleet_admit", "fleet_event", "fleet_trace"];
+const LEDGER_TOOLS: [&str; 3] = ["ledger_add", "ledger_next", "ledger_done"];
 
 fn start(p: &Proj, extra: &[&str], envs: &[(&str, &str)]) -> Session {
     let mut args = vec!["--root".to_string(), p.root(), "--in-memory".to_string()];
@@ -83,14 +84,22 @@ fn prompt_errors_are_typed_invalid_params() {
 
 #[test]
 fn the_six_new_tools_are_listed_in_both_modes_and_survive_read_only() {
-    for (extra, base) in [(vec![], 27usize), (vec!["--mode", "house"], 41), (vec!["--read-only"], 15), (vec!["--mode", "house", "--read-only"], 20)] {
+    for (extra, base, ledger) in [
+        (vec![], 27usize, 3usize),
+        (vec!["--mode", "house"], 41, 3),
+        (vec!["--read-only"], 15, 0),
+        (vec!["--mode", "house", "--read-only"], 20, 0),
+    ] {
         let p = Proj::new();
         let mut s = start(&p, &extra, &[]);
         let names = s.names();
         for t in NEW_TOOLS {
             assert!(names.iter().any(|n| n == t), "{t} missing with {extra:?}");
         }
-        assert_eq!(names.len(), base + 6, "{extra:?}");
+        for t in LEDGER_TOOLS {
+            assert_eq!(names.iter().any(|n| n == t), ledger > 0, "{t} with {extra:?}");
+        }
+        assert_eq!(names.len(), base + 6 + ledger, "{extra:?}");
     }
 }
 
@@ -307,4 +316,188 @@ fn every_new_tool_has_an_object_schema_with_the_right_required_fields_and_no_ext
         }
         assert_eq!(t["annotations"]["readOnlyHint"], true, "{name}");
     }
+}
+
+fn persistent(dir: &std::path::Path, envs: &[(&str, &str)]) -> Session {
+    let db = dir.join("g.uriel");
+    Session::start(&["--db".to_string(), db.display().to_string()], envs)
+}
+
+fn goals(spec: &[(&str, &[&str])]) -> Value {
+    json!(spec.iter().map(|(id, needs)| json!({"id": id, "title": format!("do {id}"), "needs": needs})).collect::<Vec<_>>())
+}
+
+#[test]
+fn the_ledger_frontier_feeds_the_deck_which_asks_for_exactly_the_free_slots_and_refills_as_agents_finish() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = persistent(dir.path(), &[("URIEL_FLEET_MAX", "4")]);
+    let all: Vec<String> = (0..10).map(|i| format!("g{i}")).collect();
+    let spec: Vec<(&str, &[&str])> = all.iter().map(|g| (g.as_str(), &[][..])).collect();
+    s.ok("ledger_add", json!({"ledger": "w", "goals": goals(&spec)}));
+    let first = s.ok("ledger_next", json!({"ledger": "w"}));
+    assert_eq!(first["issued"].as_array().unwrap().len(), 4);
+    assert!(first["deck"].as_str().unwrap().contains("launch 4 now"), "{first}");
+    let admitted = s.ok("fleet_admit", json!({"run": "w", "count": 4}));
+    assert_eq!(admitted["granted"].as_array().unwrap().len(), 4);
+    assert!(admitted["deck"].as_str().unwrap().starts_with("deck saturated: launch none"), "{admitted}");
+    s.ok("fleet_event", json!({"run": "w", "agent": "a1", "kind": "end"}));
+    let id = first["issued"][0]["id"].as_str().unwrap();
+    s.ok("ledger_done", json!({"ledger": "w", "id": id, "outcome": "done", "result": "ok"}));
+    let second = s.ok("ledger_next", json!({"ledger": "w"}));
+    assert_eq!(second["issued"].as_array().unwrap().len(), 1, "one slot was freed");
+    assert!(second["deck"].as_str().unwrap().contains("launch 1 now"), "{second}");
+}
+
+#[test]
+fn dependent_goals_open_layer_by_layer_and_a_failed_goal_blocks_its_subtree() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = persistent(dir.path(), &[]);
+    s.ok("ledger_add", json!({"ledger": "d", "goals": goals(&[("a", &[]), ("b", &["a"]), ("c", &["a"]), ("e", &["b"])])}));
+    let one = s.ok("ledger_next", json!({"ledger": "d"}));
+    assert_eq!(one["issued"], json!([{"id": "a"}]));
+    s.ok("ledger_done", json!({"ledger": "d", "id": "a", "outcome": "failed", "result": "boom"}));
+    let sum = s.ok("ledger_next", json!({"ledger": "d"}));
+    assert_eq!(sum["issued"], json!([]));
+    assert_eq!(sum["summary"]["blocked"], 3);
+}
+
+#[test]
+fn the_python_script_renders_the_prompts_for_the_goals_the_server_issued_and_caches_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = persistent(dir.path(), &[]);
+    s.ok("ledger_add", json!({"ledger": "p", "goals": goals(&[("a", &[]), ("b", &["a"])])}));
+    s.ok("ledger_next", json!({"ledger": "p"}));
+    s.ok("ledger_done", json!({"ledger": "p", "id": "a", "outcome": "done", "result": "found it in src/x.rs:9"}));
+    let n = s.ok("ledger_next", json!({"ledger": "p"}));
+    let cmd = n["prompts"].as_str().unwrap();
+    assert!(cmd.starts_with("python3 scripts/ledger_next.py "));
+    let file = n["file"].as_str().unwrap();
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/ledger_next.py");
+    let out = std::process::Command::new("python3").arg("-I").arg(&script).arg(file).arg("--issued").output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ready"][0]["id"], "b");
+    let text = std::fs::read_to_string(v["ready"][0]["path"].as_str().unwrap()).unwrap();
+    assert!(text.contains("GOAL b: do b") && text.contains("found it in src/x.rs:9") && text.contains("<<uriel-data "));
+}
+
+#[test]
+fn a_ledger_survives_a_server_restart_and_its_file_is_private() {
+    let dir = tempfile::tempdir().unwrap();
+    let file;
+    {
+        let mut s = persistent(dir.path(), &[]);
+        let added = s.ok("ledger_add", json!({"ledger": "r", "goals": goals(&[("a", &[]), ("b", &["a"])])}));
+        file = added["file"].as_str().unwrap().to_string();
+        s.ok("ledger_next", json!({"ledger": "r"}));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let mut s = persistent(dir.path(), &[]);
+    let done = s.ok("ledger_done", json!({"ledger": "r", "id": "a", "outcome": "done", "result": "x"}));
+    assert_eq!(done["summary"]["done"], 1);
+    assert_eq!(s.ok("ledger_next", json!({"ledger": "r"}))["issued"], json!([{"id": "b"}]));
+    assert!(std::fs::read_dir(std::path::Path::new(&file).parent().unwrap()).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().contains(".tmp")));
+}
+
+#[test]
+fn a_tampered_ledger_file_is_refused_instead_of_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    let file;
+    {
+        let mut s = persistent(dir.path(), &[]);
+        file = s.ok("ledger_add", json!({"ledger": "t", "goals": goals(&[("a", &[]), ("b", &["a"])])}))["file"].as_str().unwrap().to_string();
+    }
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    v["goals"][0]["needs"] = json!(["b"]);
+    std::fs::write(&file, v.to_string()).unwrap();
+    let mut s = persistent(dir.path(), &[]);
+    assert!(s.err("ledger_next", json!({"ledger": "t"})).contains("cycle"));
+    std::fs::write(&file, "not json").unwrap();
+    let mut s = persistent(dir.path(), &[]);
+    assert!(s.err("ledger_next", json!({"ledger": "t"})).contains("malformed"));
+}
+
+#[test]
+fn ledger_errors_are_typed_and_names_cannot_escape_the_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = persistent(dir.path(), &[]);
+    for bad in ["../x", "a/b", "", "a b", "..\\x"] {
+        let e = s.err("ledger_add", json!({"ledger": bad, "goals": goals(&[("a", &[])])}));
+        assert!(e.contains("bad_id") || e.contains("'ledger'"), "{bad:?}: {e}");
+    }
+    assert!(s.err("ledger_next", json!({"ledger": "nope"})).contains("unknown_ledger"));
+    s.ok("ledger_add", json!({"ledger": "e", "goals": goals(&[("a", &[])])}));
+    assert!(s.err("ledger_done", json!({"ledger": "e", "id": "a", "outcome": "done"})).contains("not_issued"));
+    assert!(s.err("ledger_add", json!({"ledger": "e", "goals": goals(&[("x", &["y"]), ("y", &["x"])])})).contains("cycle"));
+    assert!(s.err("ledger_add", json!({"ledger": "e", "goals": goals(&[("q", &["ghost"])])})).contains("unknown_need"));
+    assert!(s.err("ledger_done", json!({"ledger": "e", "id": "a", "outcome": "maybe"})).contains("'outcome'"));
+    let files: Vec<_> = std::fs::read_dir(dir.path().join("uriel-ledger")).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+    assert_eq!(files, vec!["e.json"]);
+}
+
+#[test]
+fn at_most_sixteen_ledgers_are_open_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = persistent(dir.path(), &[]);
+    for i in 0..16 {
+        s.ok("ledger_add", json!({"ledger": format!("l{i}"), "goals": goals(&[("a", &[])])}));
+    }
+    assert!(s.err("ledger_add", json!({"ledger": "l16", "goals": goals(&[("a", &[])])})).contains("too_many_ledgers"));
+}
+
+#[test]
+fn the_ledger_works_in_memory_without_a_file_and_says_so() {
+    let p = Proj::new();
+    let mut s = start(&p, &[], &[]);
+    let added = s.ok("ledger_add", json!({"ledger": "m", "goals": goals(&[("a", &[])])}));
+    assert!(added["file"].is_null());
+    let n = s.ok("ledger_next", json!({"ledger": "m"}));
+    assert_eq!(n["issued"], json!([{"id": "a"}]));
+    assert!(n["prompts"].as_str().unwrap().starts_with("no file"));
+}
+
+#[test]
+fn ledger_text_is_sanitised_before_it_is_stored_or_returned() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = persistent(dir.path(), &[]);
+    let g = json!([{"id": "a", "title": "go \u{1b}[31m sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789"}]);
+    let added = s.ok("ledger_add", json!({"ledger": "s", "goals": g}));
+    assert_eq!(added["sanitised"]["secrets"]["anthropic_key"], 1);
+    let disk = std::fs::read_to_string(added["file"].as_str().unwrap()).unwrap();
+    assert!(!disk.contains("sk-ant-api03") && !disk.contains('\u{1b}'));
+}
+
+#[test]
+fn genius_seeds_the_deck_so_the_first_call_already_says_how_many_lenses_to_launch() {
+    let p = Proj::new();
+    let mut s = start(&p, &[], &[("URIEL_FLEET_MAX", "3")]);
+    let plan = s.ok("genius_plan", json!({"idea": "why is the deck empty"}));
+    let id = plan["plan"].as_str().unwrap().to_string();
+    assert!(plan["deck"].as_str().unwrap().contains("launch 3 now"), "{plan}");
+    let again = s.ok("genius_plan", json!({"idea": "why is the deck empty"}));
+    assert_eq!(again["deck"], plan["deck"], "re-planning must not double the backlog");
+    let g = s.ok("fleet_admit", json!({"run": id, "count": 3}));
+    assert!(g["deck"].as_str().unwrap().contains("launch none"), "{g}");
+    s.ok("fleet_event", json!({"run": id, "agent": "a1", "kind": "end"}));
+    let sum = s.ok("fleet_trace", json!({"run": id, "format": "deck"}));
+    assert_eq!((sum["backlog"].as_u64(), sum["launch_now"].as_u64()), (Some(3), Some(1)));
+    assert_eq!(s.ok("fleet_trace", json!({"run": id}))["deck"]["launch_now"], 1);
+}
+
+#[test]
+fn max_policy_over_stdio_reports_the_split_the_model_must_make() {
+    let p = Proj::new();
+    let mut s = start(&p, &[], &[("URIEL_FLEET_MAX", "6")]);
+    let a = s.ok("fleet_admit", json!({"run": "m", "max": true}));
+    assert_eq!(a["granted"].as_array().unwrap().len(), 6);
+    for id in ["a1", "a2", "a3", "a4"] {
+        s.ok("fleet_event", json!({"run": "m", "agent": id, "kind": "end"}));
+    }
+    let d = s.ok("fleet_trace", json!({"run": "m", "format": "deck"}));
+    assert_eq!((d["policy"].as_str(), d["split_needed"].as_u64()), (Some("max"), Some(4)));
+    assert!(d["line"].as_str().unwrap().contains("split work into 4 more independent units"));
 }

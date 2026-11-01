@@ -140,15 +140,134 @@ struct Agent {
     tokens: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Launch {
+    Demand,
+    Max,
+}
+
+impl Launch {
+    pub fn name(self) -> &'static str {
+        match self {
+            Launch::Demand => "demand",
+            Launch::Max => "max",
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Run {
     agents: BTreeMap<String, Agent>,
     spawned: usize,
     tokens: u64,
     trace: Trace,
+    backlog: usize,
+    policy: Launch,
+    ticks: u64,
+    busy: u64,
+    lost: u64,
+    cap_ticks: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeckStatus {
+    Drained,
+    Saturated,
+    Underutilised,
+    Working,
+    Blocked(Deny),
+}
+
+impl DeckStatus {
+    pub fn name(self) -> String {
+        match self {
+            DeckStatus::Drained => "drained".into(),
+            DeckStatus::Saturated => "saturated".into(),
+            DeckStatus::Underutilised => "underutilised".into(),
+            DeckStatus::Working => "working".into(),
+            DeckStatus::Blocked(d) => format!("blocked:{}", d.name()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deck {
+    pub run: String,
+    pub policy: Launch,
+    pub cap: usize,
+    pub running: usize,
+    pub free: usize,
+    pub backlog: usize,
+    pub launch_now: usize,
+    pub split_needed: usize,
+    pub status: DeckStatus,
+    pub ticks: u64,
+    pub lost_permille: u64,
+    pub busy_permille: u64,
+}
+
+impl Deck {
+    pub fn line(&self) -> String {
+        let act = if self.launch_now > 0 {
+            format!("launch {} now", self.launch_now)
+        } else {
+            "launch none".to_string()
+        };
+        let split = if self.split_needed > 0 {
+            format!(", split work into {} more independent units", self.split_needed)
+        } else {
+            String::new()
+        };
+        format!(
+            "deck {}: {act}{split} (running {}/{}, backlog {}, lost {}\u{2030} of slot-ticks)",
+            self.status.name(),
+            self.running,
+            self.cap,
+            self.backlog,
+            self.lost_permille
+        )
+    }
+
+    pub fn to_json(&self) -> Json {
+        json!({
+            "run": self.run,
+            "status": self.status.name(),
+            "policy": self.policy.name(),
+            "cap": self.cap,
+            "running": self.running,
+            "free": self.free,
+            "backlog": self.backlog,
+            "launch_now": self.launch_now,
+            "split_needed": self.split_needed,
+            "ticks": self.ticks,
+            "busy_permille": self.busy_permille,
+            "lost_permille": self.lost_permille,
+            "line": self.line()
+        })
+    }
 }
 
 impl Run {
+    fn room(&self, limits: &Limits) -> (usize, Option<Deny>) {
+        let free = limits.max_concurrent.saturating_sub(self.running());
+        let left = limits.max_total.saturating_sub(self.spawned);
+        if self.tokens >= limits.max_tokens {
+            return (0, Some(Deny::TokenBudget));
+        }
+        if left == 0 {
+            return (0, Some(Deny::Total));
+        }
+        (free.min(left), None)
+    }
+
+    fn tick(&mut self, limits: &Limits) {
+        let (room, _) = self.room(limits);
+        self.ticks += 1;
+        self.cap_ticks += limits.max_concurrent as u64;
+        self.busy += self.running() as u64;
+        self.lost += room.min(self.backlog) as u64;
+    }
+
     fn running(&self) -> usize {
         self.agents
             .values()
@@ -245,6 +364,12 @@ impl Fleet {
                 spawned: 0,
                 tokens: 0,
                 trace: Trace::new(self.limits.max_events),
+                backlog: 0,
+                policy: Launch::Demand,
+                ticks: 0,
+                busy: 0,
+                lost: 0,
+                cap_ticks: 0,
             },
         );
         self.order.push_back(run.to_string());
@@ -270,6 +395,10 @@ impl Fleet {
         let role = label(role);
         let tier = label(tier);
         let r = self.run_mut(run)?;
+        r.tick(&limits);
+        if want == Want::Max {
+            r.policy = Launch::Max;
+        }
         let depth = match parent {
             None => 1,
             Some(p) => match r.agents.get(p) {
@@ -322,10 +451,12 @@ impl Fleet {
             r.trace.push(ev);
             granted.push(id);
         }
+        let deferred = requested.map_or(0, |n| n - granted_n);
+        r.backlog = r.backlog.saturating_sub(granted_n).max(deferred);
         Ok(Admission {
             run: run.to_string(),
             requested,
-            deferred: requested.map_or(0, |n| n - granted_n),
+            deferred,
             deny: binding,
             free_after: limits.max_concurrent.saturating_sub(r.running()),
             granted,
@@ -333,8 +464,10 @@ impl Fleet {
     }
 
     pub fn observe(&mut self, run: &str, agent: &str, obs: Obs) -> Result<(Event, Report), Error> {
-        let max_tokens = self.limits.max_tokens;
+        let limits = self.limits.clone();
+        let max_tokens = limits.max_tokens;
         let r = self.run_mut(run)?;
+        r.tick(&limits);
         let status = r
             .agents
             .get(agent)
@@ -362,7 +495,7 @@ impl Fleet {
         }
         r.tokens = r.tokens.saturating_add(spent);
         let over = r.tokens > max_tokens;
-        let out = r.trace.push(ev).clone();
+        let out = r.trace.push(ev);
         if over {
             let mut warn = Event::new(run, agent, Kind::Mark, "token_budget_exceeded");
             warn.status = Some("over_budget".to_string());
@@ -372,7 +505,9 @@ impl Fleet {
     }
 
     pub fn end(&mut self, run: &str, agent: &str, status: Status, note: &str) -> Result<Event, Error> {
+        let limits = self.limits.clone();
         let r = self.run_mut(run)?;
+        r.tick(&limits);
         let a = r
             .agents
             .get_mut(agent)
@@ -387,11 +522,13 @@ impl Fleet {
         if !note.is_empty() {
             ev.attrs.insert("note".to_string(), sanitize(note, &Policy::new(ATTR_BYTES)).text);
         }
-        Ok(r.trace.push(ev).clone())
+        Ok(r.trace.push(ev))
     }
 
     pub fn reap(&mut self, run: &str) -> Result<usize, Error> {
+        let limits = self.limits.clone();
         let r = self.run_mut(run)?;
+        r.tick(&limits);
         let stuck: Vec<String> = r
             .agents
             .iter()
@@ -407,6 +544,60 @@ impl Fleet {
             r.trace.push(ev);
         }
         Ok(stuck.len())
+    }
+
+    pub fn enqueue(&mut self, run: &str, units: usize) -> Result<(), Error> {
+        self.open(run)?;
+        let r = self.run_mut(run)?;
+        r.backlog = r.backlog.saturating_add(units);
+        Ok(())
+    }
+
+    pub fn seed_backlog(&mut self, run: &str, units: usize) -> Result<(), Error> {
+        self.open(run)?;
+        let r = self.run_mut(run)?;
+        if r.spawned == 0 && r.backlog == 0 {
+            r.backlog = units;
+        }
+        Ok(())
+    }
+
+    pub fn deck(&self, run: &str) -> Result<Deck, Error> {
+        let r = self
+            .runs
+            .get(run)
+            .ok_or_else(|| Error::UnknownRun(run.to_string()))?;
+        let (room, blocked) = r.room(&self.limits);
+        let running = r.running();
+        let free = self.limits.max_concurrent.saturating_sub(running);
+        let launch_now = room.min(r.backlog);
+        let split_needed = if r.policy == Launch::Max { room - launch_now } else { 0 };
+        let status = if let Some(d) = blocked.filter(|_| r.backlog > 0 || r.policy == Launch::Max) {
+            DeckStatus::Blocked(d)
+        } else if launch_now > 0 || split_needed > 0 {
+            DeckStatus::Underutilised
+        } else if free == 0 {
+            DeckStatus::Saturated
+        } else if running == 0 && r.backlog == 0 {
+            DeckStatus::Drained
+        } else {
+            DeckStatus::Working
+        };
+        let permille = |n: u64| n.saturating_mul(1000).checked_div(r.cap_ticks).unwrap_or(0);
+        Ok(Deck {
+            run: run.to_string(),
+            policy: r.policy,
+            cap: self.limits.max_concurrent,
+            running,
+            free,
+            backlog: r.backlog,
+            launch_now,
+            split_needed,
+            status,
+            ticks: r.ticks,
+            lost_permille: permille(r.lost),
+            busy_permille: permille(r.busy),
+        })
     }
 
     pub fn trace_jsonl(&self, run: &str) -> Result<String, Error> {
@@ -437,6 +628,7 @@ impl Fleet {
             "events": r.trace.len(),
             "dropped": r.trace.dropped(),
             "chain_ok": r.trace.verify().is_ok(),
+            "deck": self.deck(run).map(|d| d.to_json()).unwrap_or(Json::Null),
             "head": r.trace.head(),
             "limits": self.limits.to_json()
         }))

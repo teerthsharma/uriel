@@ -6,3 +6,5 @@ docs/HOUSE-SEAL.md
 *.pre-modes
 *.pre-*
 
+prompt-cache/
+uriel-ledger/
