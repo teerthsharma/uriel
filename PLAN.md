@@ -109,7 +109,7 @@ Phase 1 (building) and the Phase 2 items that gate a release (name, repository, 
 
 ## H. Verification and hygiene
 
-- [x] H1 `clippy.toml` (msrv 1.90) and `deny.toml` (licences, bans, sources; advisory database offline) at the workspace root. `cargo clippy --workspace --all-targets --no-deps -- -D warnings` exits clean and `cargo deny check licenses bans sources` is ok at `7d74e6c`; advisories are unchecked because the database is not available offline
+- [x] H1 `clippy.toml` (msrv 1.95; was 1.90, but the sysinfo 0.39 dependency needs 1.95, found by the msrv CI job) and `deny.toml` (licences, bans, sources; advisory database offline) at the workspace root. `cargo clippy --workspace --all-targets --no-deps -- -D warnings` exits clean and `cargo deny check licenses bans sources` is ok at `7d74e6c`; advisories are unchecked because the database is not available offline
 - [x] H2 Criterion benches per tier operation (`crates/uriel-bench/benches/`) with a regression ceiling asserted in `crates/uriel-bench/tests/ceilings.rs` against `ceilings.json` (factor 5.0)
 - [x] H4 Workspace gate: see the header of this file
 
