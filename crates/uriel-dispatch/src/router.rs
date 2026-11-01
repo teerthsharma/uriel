@@ -218,7 +218,8 @@ impl Router {
         let mut out = std::collections::BTreeMap::new();
         for t in self.tickets.values() {
             let live = t.status == Status::Open
-                && (t.slot.is_some() || matches!(t.phase, Phase::Queued { .. } | Phase::Preparing { .. }));
+                && (t.slot.is_some()
+                    || matches!(t.phase, Phase::Queued { .. } | Phase::Preparing { .. }));
             if live {
                 *out.entry(t.dept.clone().unwrap_or_default()).or_insert(0) += 1;
             }
@@ -232,7 +233,11 @@ impl Router {
 
     pub fn held_by_dept(&self) -> std::collections::BTreeMap<String, u32> {
         let mut out = std::collections::BTreeMap::new();
-        for t in self.tickets.values().filter(|t| t.slot == Some(SlotKind::Regular)) {
+        for t in self
+            .tickets
+            .values()
+            .filter(|t| t.slot == Some(SlotKind::Regular))
+        {
             *out.entry(t.dept.clone().unwrap_or_default()).or_insert(0) += 1;
         }
         out
@@ -1290,7 +1295,8 @@ impl Router {
             let held = self.held_by_dept();
             let deficit = |d: &Option<String>| -> i64 {
                 let k = d.clone().unwrap_or_default();
-                i64::from(shares.get(&k).copied().unwrap_or(0)) - i64::from(held.get(&k).copied().unwrap_or(0))
+                i64::from(shares.get(&k).copied().unwrap_or(0))
+                    - i64::from(held.get(&k).copied().unwrap_or(0))
             };
             let mut cands: Vec<(bool, i64, u64, TicketId)> = self
                 .tickets

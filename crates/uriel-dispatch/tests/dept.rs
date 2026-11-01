@@ -52,8 +52,14 @@ fn checking_items_rolls_up_through_leaf_sub_goal_department_and_plan() {
 fn checking_something_that_does_not_exist_is_an_error_and_changes_nothing() {
     let mut p = Plan::build(&spec(SPEC)).unwrap();
     let before = p.clone();
-    assert_eq!(p.check("nope.1.1", 0, true), Err(PlanError::UnknownLeaf("nope.1.1".into())));
-    assert_eq!(p.check("research.1.1", 9, true), Err(PlanError::BadItem("research.1.1".into(), 9)));
+    assert_eq!(
+        p.check("nope.1.1", 0, true),
+        Err(PlanError::UnknownLeaf("nope.1.1".into()))
+    );
+    assert_eq!(
+        p.check("research.1.1", 9, true),
+        Err(PlanError::BadItem("research.1.1".into(), 9))
+    );
     assert_eq!(p, before);
 }
 
@@ -61,12 +67,30 @@ fn checking_something_that_does_not_exist_is_an_error_and_changes_nothing() {
 fn every_structural_mistake_is_refused_with_the_place_it_is_in() {
     let cases = [
         (r#"{"departments":[]}"#, "at least one department"),
-        (r#"{"departments":[{"name":" ","goal":"g","subgoals":[]}]}"#, "department name"),
-        (r#"{"departments":[{"name":"A","goal":"g","subgoals":[]}]}"#, "department 'A'"),
-        (r#"{"departments":[{"name":"A","goal":"g","subgoals":[{"goal":"s","leaves":[]}]}]}"#, "sub-goal a.1"),
-        (r#"{"departments":[{"name":"A","goal":"g","subgoals":[{"goal":"s","leaves":[{"goal":"l","checklist":[]}]}]}]}"#, "leaf a.1.1"),
-        (r#"{"departments":[{"name":"A","goal":"g","subgoals":[{"goal":"s","leaves":[{"goal":"l","checklist":["  "]}]}]}]}"#, "item 1 of leaf a.1.1"),
-        (r#"{"departments":[{"name":"A b","goal":"g","subgoals":[{"goal":"s","leaves":[{"goal":"l","checklist":["i"]}]}]},{"name":"a-B","goal":"g","subgoals":[{"goal":"s","leaves":[{"goal":"l","checklist":["i"]}]}]}]}"#, "collides"),
+        (
+            r#"{"departments":[{"name":" ","goal":"g","subgoals":[]}]}"#,
+            "department name",
+        ),
+        (
+            r#"{"departments":[{"name":"A","goal":"g","subgoals":[]}]}"#,
+            "department 'A'",
+        ),
+        (
+            r#"{"departments":[{"name":"A","goal":"g","subgoals":[{"goal":"s","leaves":[]}]}]}"#,
+            "sub-goal a.1",
+        ),
+        (
+            r#"{"departments":[{"name":"A","goal":"g","subgoals":[{"goal":"s","leaves":[{"goal":"l","checklist":[]}]}]}]}"#,
+            "leaf a.1.1",
+        ),
+        (
+            r#"{"departments":[{"name":"A","goal":"g","subgoals":[{"goal":"s","leaves":[{"goal":"l","checklist":["  "]}]}]}]}"#,
+            "item 1 of leaf a.1.1",
+        ),
+        (
+            r#"{"departments":[{"name":"A b","goal":"g","subgoals":[{"goal":"s","leaves":[{"goal":"l","checklist":["i"]}]}]},{"name":"a-B","goal":"g","subgoals":[{"goal":"s","leaves":[{"goal":"l","checklist":["i"]}]}]}]}"#,
+            "collides",
+        ),
     ];
     for (json, want) in cases {
         let e = Plan::build(&spec(json)).unwrap_err().to_string();
@@ -79,7 +103,10 @@ fn unknown_fields_and_oversized_text_are_refused() {
     assert!(serde_json::from_str::<PlanSpec>(r#"{"departments":[],"extra":1}"#).is_err());
     let long = "x".repeat(MAX_TEXT + 1);
     let json = format!(r#"{{"departments":[{{"name":"A","goal":"{long}","subgoals":[]}}]}}"#);
-    assert!(Plan::build(&spec(&json)).unwrap_err().to_string().contains("longer than"));
+    assert!(Plan::build(&spec(&json))
+        .unwrap_err()
+        .to_string()
+        .contains("longer than"));
 }
 
 #[test]
@@ -88,7 +115,10 @@ fn size_caps_hold() {
         .map(|i| format!(r#"{{"name":"D{i}","goal":"g","subgoals":[{{"goal":"s","leaves":[{{"goal":"l","checklist":["i"]}}]}}]}}"#))
         .collect();
     let json = format!(r#"{{"departments":[{}]}}"#, depts.join(","));
-    assert!(Plan::build(&spec(&json)).unwrap_err().to_string().contains("too many departments"));
+    assert!(Plan::build(&spec(&json))
+        .unwrap_err()
+        .to_string()
+        .contains("too many departments"));
 }
 
 #[test]

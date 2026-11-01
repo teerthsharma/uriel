@@ -57,7 +57,9 @@ impl fmt::Display for AfkError {
             AfkError::Empty => f.write_str("empty goal"),
             AfkError::Plan(e) => write!(f, "plan refused: {e}"),
             AfkError::PlanExists => f.write_str("this session already has a plan"),
-            AfkError::NoPlan => f.write_str("this session has no plan; run `uriel afk plan <file>` first"),
+            AfkError::NoPlan => {
+                f.write_str("this session has no plan; run `uriel afk plan <file>` first")
+            }
             AfkError::LeafTaken(l) => write!(f, "leaf {l} already has a ticket"),
         }
     }

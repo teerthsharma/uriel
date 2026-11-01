@@ -16,7 +16,7 @@
 Uriel is the graph database, the scheduler and the retrieval engine that make that view, served over MCP from inside 60 MiB.</p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/rust-1.90%2B-orange?style=flat-square&logo=rust" alt="Rust 1.90+">
+  <img src="https://img.shields.io/badge/rust-1.95%2B-orange?style=flat-square&logo=rust" alt="Rust 1.95+">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-Windows%20tested-0078D6?style=flat-square&logo=windows" alt="Windows tested">
   <img src="https://img.shields.io/badge/clippy-clean-2ea44f?style=flat-square" alt="clippy clean with warnings denied">
@@ -156,7 +156,7 @@ Honest limits: there is no benchmark here showing that six small lenses beat one
 
 ## Quick start
 
-Requirements: Rust 1.90 or newer; Windows is the tested platform.
+Requirements: Rust 1.95 or newer; Windows is the tested platform.
 
 ```powershell
 cargo install --path crates/uriel-cli --locked
