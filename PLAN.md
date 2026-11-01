@@ -113,6 +113,25 @@ Phase 1 (building) and the Phase 2 items that gate a release (name, repository, 
 - [x] H2 Criterion benches per tier operation (`crates/uriel-bench/benches/`) with a regression ceiling asserted in `crates/uriel-bench/tests/ceilings.rs` against `ceilings.json` (factor 5.0)
 - [x] H4 Workspace gate: see the header of this file
 
+## J. Dispatch (team-agent control plane). Design: `docs/DISPATCH.md`
+
+Source: DeepSeek `dsh-superagent-prototype` (research prototype, MIT), rebuilt as a pure state machine in `crates/uriel-dispatch`. 108 tests pass in the crate (`cargo test -p uriel-dispatch`); `cargo clippy -p uriel-dispatch --all-targets --no-deps -- -D warnings` exits clean. Nine mutations of the logic (no reserve slot, off mode admitting inferred, retry off by one, bot made explicit, no eval discard on policy change, hand-off keeping the slot, stopped ticket still fed, resume without revalidation, uncapped backoff) each fail 2 to 5 tests.
+
+- [x] J1 Gate and admission table: `crates/uriel-dispatch/src/policy.rs` (`gate`). Gate: `tests/gate.rs`, including an exhaustive sweep of 3 modes x 27 cell settings x scope x addressed x ticket x 5 actors (1,620 cases): a bot is never explicit, off mode never admits inferred
+- [x] J2 Policy version, Mandate with recorded basis, revalidation before resume, per-ticket change notices: `policy.rs` (`revalidate`, `changes_for`), `router.rs` (`set_policy`). Gates `tests/gate.rs`, `tests/threads.rs`
+- [x] J3 Eval lifecycle: one per thread, batch merge, 120 s from delivery (never before), two retries then `unavailable`, assessment failure, discard on policy change, re-evaluate and dismiss: `router.rs`. Gate `tests/eval.rs`, `tests/replay.rs`
+- [x] J4 Ticket stages, worker slots with one reserved for a person, prepare 10 min, background 30 min, redelivery 2 s doubling to 60 s: `ticket.rs`, `router.rs`. Gate `tests/execution.rs`. A woken idle ticket kept its stale `waiting` report and read `idle` while working: found by the gate, fixed
+- [x] J5 Subscription fan-out, ownership, hand-back, release on end, resume with revalidation, stop, attach, unfollow, 14-day polling horizon: `router.rs`. Gate `tests/threads.rs`
+- [x] J6 Replay: SHA-256 chain over (time, input, effects); log round trip through JSON; clock clamp; 40 seeds x 600 random inputs with slot and phase invariants after each step, and a coverage gate that the streams reach all four ticket endings and the reserve slot: `tests/replay.rs`
+- [x] J7 RAM-aware capacity with the same reserve as the House governor: `config.rs`. Gate `tests/execution.rs` (parity with `uriel_house::governor::reserve_mb` and `slots` over 4 totals x 6 free values)
+- [x] J8 Time window: `Input::Window`, wind-down and close effects, no grants after the close: `crates/uriel-dispatch/src/router.rs`. Gate `tests/window.rs`
+- [x] J9 Persistence: `afk::Afk`, JSONL with the router digest on every line, exclusive lock, forged line refused, torn last line dropped, archive on end: `crates/uriel-dispatch/src/afk.rs`. Gate `tests/afk.rs`
+- [x] J10 `/afk` command: `uriel afk start|add|report|status|end|init`, `crates/uriel-cli/src/afk_cmd.rs`, command text `crates/uriel-cli/assets/afk.md` (repo copy `.claude/commands/afk.md`, equality tested). Gates: unit tests in `afk_cmd.rs`, parse tests in `main.rs`, and a run of the built binary through start, three adds under two workers, ready, ask, status, end
+- [ ] J10b MCP tools `dispatch_*` in house mode. Unbuilt; moves the 41-tool goldens
+- [ ] J10c GitHub and Feishu Sources. Unbuilt; `/afk` is the only Source
+- [ ] J11 Token-budgeted ticket context through `view`. Unbuilt and unmeasured
+- [ ] J12 Prune ended threads from the in-memory trigger table. Unbuilt
+
 ## I. Release
 
 - [x] I1a Name decided: **Uriel** (2026-10-15), mark and lockups in `assets/`, rationale and limits in `docs/BRAND.md`
@@ -138,6 +157,7 @@ Phase 1 (building) and the Phase 2 items that gate a release (name, repository, 
 - [x] J13 Safety record: `docs/SAFETY.md` (trust boundaries, threat to control to test table, residual risk). 6 further mutations (deck, ledger readiness, cycle check, Python ordering and name check) each turned a suite red
 - [x] J14 Genius moved inside house mode (2026-11-01, after review): `genius_*` tools and the `genius` prompt exist only with `--mode house`; a conjecture or wild claim can carry a live house `goal`, and an experiment result becomes a house fact (`killed` refutes the goal and its subtree). Normal mode is unchanged (no `prompts` capability). Marked experimental and unproven with its token cost in the README, the command text and `docs/GENIUS.md`. Gates `agent_wire.rs` (`a_killed_claim_bound_to_a_house_goal...`, `a_survived_claim...`, `a_claim_bound_to_a_goal_that_does_not_exist...`, `normal_mode_is_unchanged...`)
 - [ ] J15 Cache and model order: group lenses by model so each model pays one cold prefix, and load lenses through a lazy asynchronous loader as slots free; measure `cached_in` per model. The fork-versus-tier trade-off in `docs/GENIUS.md` is the reason this is open
+- [ ] J16 One slot story: `uriel-dispatch` (`/afk`, worker slots 1 to 16, default 3, RAM-aware, CLI only) and the fleet deck here (concurrency cap default 8, MCP side) count agent capacity separately. Decide whether the deck reads the dispatcher's slots, or `/afk` workers are admitted through `fleet_admit`, so "launch max agents" has one answer
 - [ ] J6 NeMo Relay conformance: map `fleet_trace` jsonl to ATOF and ATIF and check it against the published schema; blocked here because the documentation host was unreachable
 - [ ] J7 Evidence that the hexagon helps, and is worth its tokens: a fixed set of diagnosis tasks, single prompt against `/genius` against `/genius` inside house mode, tokens counted from `fleet_trace`, scored blind. Until then genius is experimental. This is the condition for keeping it
 - [ ] J8 Hosted-cache measurement: `cached_in` across the six lenses on a real provider, with and without `warm`

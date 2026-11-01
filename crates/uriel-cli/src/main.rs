@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod afk_cmd;
 mod banner;
 mod capture;
 mod commands;
@@ -58,6 +59,7 @@ enum Command {
     RecallContext(RecallArgs),
     Recall(SearchArgs),
     Genius(GeniusArgs),
+    Afk(AfkArgs),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -146,6 +148,41 @@ struct RecallArgs {
     budget: usize,
     #[arg(long)]
     capture: bool,
+}
+
+#[derive(Debug, Args, PartialEq)]
+struct AfkArgs {
+    #[arg(long, global = true)]
+    file: Option<PathBuf>,
+    #[command(subcommand)]
+    cmd: AfkCmd,
+}
+
+#[derive(Debug, Subcommand, PartialEq)]
+enum AfkCmd {
+    Start {
+        duration: String,
+        #[arg(long, default_value_t = afk_cmd::DEFAULT_WORKERS)]
+        workers: u32,
+    },
+    Add {
+        #[arg(long)]
+        goal_id: Option<String>,
+        #[arg(num_args = 1.., required = true)]
+        text: Vec<String>,
+    },
+    Report {
+        ticket: u64,
+        kind: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    Status,
+    End,
+    Init {
+        #[arg(long)]
+        project: bool,
+    },
 }
 
 #[derive(Debug, Args, PartialEq)]
@@ -271,6 +308,7 @@ fn dispatch<R: BufRead + Send + 'static, W: Write>(
             recall::run_search(&db, args.budget, args.k, &args.query.join(" "), args.expand, out);
             Ok(())
         }
+        Some(Command::Afk(args)) => afk_cmd::run(out, args.file, &args.cmd),
         Some(Command::Index(args)) => {
             let db = args.db.unwrap_or_else(default_db_path);
             commands::index(out, &args.path, &db)
@@ -394,6 +432,33 @@ mod tests {
 
     fn command(args: &[&str]) -> Option<Command> {
         parse(args).expect("parses").command
+    }
+
+    #[test]
+    fn afk_subcommands_parse_with_their_arguments() {
+        assert_eq!(
+            command(&["afk", "start", "2h", "--workers", "5"]),
+            Some(Command::Afk(AfkArgs {
+                file: None,
+                cmd: AfkCmd::Start { duration: "2h".into(), workers: 5 }
+            }))
+        );
+        assert_eq!(
+            command(&["afk", "add", "--goal-id", "G1.2", "write", "the", "parser"]),
+            Some(Command::Afk(AfkArgs {
+                file: None,
+                cmd: AfkCmd::Add { goal_id: Some("G1.2".into()), text: vec!["write".into(), "the".into(), "parser".into()] }
+            }))
+        );
+        assert_eq!(
+            command(&["afk", "report", "3", "ask", "--note", "which?", "--file", "x.jsonl"]),
+            Some(Command::Afk(AfkArgs {
+                file: Some("x.jsonl".into()),
+                cmd: AfkCmd::Report { ticket: 3, kind: "ask".into(), note: Some("which?".into()) }
+            }))
+        );
+        assert!(parse(&["afk", "add"]).is_err());
+        assert!(parse(&["afk"]).is_err());
     }
 
     #[test]

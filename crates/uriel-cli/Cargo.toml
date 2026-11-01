@@ -19,6 +19,7 @@ uriel-rag = { path = "../uriel-rag" }
 uriel-core = { path = "../uriel-core" }
 uriel-genius = { path = "../uriel-genius" }
 uriel-place = { path = "../uriel-place" }
+uriel-dispatch = { path = "../uriel-dispatch" }
 serde_json = "1"
 
 [dev-dependencies]
