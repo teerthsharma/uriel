@@ -163,7 +163,9 @@ fn all_relations(ctx: &Context) -> Result<Vec<Json>, String> {
         .collect())
 }
 
-fn graph_of(ctx: &Context, entities: Vec<Json>) -> ToolResult {
+fn graph_of(ctx: &Context, mut entities: Vec<Json>) -> ToolResult {
+    let omitted = entities.len().saturating_sub(crate::guard::MAX_ROWS);
+    entities.truncate(crate::guard::MAX_ROWS);
     let names: BTreeSet<&str> = entities
         .iter()
         .filter_map(|e| e.get("name").and_then(Json::as_str))
@@ -175,7 +177,12 @@ fn graph_of(ctx: &Context, entities: Vec<Json>) -> ToolResult {
             names.contains(end("source")) && names.contains(end("target"))
         })
         .collect();
-    Ok(json!({"entities": entities, "relations": relations}).to_string())
+    let mut out = json!({"entities": entities, "relations": relations});
+    if omitted > 0 {
+        out["omitted"] = json!(omitted);
+        out["note"] = json!("entities past the cap are not shown; use search_memories or find_memories_by_name");
+    }
+    Ok(out.to_string())
 }
 
 pub fn call(ctx: &Context, name: &str, args: &Json) -> ToolResult {

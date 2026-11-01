@@ -15,7 +15,7 @@ use uriel_core::MemoryBudget;
 use uriel_mcp::config::{
     default_db_path, Config, Format, Mode as ServerMode, PlacementMode, DEFAULT_IDLE_RELEASE_SECS, DEFAULT_MEMORY_MIB,
     DEFAULT_TOKEN_LIMIT,
-    Terse, MODE_ENV, TERSE_ENV,
+    Terse, Tools, MODE_ENV, TERSE_ENV, TOOLS_ENV,
 };
 
 use banner::{mode_from_env, render_banner, Mode};
@@ -74,6 +74,12 @@ enum ModeArg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ToolsArg {
+    Adaptive,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum TerseArg {
     Off,
     Data,
@@ -108,6 +114,12 @@ struct McpArgs {
     token_limit: Option<u64>,
     #[arg(long)]
     idle_release_secs: Option<u64>,
+    #[arg(long, value_enum)]
+    tools: Option<ToolsArg>,
+    #[arg(long)]
+    soft_tokens: Option<u64>,
+    #[arg(long)]
+    hard_tokens: Option<u64>,
 }
 
 #[derive(Debug, Args, PartialEq)]
@@ -203,15 +215,25 @@ impl McpArgs {
         self.to_config_envs(
             std::env::var(MODE_ENV).ok().as_deref(),
             std::env::var(TERSE_ENV).ok().as_deref(),
+            std::env::var(TOOLS_ENV).ok().as_deref(),
         )
     }
 
     #[cfg(test)]
     fn to_config_env(&self, mode_env: Option<&str>) -> Result<Config, String> {
-        self.to_config_envs(mode_env, None)
+        self.to_config_envs(mode_env, None, None)
     }
 
-    fn to_config_envs(&self, mode_env: Option<&str>, terse_env: Option<&str>) -> Result<Config, String> {
+    fn to_config_envs(
+        &self,
+        mode_env: Option<&str>,
+        terse_env: Option<&str>,
+        tools_env: Option<&str>,
+    ) -> Result<Config, String> {
+        let tools_flag = self.tools.map(|t| match t {
+            ToolsArg::Adaptive => Tools::Adaptive,
+            ToolsArg::Full => Tools::Full,
+        });
         let terse_flag = self.terse.map(|t| match t {
             TerseArg::Off => Terse::Off,
             TerseArg::Data => Terse::Data,
@@ -249,6 +271,9 @@ impl McpArgs {
             mode: ServerMode::resolve(mode_flag, mode_env)?,
             terse: Terse::resolve(terse_flag, terse_env)?,
             idle_release_secs: self.idle_release_secs.unwrap_or(DEFAULT_IDLE_RELEASE_SECS),
+            tools: Tools::resolve(tools_flag, tools_env)?,
+            soft_tokens: self.soft_tokens.unwrap_or(uriel_mcp::guard::DEFAULT_SOFT_TOKENS),
+            hard_tokens: self.hard_tokens.unwrap_or(uriel_mcp::guard::DEFAULT_HARD_TOKENS),
         })
     }
 }
@@ -463,6 +488,9 @@ mod tests {
                 memory_mib: Some(64),
                 token_limit: None,
                 idle_release_secs: None,
+                tools: None,
+                soft_tokens: None,
+                hard_tokens: None,
             }))
         );
     }
@@ -506,7 +534,7 @@ mod tests {
             let Some(Command::Mcp(args)) = command(argv) else {
                 panic!("expected mcp");
             };
-            args.to_config_envs(None, env)
+            args.to_config_envs(None, env, None)
         };
         assert_eq!(cfg_of(&["mcp"], None).expect("config").terse, Terse::Off);
         assert_eq!(cfg_of(&["mcp", "--terse", "data"], None).expect("config").terse, Terse::Data);
@@ -733,6 +761,9 @@ mod tests {
                     memory_mib: None,
                     token_limit: None,
                     idle_release_secs: None,
+                tools: None,
+                soft_tokens: None,
+                hard_tokens: None,
                 })),
             };
             let result = dispatch(cli, mode, Cursor::new(Vec::new()), &mut rec);
@@ -758,6 +789,9 @@ mod tests {
                 memory_mib: None,
                 token_limit: None,
                 idle_release_secs: None,
+                tools: None,
+                soft_tokens: None,
+                hard_tokens: None,
             })),
         };
         let request = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";

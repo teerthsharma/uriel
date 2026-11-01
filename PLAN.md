@@ -27,7 +27,7 @@ Phase 1 (building) and the Phase 2 items that gate a release (name, repository, 
 - [x] Result cache with tag invalidation by commit: `crates/uriel-query/src/lib.rs` (`with_dist_cache`). Gate: 9 cache tests, 6 fail with invalidation disabled (2026-10-15)
 - [x] Graph algorithms: PageRank, Louvain, Kruskal MST and the rest of `crates/uriel-algo`. Gate: karate-club values match networkx (2026-10-15: 138 passed)
 - [x] Distributed cache, gossip membership, epoch invalidation: `crates/uriel-cache`. Gate: 67 passed, 5 stability runs (2026-10-15)
-- [x] MCP server over stdio, two modes: `crates/uriel-mcp`. 27 tools in `--mode normal`, 41 in `--mode house` (15 and 20 with `--read-only`), counted by sending `tools/list` to `uriel mcp` at `7d74e6c`; `--terse data|prose` adds a 28th and 42nd, `terse_stats`. Gates: `tests/modes.rs`, `tests/mode_config.rs`, `tests/mode_golden.rs`, `tests/stdio.rs`, `tests/compact.rs`
+- [x] MCP server over stdio, two modes: `crates/uriel-mcp`. 27 tools in `--mode normal`, 41 in `--mode house` (15 and 20 with `--read-only`), counted by sending `tools/list` to `uriel mcp` at `7d74e6c`; `--terse data|prose` adds a 28th and 42nd, `terse_stats`. Superseded by section K: 30 and 49 in `--tools full`, 11 and 13 listed at start in the default adaptive mode. Gates: `tests/modes.rs`, `tests/mode_config.rs`, `tests/mode_golden.rs`, `tests/stdio.rs`, `tests/compact.rs`
 - [x] Two modes, exactly two: `--mode normal|house` and `URIEL_MODE` (default normal). A normal server neither lists nor accepts a `house_*` or `research_*` tool and refuses them with a typed `wrong_mode` error; the flag beats the environment; a bad value is a usage error. Gate: `crates/uriel-mcp/tests/modes.rs`
 - [x] Goal-tree harness: merge, next, report, leap, several Needs per database, governor: `crates/uriel-house/src/house.rs`, `governor.rs`. Gates: `crates/uriel-house/tests/` (house, multi_need, simulation with a 40-leaf run under RAM 6000, 2000 and 5000 MB, models)
 - [x] Board events: the harness appends one JSON object per line to `house-events.jsonl` (`crates/uriel-house/src/sink.rs`). Gate: `crates/uriel-house/tests/board.rs` feeds the emitted events to the board's `gates.py` (the board page and `gates.py` live in the owner's `dispatching-house-mode` skill, outside this repository)
@@ -131,6 +131,15 @@ Source: DeepSeek `dsh-superagent-prototype` (research prototype, MIT), rebuilt a
 - [ ] J10c GitHub and Feishu Sources. Unbuilt; `/afk` is the only Source
 - [ ] J11 Token-budgeted ticket context through `view`. Unbuilt and unmeasured
 - [ ] J12 Prune ended threads from the in-memory trigger table. Unbuilt
+
+## K. Revamp (MCP surface). Design and findings: `docs/REVAMP.md`
+
+- [x] K1 Notification of a request method no longer executes; oversize input lines are dropped unbuffered: `crates/uriel-mcp/src/server.rs`. Gates `tests/revamp.rs` (the first reproduced a write from a notification)
+- [x] K2 Adaptive tool list with sequential activation, `tools_enable`, `listChanged`: `src/guard.rs`, `src/tools.rs`. Measured at start (list plus instructions, 4 chars per token): normal 6.6k to 2.6k, house 10.6k to 3.0k. `--tools full` keeps the pre-revamp list byte for byte (`tests/mode_golden.rs`)
+- [x] K3 Line-boundary cuts with a continuation handle, `more`; unchanged-repeat stubs; 200-row cap; session ledger with soft and hard thresholds, `usage`: `src/guard.rs`. Gates `tests/revamp.rs`, unit tests in `guard.rs`
+- [x] K4 `dispatch_open|add|report|status|close` in house mode over the same log as `uriel afk`: `src/dispatch_tools.rs`. Gate `tests/revamp.rs`
+- [x] K5 `/afk` merges ready branches with passing tests into the branch it started on (`--no-merge` opts out); never pushes: `crates/uriel-cli/assets/afk.md`. Policy text only, tested for presence, not enforced
+- [ ] K6 A real tokenizer for the ledger; trimming `rag_search` and `view` schemas; terse echo for memory writes. Unbuilt
 
 ## I. Release
 

@@ -22,7 +22,7 @@ Uriel is the graph database, the scheduler and the retrieval engine that make th
   <img src="https://img.shields.io/badge/clippy-clean-2ea44f?style=flat-square" alt="clippy clean with warnings denied">
   <img src="https://img.shields.io/badge/recall%405-1.000-2ea44f?style=flat-square" alt="recall at 5 on 100 frozen queries">
   <img src="https://img.shields.io/badge/server%20peak-52.7%20MiB-2ea44f?style=flat-square" alt="release peak working set">
-  <img src="https://img.shields.io/badge/MCP%20tools-27%20normal%20%C2%B7%2041%20house-5b6b91?style=flat-square" alt="27 tools in normal mode, 41 in house mode">
+  <img src="https://img.shields.io/badge/MCP%20tools-30%20normal%20%C2%B7%2049%20house-5b6b91?style=flat-square" alt="30 tools in normal mode, 49 in house mode; 11 and 13 listed at start">
 </p>
 
 ---
@@ -252,12 +252,13 @@ The shipped server runs a single node. Ranges are not yet wired to Raft groups, 
 | View | `view`, `soul` |
 | Placement | `calibrate`, `why_hot`, `pin`, `unpin`, `replay`, `tier_stats` |
 
-**House mode only (14 more, 41 in total).**
+**House mode only (19 more, 49 in total).** Also in every mode: `more`, `usage`, `tools_enable` (see [`docs/REVAMP.md`](docs/REVAMP.md)). The default `--tools adaptive` lists 11 tools at start (13 in house mode) and reveals the rest as they are used; `--tools full` lists all.
 
 | Group | Tools |
 |---|---|
 | Differential | `house_need`, `house_chart`, `house_merge`, `house_fact`, `house_next`, `house_report`, `house_test_run`, `house_leap`, `house_status`, `house_select_tests`, `house_config` |
 | Inspector research | `research_orbit_audit`, `research_pooling_audit`, `research_record` |
+| Dispatch | `dispatch_open`, `dispatch_add`, `dispatch_report`, `dispatch_status`, `dispatch_close` |
 
 With `--terse data` or `prose` one more tool, `terse_stats`, appears in each mode. `pin` and `why_hot` act on the placement model, which is live with `--placement planned`; under the default `local` policy they report that nothing was applied.
 
@@ -351,7 +352,7 @@ Every row was produced on one machine (Intel Core i7-14700HX, 15.7 GB RAM, Windo
 | Islands | `view` recall at 5: 84/100 off; 92, 94, 94 on (budgets 300, 800, 4,000). Mean proxy tokens 148.6 off; 196.4, 257.6, 274.6 on | `cargo test --release -p uriel-mcp --test view_frozen_tool -- --nocapture` |
 | Soul | Gold chunk inside the guide for 0, 3, 7 of 100 queries at budgets 300, 1,200, 4,000; plain top-by-salience of equal size 0, 2, 7; chance 0.34, 1.27, 3.99 (run after refreshing the corpus digest in `eval_queries.json`, see the workspace row) | `cargo test --release -p uriel-rag --test eval soul_guide -- --ignored --nocapture` |
 | Terse | Total proxy tokens over 30 calls: 5,543 off, 5,350 `data` (-3.5 %), 5,340 `prose` (-3.7 %); with `format=json` 14,779 off, 11,009 `data` (-25.5 %) | `TERSE_MEASURE_ROOT=. cargo test --release -p uriel-mcp --test terse_measure -- --ignored --nocapture` |
-| Tools | 27 in normal mode, 41 in house mode; 15 and 20 with `--read-only` | `tools/list` sent to `uriel mcp --db <db> [--mode house] [--read-only]` |
+| Tools | 30 in normal mode, 49 in house mode; 18 and 23 with `--read-only` (`--tools full`); 11 and 13 listed at start by default | `tools/list` sent to `uriel mcp --db <db> [--mode house] [--read-only]` |
 | Raft simulation | 50 seeds x 3,000 steps on 3 nodes and 20 seeds x 3,000 steps on 5 nodes with membership changes hold every invariant; a crash at every write boundary loses no committed entry; 124 `uriel-kv` tests pass | `cargo test --release -p uriel-kv` |
 | Replicated graph | 30 seeds x 2,000 steps keep every replica equal and lose no acknowledged write; 6 seeded mutations are each caught | `cargo test --release -p uriel-repl --features mutations` |
 | Crash safety | Every write boundary of a 500-operation workload reopens to a committed prefix | `cargo test --release -p uriel-core crash` |

@@ -21,6 +21,7 @@ uriel-core = { path = "../uriel-core" }
 uriel-query = { path = "../uriel-query" }
 uriel-rag = { path = "../uriel-rag" }
 uriel-house = { path = "../uriel-house" }
+uriel-dispatch = { path = "../uriel-dispatch" }
 uriel-place = { path = "../uriel-place" }
 uriel-terse = { path = "../uriel-terse" }
 uriel-topo = { path = "../uriel-topo" }

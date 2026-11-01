@@ -23,6 +23,7 @@ const HOUSE: [&str; 11] = [
     "house_config",
 ];
 
+const DISPATCH: [&str; 5] = ["dispatch_open", "dispatch_add", "dispatch_report", "dispatch_status", "dispatch_close"];
 const RESEARCH: [&str; 3] = [
     "research_orbit_audit",
     "research_pooling_audit",
@@ -79,7 +80,12 @@ fn house_mode_adds_exactly_the_house_and_research_tools() {
     let normal = names(&[], &[]);
     let house = names(&["--mode", "house"], &[]);
     let extra: BTreeSet<String> = house.difference(&normal).cloned().collect();
-    let want: BTreeSet<String> = HOUSE.iter().chain(&RESEARCH).map(|s| s.to_string()).collect();
+    let want: BTreeSet<String> = HOUSE
+        .iter()
+        .chain(&RESEARCH)
+        .chain(&DISPATCH)
+        .map(|s| s.to_string())
+        .collect();
     assert_eq!(extra, want);
     assert!(normal.is_subset(&house));
 }
@@ -104,6 +110,7 @@ fn exits_with_usage_error(args: &[&str], envs: &[(&str, &str)], needle: &str) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_uriel-mcp"));
     cmd.args(args)
         .env_remove("URIEL_MODE")
+        .env("URIEL_TOOLS", "full")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());

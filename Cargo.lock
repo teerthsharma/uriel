@@ -1034,6 +1034,7 @@ dependencies = [
  "thiserror",
  "uriel-algo",
  "uriel-core",
+ "uriel-dispatch",
  "uriel-house",
  "uriel-place",
  "uriel-query",

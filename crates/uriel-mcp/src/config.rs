@@ -84,6 +84,43 @@ impl Mode {
     }
 }
 
+pub const TOOLS_ENV: &str = "URIEL_TOOLS";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tools {
+    #[default]
+    Adaptive,
+    Full,
+}
+
+impl Tools {
+    pub fn parse(s: &str) -> Option<Tools> {
+        match s {
+            "adaptive" => Some(Tools::Adaptive),
+            "full" => Some(Tools::Full),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Tools::Adaptive => "adaptive",
+            Tools::Full => "full",
+        }
+    }
+
+    pub fn resolve(flag: Option<Tools>, env: Option<&str>) -> Result<Tools, String> {
+        if let Some(t) = flag {
+            return Ok(t);
+        }
+        match env.filter(|v| !v.is_empty()) {
+            None => Ok(Tools::Adaptive),
+            Some(v) => Tools::parse(v)
+                .ok_or_else(|| format!("{TOOLS_ENV} expects adaptive or full, got '{v}'")),
+        }
+    }
+}
+
 pub const TERSE_ENV: &str = "URIEL_TERSE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -139,6 +176,9 @@ pub struct Config {
     pub mode: Mode,
     pub terse: Terse,
     pub idle_release_secs: u64,
+    pub tools: Tools,
+    pub soft_tokens: u64,
+    pub hard_tokens: u64,
 }
 
 impl Config {
@@ -166,7 +206,10 @@ OPTIONS:
     --db <PATH>          Database file (default: ~/.seal/graph.seal)
     --read-only          Hide and deny all write tools
     --in-memory          Use a throwaway in-memory database
-    --token-limit <N>    Truncate tool output to N characters (default: 20000)
+    --token-limit <N>    Cut tool output at N characters on a line boundary; `more` fetches the rest (default: 20000)
+    --tools <T>          adaptive: list the core tools and reveal groups as they are used (default); full: list every tool (env URIEL_TOOLS)
+    --soft-tokens <N>    After N tokens sent in a session, outputs are capped at half the limit (default: 40000, 0 = never)
+    --hard-tokens <N>    After N tokens sent, outputs are capped at a quarter of the limit (default: 100000, 0 = never)
     --root <PATH>        Project root for the rag_* and house_* tools (default: current directory)
     --events <PATH>      House event log (default: <root>/house-events.jsonl)
     --config <PATH>      JSON config with model slots (default: ~/.seal/config.json if present)
@@ -215,10 +258,11 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    parse_args_envs(
+    parse_args_all(
         args,
         std::env::var(MODE_ENV).ok().as_deref(),
         std::env::var(TERSE_ENV).ok().as_deref(),
+        std::env::var(TOOLS_ENV).ok().as_deref(),
     )
 }
 
@@ -239,8 +283,22 @@ where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
+    parse_args_all(args, mode_env, terse_env, Some("full"))
+}
+
+pub fn parse_args_all<I, S>(
+    args: I,
+    mode_env: Option<&str>,
+    terse_env: Option<&str>,
+    tools_env: Option<&str>,
+) -> Result<Cli, String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
     let mut mode_flag = None;
     let mut terse_flag = None;
+    let mut tools_flag = None;
     let mut cfg = Config {
         db: default_db_path(),
         read_only: false,
@@ -255,6 +313,9 @@ where
         mode: Mode::Normal,
         terse: Terse::Off,
         idle_release_secs: DEFAULT_IDLE_RELEASE_SECS,
+        tools: Tools::Adaptive,
+        soft_tokens: crate::guard::DEFAULT_SOFT_TOKENS,
+        hard_tokens: crate::guard::DEFAULT_HARD_TOKENS,
     };
     let mut it = args.into_iter().map(Into::into);
     while let Some(arg) = it.next() {
@@ -307,6 +368,24 @@ where
                     format!("--terse expects off, data or prose, got '{v}'")
                 })?);
             }
+            "--tools" => {
+                let v = value(&flag, inline, &mut it)?;
+                tools_flag = Some(Tools::parse(&v).ok_or_else(|| {
+                    format!("--tools expects adaptive or full, got '{v}'")
+                })?);
+            }
+            "--soft-tokens" => {
+                let v = value(&flag, inline, &mut it)?;
+                cfg.soft_tokens = v.parse::<u64>().map_err(|_| {
+                    format!("--soft-tokens expects a non-negative integer, got '{v}'")
+                })?;
+            }
+            "--hard-tokens" => {
+                let v = value(&flag, inline, &mut it)?;
+                cfg.hard_tokens = v.parse::<u64>().map_err(|_| {
+                    format!("--hard-tokens expects a non-negative integer, got '{v}'")
+                })?;
+            }
             "--placement" => {
                 let v = value(&flag, inline, &mut it)?;
                 cfg.placement = PlacementMode::parse(&v)
@@ -331,6 +410,13 @@ where
     }
     cfg.mode = Mode::resolve(mode_flag, mode_env)?;
     cfg.terse = Terse::resolve(terse_flag, terse_env)?;
+    cfg.tools = Tools::resolve(tools_flag, tools_env)?;
+    if cfg.hard_tokens != 0 && cfg.soft_tokens > cfg.hard_tokens {
+        return Err(format!(
+            "--soft-tokens {} must not exceed --hard-tokens {}",
+            cfg.soft_tokens, cfg.hard_tokens
+        ));
+    }
     Ok(Cli::Run(cfg))
 }
 

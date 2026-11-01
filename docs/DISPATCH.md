@@ -63,9 +63,11 @@ The prototype listens to GitHub and Feishu. Here the Source is the person at the
 | Log | `afk::Afk`, `.uriel/afk/session.jsonl`, an exclusive file lock | Every line carries the router digest after that step. A forged or edited line is refused with its line number; a half-written last line from a crash is dropped; a second process waits for the lock |
 | Summary | `Afk::summary` | Sorted by what a person must do: needs you (with each question), ready, unfinished, never started, done. The log is archived as `.done` |
 
+Merging: a ticket that reports `ready` with passing tests is merged `--no-ff` into the branch you started on, one at a time, and its test is run again on the merged tree. A conflict or a failing test aborts the merge and turns the ticket into `blocked` with the reason. Nothing is ever pushed, forced or merged anywhere else, and the worker branch is kept. `--no-merge`, a dirty tree or a detached HEAD turns merging off. This is policy in the command text, not code the router enforces.
+
 House keeps the goal tree, the RED-first test gate and the RAM governor for heavy test jobs; dispatch adds who may ask, how many workers run, the time window and the attention list. A goal id passed with `--goal-id` links a ticket to its House leaf.
 
-Not enforced by code, only by the mandate text in the command: a worker staying inside its scope and its branch. The host cannot sandbox a subagent; run the agent under a dedicated OS account, as the prototype also warns.
+Not enforced by code, only by the mandate text in the command: a worker staying inside its scope and its branch, and the router's merge rules above. The host cannot sandbox a subagent; run the agent under a dedicated OS account, as the prototype also warns.
 
 ## Not built
 
