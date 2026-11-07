@@ -19,4 +19,7 @@ pub use reader::{
     AsyncReader, ReadJob, ReaderBackend, ReaderMode, MAX_BATCH, MAX_JOB_BYTES, MIN_ALIGNMENT_UNIT,
 };
 pub use region::{Backend, FallbackReason, Region, Request};
-pub use rss::{large_page_privilege_held, large_page_status, process_memory, LargePageStatus, ProcessMemory};
+pub use rss::{
+    large_page_privilege_held, large_page_status, memory_status, process_memory, rss_source, trim_heap,
+    LargePageStatus, MemoryStatus, ProcessMemory,
+};

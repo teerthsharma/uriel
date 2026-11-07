@@ -1104,6 +1104,7 @@ dependencies = [
  "uriel-place",
  "uriel-query",
  "uriel-rag",
+ "uriel-sys",
  "uriel-terse",
  "uriel-topo",
 ]
@@ -1169,6 +1170,7 @@ dependencies = [
 name = "uriel-sys"
 version = "0.2.9"
 dependencies = [
+ "libc",
  "thiserror",
  "windows-sys",
 ]
