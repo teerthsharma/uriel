@@ -10,3 +10,5 @@ docs/HOUSE-SEAL.md
 prompt-cache/
 uriel-ledger/
 !crates/uriel-ledger/
+
+audit-out/
