@@ -339,6 +339,15 @@ const MODE_TOOLS: &[&str] = &[
 
 const AGENT_TOOLS: &[&str] = &["fleet_admit", "fleet_event", "fleet_trace", "ledger_add", "ledger_next", "ledger_done"];
 
+const GRAPH_TOOLS: &[&str] = &[
+    "graph_rank",
+    "graph_path",
+    "graph_impact",
+    "graph_cycles",
+    "graph_communities",
+    "graph_lint",
+];
+
 const GENIUS_TOOLS: &[&str] = &["genius_plan", "genius_brief", "genius_submit"];
 
 const HOUSE_TOOLS: &[&str] = &[
@@ -367,6 +376,7 @@ fn house_mode_tools_list_names() {
         .chain(MODE_TOOLS)
         .chain(AGENT_TOOLS)
         .chain(GENIUS_TOOLS)
+        .chain(GRAPH_TOOLS)
         .chain(GUARD_TOOLS)
         .chain(DISPATCH_TOOLS)
         .chain(HOUSE_TOOLS)
@@ -385,6 +395,7 @@ fn tools_list_names() {
         .iter()
         .chain(MODE_TOOLS)
         .chain(AGENT_TOOLS)
+        .chain(GRAPH_TOOLS)
         .chain(GUARD_TOOLS)
         .map(|x| x.to_string())
         .collect();
@@ -420,6 +431,9 @@ fn tools_list_schemas_match_neo4j_shapes() {
             "delete_observations" => &["deletions"],
             "search_memories" => &["query"],
             "find_memories_by_name" => &["names"],
+            "graph_rank" => &["algorithm"],
+            "graph_path" => &["from", "to"],
+            "graph_impact" => &["target"],
             _ => &[],
         };
         let got: Vec<&str> = schema["required"]

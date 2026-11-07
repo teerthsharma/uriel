@@ -29,7 +29,7 @@ fn tools_without_house(s: &mut Session) -> String {
         .iter()
         .filter(|t| {
             let n = t["name"].as_str().expect("name");
-            !["house_", "genius_", "fleet_", "ledger_", "dispatch_"].iter().any(|p| n.starts_with(p))
+            !["house_", "genius_", "fleet_", "ledger_", "dispatch_", "graph_"].iter().any(|p| n.starts_with(p))
                 && !["more", "usage", "tools_enable"].contains(&n)
         })
         .collect();

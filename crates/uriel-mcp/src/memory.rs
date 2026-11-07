@@ -24,7 +24,7 @@ fn list(items: &[String]) -> Value {
     Value::List(items.iter().map(|x| Value::String(x.clone())).collect())
 }
 
-fn quote_ident(raw: &str, what: &str) -> Result<String, String> {
+pub(crate) fn quote_ident(raw: &str, what: &str) -> Result<String, String> {
     if raw.trim().is_empty() {
         return Err(format!("{what} must not be empty"));
     }

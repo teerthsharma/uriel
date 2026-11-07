@@ -9,7 +9,7 @@ use crate::db::{Db, Open};
 use crate::services::Services;
 use crate::session::Session;
 use crate::placement::PlaceState;
-use crate::{agent_tools, dispatch_tools, guard, house_tools, ledger_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
+use crate::{agent_tools, dispatch_tools, graph_tools, guard, house_tools, ledger_tools, memory, place_tools, rag_tools, research_tools, soul, terse, view};
 use uriel_house::House;
 use uriel_query::{AccessMode, QueryStats};
 use uriel_rag::Rag;
@@ -292,6 +292,7 @@ pub fn all() -> impl Iterator<Item = &'static ToolDef> {
         .chain(ledger_tools::TOOLS.iter())
         .chain(guard::TOOLS.iter())
         .chain(dispatch_tools::TOOLS.iter())
+        .chain(graph_tools::TOOLS.iter())
 }
 
 pub fn house_only(name: &str) -> bool {
@@ -439,6 +440,7 @@ fn dispatch(ctx: &Context, name: &str, args: &Json) -> Option<ToolResult> {
         guard::MORE | guard::USAGE | guard::ENABLE => guard::call(ctx, name, args, ctx.token_limit),
         n if n.starts_with("dispatch_") => dispatch_tools::call(ctx, n, args),
         n if n.starts_with("ledger_") => ledger_tools::call(ctx, n, args),
+        n if n.starts_with("graph_") => graph_tools::call(ctx, n, args),
         n if n.starts_with("genius_") || n.starts_with("fleet_") => agent_tools::call(ctx, n, args),
         n if n.starts_with("house_") => house_tools::call(ctx, n, args),
         n if n.starts_with("research_") => research_tools::call(ctx, n, args),

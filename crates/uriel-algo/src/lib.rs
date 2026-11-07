@@ -5,6 +5,8 @@ pub mod caustic;
 pub mod certify;
 mod community;
 mod components;
+mod cuts;
+mod dag;
 mod error;
 mod flow;
 mod islands;
@@ -30,6 +32,8 @@ pub use components::{
     component_count, component_sizes, strongly_connected_components, topological_sort,
     weakly_connected_components,
 };
+pub use cuts::{articulation_points, bridges};
+pub use dag::{condensation_layers, feedback_arc_set};
 pub use error::{Error, Result};
 pub use flow::{max_flow, MaxFlow};
 pub use islands::{bucket_islands, island_labels};
