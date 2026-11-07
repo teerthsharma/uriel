@@ -1,15 +1,16 @@
 //! `CALL` procedures: schema introspection and graph algorithms.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use uriel_algo::{
     betweenness_centrality, louvain, pagerank, weakly_connected_components, BetweennessConfig,
-    LouvainConfig, PageRankConfig, Projection,
+    LouvainConfig, Orientation, PageRankConfig, Projection,
 };
 use uriel_core::NodeId;
 
 use crate::ctx::Ctx;
 use crate::error::{rt, sem, QResult, QueryError};
+use crate::project::{project, ProjectError, Spec};
 use crate::val::Val;
 
 type ProcOut = (Vec<String>, Vec<Vec<Val>>);
@@ -121,25 +122,18 @@ impl Ctx<'_> {
     /// Projects every node and relationship of the snapshot into a CSR graph; node index
     /// `i` of the projection is `ids[i]`.
     fn project_all(&mut self, directed: bool) -> QResult<(Vec<NodeId>, Projection)> {
-        let mut ids: Vec<NodeId> = Vec::new();
-        for n in self.read.all_nodes()? {
-            ids.push(n?.id);
-        }
-        ids.sort();
-        let index: HashMap<NodeId, u32> = ids
-            .iter()
-            .enumerate()
-            .map(|(i, id)| (*id, i as u32))
-            .collect();
-        let mut edges: Vec<(u32, u32)> = Vec::new();
-        for r in self.read.all_rels()? {
-            let r = r?;
-            if let (Some(&a), Some(&b)) = (index.get(&r.src), index.get(&r.dst)) {
-                edges.push((a, b));
-            }
-        }
-        let g = Projection::from_edges(ids.len(), &edges, directed).map_err(algo_err)?;
-        Ok((ids, g))
+        let p = project(&self.read, &Spec::everything()).map_err(|e| match e {
+            ProjectError::Core(c) => QueryError::Core(c),
+            ProjectError::Algo(a) => algo_err(a),
+            other => QueryError::Runtime(other.to_string()),
+        })?;
+        let o = if directed {
+            Orientation::Natural
+        } else {
+            Orientation::Undirected
+        };
+        let g = p.projection(o, false).map_err(algo_err)?;
+        Ok((p.ids, g))
     }
 
     fn schema_visualization(&mut self) -> QResult<ProcOut> {

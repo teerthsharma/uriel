@@ -62,6 +62,7 @@ mod funcs;
 mod matcher;
 mod plan;
 mod procs;
+pub mod project;
 mod schema;
 mod val;
 mod write;
