@@ -70,3 +70,12 @@ impl MemoryBudget {
         (self.hot() / HOT_ENTRY_BYTES).max(MIN_HOT_ENTRIES)
     }
 }
+
+pub const AUTO_CEILING_MIB: usize = 50;
+pub const AUTO_FLOOR_MIB: usize = MemoryBudget::MIN_BYTES / (1024 * 1024);
+const AUTO_FULL_FREE_BYTES: u64 = 2 << 30;
+
+pub fn auto_memory_mib(available_ram_bytes: u64) -> usize {
+    let scaled = (AUTO_CEILING_MIB as u128 * available_ram_bytes as u128 / AUTO_FULL_FREE_BYTES as u128) as usize;
+    scaled.clamp(AUTO_FLOOR_MIB, AUTO_CEILING_MIB)
+}

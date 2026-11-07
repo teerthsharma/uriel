@@ -9,16 +9,17 @@ use windows_sys::Win32::Security::{
     TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows_sys::Win32::System::Memory::{
-    GetLargePageMinimum, VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE, MEM_RESERVE,
+    GetLargePageMinimum, GetProcessHeap, HeapCompact, VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_LARGE_PAGES, MEM_RELEASE, MEM_RESERVE,
     PAGE_READWRITE,
 };
 use windows_sys::Win32::System::ProcessStatus::{
-    GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    EmptyWorkingSet, GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
 };
+use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 use crate::error::SysError;
-use crate::rss::{LargePageStatus, ProcessMemory};
+use crate::rss::{LargePageStatus, MemoryStatus, ProcessMemory};
 
 pub(crate) const ALLOCATION_GRANULARITY: usize = 65536;
 
@@ -141,4 +142,28 @@ pub(crate) fn process_memory() -> Result<ProcessMemory, SysError> {
         working_set: counters.WorkingSetSize as u64,
         private_bytes: counters.PrivateUsage as u64,
     })
+}
+
+pub(crate) const RSS_SOURCE: &str = "windows:GetProcessMemoryInfo(WorkingSetSize)";
+
+pub(crate) fn memory_status() -> Result<MemoryStatus, SysError> {
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+        return Err(SysError::Os {
+            call: "GlobalMemoryStatusEx",
+            code: last_os_error_code(),
+        });
+    }
+    Ok(MemoryStatus {
+        total: status.ullTotalPhys,
+        available: status.ullAvailPhys,
+        source: "windows:GlobalMemoryStatusEx ullAvailPhys",
+    })
+}
+
+pub(crate) fn trim_heap() -> bool {
+    let compacted = unsafe { HeapCompact(GetProcessHeap(), 0) } != 0;
+    let emptied = unsafe { EmptyWorkingSet(GetCurrentProcess()) } != 0;
+    compacted || emptied
 }

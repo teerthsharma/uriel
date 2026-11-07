@@ -5,12 +5,14 @@ use std::ptr::NonNull;
 use crate::cap::Word;
 use crate::error::SysError;
 use crate::region::{Backend, FallbackReason};
-use crate::rss::{LargePageStatus, ProcessMemory};
+use crate::rss::LargePageStatus;
 
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
 mod winio;
+#[cfg(unix)]
+mod posix;
 
 #[cfg(windows)]
 pub(crate) use winio::{RawJob, UnbufferedFile};
@@ -148,27 +150,10 @@ pub(crate) fn alignment_unit(_path: &Path) -> usize {
 }
 
 #[cfg(windows)]
-pub(crate) fn process_memory() -> Result<ProcessMemory, SysError> {
-    win::process_memory()
-}
+pub(crate) use win::{memory_status, process_memory, trim_heap, RSS_SOURCE};
 
-#[cfg(all(not(windows), target_os = "linux"))]
-pub(crate) fn process_memory() -> Result<ProcessMemory, SysError> {
-    let statm = std::fs::read_to_string("/proc/self/statm")
-        .map_err(|e| SysError::Io(e.kind()))?;
-    let mut fields = statm.split_whitespace().map(|f| f.parse::<u64>().ok());
-    let virtual_pages = fields.next().flatten().ok_or(SysError::Unsupported)?;
-    let resident_pages = fields.next().flatten().ok_or(SysError::Unsupported)?;
-    Ok(ProcessMemory {
-        working_set: resident_pages * 4096,
-        private_bytes: virtual_pages * 4096,
-    })
-}
-
-#[cfg(all(not(windows), not(target_os = "linux")))]
-pub(crate) fn process_memory() -> Result<ProcessMemory, SysError> {
-    Err(SysError::Unsupported)
-}
+#[cfg(unix)]
+pub(crate) use posix::{memory_status, process_memory, trim_heap, RSS_SOURCE};
 
 #[cfg(windows)]
 pub(crate) fn large_page_status() -> LargePageStatus {

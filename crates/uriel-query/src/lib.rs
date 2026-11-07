@@ -226,6 +226,11 @@ impl Engine {
         self.shared.cache.max_bytes()
     }
 
+    pub fn shed_caches(&self) {
+        self.shared.cache.invalidate_all();
+        self.graph.shed_caches();
+    }
+
     /// The underlying storage handle.
     pub fn graph(&self) -> &Graph {
         &self.graph

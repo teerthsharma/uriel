@@ -93,9 +93,7 @@ pub(crate) struct HostInner {
     counters: Counters,
     stopping: AtomicBool,
     listening: AtomicBool,
-    #[cfg(windows)]
     pipe_listening: AtomicBool,
-    #[cfg(windows)]
     pipe_path: String,
     dispatcher: Mutex<Option<Arc<Dispatcher>>>,
     hook: RwLock<Option<HandlerHook>>,
@@ -356,7 +354,6 @@ impl HostInner {
         }
     }
 
-    #[cfg(windows)]
     fn listen_pipe(self: &Arc<Self>) -> Result<String, HostError> {
         let dispatcher = self.dispatcher()?;
         if self.pipe_listening.swap(true, Ordering::SeqCst) {
@@ -419,9 +416,7 @@ impl Host {
                 counters: Counters::default(),
                 stopping: AtomicBool::new(false),
                 listening: AtomicBool::new(false),
-                #[cfg(windows)]
                 pipe_listening: AtomicBool::new(false),
-                #[cfg(windows)]
                 pipe_path: crate::pipe::pipe_path(&cfg.sock_name),
                 dispatcher: Mutex::new(None),
                 hook: RwLock::new(None),
@@ -493,12 +488,10 @@ impl Host {
         self.inner.listen_tcp()
     }
 
-    #[cfg(windows)]
     pub fn listen_pipe(&self) -> Result<String, HostError> {
         self.inner.listen_pipe()
     }
 
-    #[cfg(windows)]
     pub fn pipe_path(&self) -> String {
         self.inner.pipe_path.clone()
     }

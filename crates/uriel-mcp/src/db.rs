@@ -78,6 +78,10 @@ impl Db {
         Ok(open)
     }
 
+    pub fn peek(&self) -> Option<Arc<Open>> {
+        self.slot().clone()
+    }
+
     pub fn is_open(&self) -> bool {
         self.slot().is_some()
     }

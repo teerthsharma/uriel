@@ -29,6 +29,7 @@ pub struct Context {
     pub token_limit: usize,
     pub placement: PlaceState,
     pub agents: agent_tools::Hub,
+    pub governor: crate::governor::Governor,
 }
 
 impl Context {

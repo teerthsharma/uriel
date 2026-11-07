@@ -597,6 +597,10 @@ impl Graph {
         self.inner.read_only
     }
 
+    pub fn shed_caches(&self) {
+        self.inner.tier.clear();
+    }
+
     pub fn placement_log(&self) -> Vec<uriel_place::Event> {
         self.inner.tier.placement_log()
     }

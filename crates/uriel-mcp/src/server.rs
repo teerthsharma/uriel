@@ -112,6 +112,14 @@ impl Server {
         self.ctx.db.release()
     }
 
+    pub fn governor(&self) -> &crate::governor::Governor {
+        &self.ctx.governor
+    }
+
+    pub fn governor_tick(&self) -> crate::governor::Level {
+        self.ctx.governor.tick(&self.ctx)
+    }
+
     fn idle_window(&self) -> Option<Duration> {
         self.idle_release
             .filter(|_| self.ctx.db.releasable() && self.ctx.db.is_open())
@@ -250,6 +258,7 @@ impl Server {
             Ok(t) => (t, false),
             Err(t) => (t, true),
         };
+        self.ctx.governor.settle(self.ctx.db.is_open());
         self.ctx.guard.note_call(name, !is_error);
         let text = crate::guard::shape(&self.ctx, name, args, text, is_error, self.token_limit);
         Ok(json!({"content": [{"type": "text", "text": text}], "isError": is_error}))
@@ -297,7 +306,24 @@ pub fn read_bounded(input: &mut impl BufRead, max: usize) -> std::io::Result<Opt
 pub fn serve(
     server: &Server,
     input: impl BufRead + Send + 'static,
+    output: impl Write,
+) -> std::io::Result<()> {
+    std::thread::scope(|scope| {
+        let (nudge, ticks) = mpsc::channel::<()>();
+        scope.spawn(move || {
+            while !matches!(ticks.recv_timeout(crate::governor::TICK), Err(RecvTimeoutError::Disconnected)) {
+                server.governor_tick();
+            }
+        });
+        serve_loop(server, input, output, &nudge)
+    })
+}
+
+fn serve_loop(
+    server: &Server,
+    input: impl BufRead + Send + 'static,
     mut output: impl Write,
+    nudge: &mpsc::Sender<()>,
 ) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -324,6 +350,7 @@ pub fn serve(
             Ok(line) => line?,
             Err(RecvTimeoutError::Timeout) => {
                 server.release();
+                let _ = nudge.send(());
                 continue;
             }
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
