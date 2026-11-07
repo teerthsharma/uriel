@@ -431,6 +431,9 @@ fn tools_list_schemas_match_neo4j_shapes() {
             "delete_observations" => &["deletions"],
             "search_memories" => &["query"],
             "find_memories_by_name" => &["names"],
+            "graph_rank" => &["algorithm"],
+            "graph_path" => &["from", "to"],
+            "graph_impact" => &["target"],
             _ => &[],
         };
         let got: Vec<&str> = schema["required"]

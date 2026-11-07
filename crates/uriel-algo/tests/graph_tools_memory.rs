@@ -43,5 +43,6 @@ fn the_default_node_cap_pipeline_peaks_under_forty_mib_above_its_input() {
     assert!(!articulation_points(&undirected).is_empty() || !bridges(&undirected).is_empty());
     let peak = ALLOC.peak_usage();
     let used = peak.saturating_sub(base);
+    println!("peak above input: {:.1} MiB", used as f64 / (1 << 20) as f64);
     assert!(used < LIMIT_BYTES, "peak {:.1} MiB above the input", used as f64 / (1 << 20) as f64);
 }
