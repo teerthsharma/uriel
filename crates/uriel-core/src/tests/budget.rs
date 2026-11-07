@@ -84,3 +84,53 @@ fn two_budgets_give_two_tier_sizes() {
     let large = Graph::open_in_memory(MemoryBudget::new(256 * MIB)).unwrap();
     assert!(small.tier_stats().unwrap().budget_bytes < large.tier_stats().unwrap().budget_bytes);
 }
+
+#[test]
+fn auto_sizing_is_fifty_mib_with_two_gib_free_and_never_grows_past_it() {
+    use crate::{auto_memory_mib, AUTO_CEILING_MIB};
+    assert_eq!(AUTO_CEILING_MIB, 50);
+    for free_gib in [2u64, 3, 8, 64, 4096] {
+        assert_eq!(auto_memory_mib(free_gib << 30), 50, "{free_gib} GiB free");
+    }
+}
+
+#[test]
+fn auto_sizing_shrinks_below_two_gib_and_floors_at_sixteen() {
+    use crate::auto_memory_mib;
+    assert_eq!(auto_memory_mib(1 << 30), 25);
+    assert_eq!(auto_memory_mib(1536 << 20), 37);
+    assert_eq!(auto_memory_mib(256 << 20), 16);
+    assert_eq!(auto_memory_mib(0), 16);
+    let mut last = 0;
+    for step in 0..=64u64 {
+        let mib = auto_memory_mib(step * (2 << 30) / 64);
+        assert!((16..=50).contains(&mib));
+        assert!(mib >= last, "monotone at step {step}");
+        last = mib;
+    }
+}
+
+#[test]
+fn shedding_empties_the_node_tiers_and_reads_still_work() {
+    use crate::Props;
+    let g = Graph::open_in_memory(MemoryBudget::new(32 * MIB)).unwrap();
+    let mut tx = g.begin_write().unwrap();
+    let mut ids = Vec::new();
+    for _ in 0..64 {
+        ids.push(tx.create_node(&["T"], Props::new()).unwrap());
+    }
+    tx.commit().unwrap();
+    for _ in 0..3 {
+        let r = g.begin_read().unwrap();
+        for id in &ids {
+            assert!(r.get_node(*id).unwrap().is_some());
+        }
+    }
+    let before = g.tier_stats().unwrap();
+    assert!(before.hot.entries + before.warm.entries > 0, "{before:?}");
+    g.shed_caches();
+    let after = g.tier_stats().unwrap();
+    assert_eq!(after.hot.entries + after.warm.entries, 0, "{after:?}");
+    let r = g.begin_read().unwrap();
+    assert!(r.get_node(ids[0]).unwrap().is_some());
+}

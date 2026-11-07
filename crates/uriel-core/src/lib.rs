@@ -66,7 +66,7 @@ mod write;
 #[cfg(test)]
 mod tests;
 
-pub use budget::MemoryBudget;
+pub use budget::{auto_memory_mib, MemoryBudget, AUTO_CEILING_MIB, AUTO_FLOOR_MIB};
 pub use catalog::{ConstraintDef, ConstraintKind, EntitySchema, IndexDef, Schema};
 pub use command::{Command, GraphDump, WriteBatch};
 pub use error::{Error, Result};
