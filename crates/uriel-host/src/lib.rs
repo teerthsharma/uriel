@@ -7,6 +7,9 @@ mod host;
 mod message;
 #[cfg(windows)]
 mod pipe;
+#[cfg(unix)]
+#[path = "pipe_unix.rs"]
+mod pipe;
 mod server;
 mod stats;
 mod transport;
@@ -25,6 +28,5 @@ pub use uriel_core::Value;
 pub use uriel_query::{AccessMode, QueryResult, QueryStats};
 pub use uriel_rag::{ContextPack, Hit, HitVia, IndexReport, SearchOptions};
 pub use stats::{BufferGauge, HostStats};
-#[cfg(windows)]
 pub use pipe::{pipe_path, PipeTransport};
 pub use transport::{ChannelTransport, Recv, TcpTransport, Transport, FRAME_DEADLINE};
