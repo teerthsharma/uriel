@@ -265,10 +265,15 @@ impl Server {
         let id = self.next_id;
         self.next_id += 1;
         self.send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
-        let line = self.rx.recv_timeout(TIMEOUT).expect("response");
-        let resp: Json = serde_json::from_str(&line).expect("json");
-        assert_eq!(resp["id"], json!(id), "{resp}");
-        resp
+        loop {
+            let line = self.rx.recv_timeout(TIMEOUT).expect("response");
+            let resp: Json = serde_json::from_str(&line).expect("json");
+            if resp.get("id").is_none() && resp.get("method").is_some() {
+                continue;
+            }
+            assert_eq!(resp["id"], json!(id), "{resp}");
+            return resp;
+        }
     }
 
     fn init(&mut self) {
@@ -558,14 +563,16 @@ fn governor_at_red_frees_memory_and_the_next_call_still_succeeds() {
     }
     let root = db_dir().join("root");
     std::fs::create_dir_all(&root).expect("root");
+    let tree = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").canonicalize().expect("crates dir");
     let db = scratch_copy(&prepared(12_000));
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_uriel"));
     let mut server = Server::spawn(&bin, &db, &root, &["--memory-mib", RED_BUDGET_MIB, "--idle-release-secs", "0"]);
     let probe = Probe::start(server.pid());
     server.init();
     let limit_mib = usage_memory(&mut server)["limit_mib"].as_f64().expect("limit_mib");
-    let mut high_mib = 0.0f64;
-    let mut shrinks = 0u64;
+    server.call("rag_index", json!({ "path": tree.to_string_lossy() }));
+    let mut high_mib = mib(probe.peak());
+    let mut state = usage_memory(&mut server);
     for i in 0..RED_ROUNDS {
         server.call(
             "rag_search",
@@ -573,19 +580,19 @@ fn governor_at_red_frees_memory_and_the_next_call_still_succeeds() {
         );
         high_mib = high_mib.max(mib(probe.peak()));
         thread::sleep(Duration::from_millis(500));
-        let m = usage_memory(&mut server);
-        shrinks = m["shrinks"].as_u64().expect("shrinks");
-        if shrinks > 0 {
+        state = usage_memory(&mut server);
+        if state["reopens"].as_u64().expect("reopens") > 0 {
             break;
         }
     }
-    println!("GOVERNOR limit_mib={limit_mib:.1} high_mib={high_mib:.1} shrinks={shrinks}");
-    assert!(shrinks > 0, "RSS peaked at {high_mib:.1} MiB and never crossed the {limit_mib:.1} MiB limit");
-    let after = usage_memory(&mut server);
-    println!("GOVERNOR after {after}");
-    assert!(after["last_freed_mib"].as_f64().expect("freed") >= 0.0);
-    #[cfg(windows)]
-    assert!(after["last_freed_mib"].as_f64().expect("freed") > 0.0, "{after}");
+    println!("GOVERNOR limit_mib={limit_mib:.1} high_mib={high_mib:.1} state={state}");
+    assert!(state["shrinks"].as_u64().expect("shrinks") > 0, "RSS peaked at {high_mib:.1} MiB and never crossed the {limit_mib:.1} MiB limit");
+    assert!(state["reopens"].as_u64().expect("reopens") > 0, "RSS peaked at {high_mib:.1} MiB; amber only, red never reached: {state}");
+    let freed = state["last_freed_mib"].as_f64().expect("freed");
+    if cfg!(windows) {
+        assert!(freed > 0.0, "{state}");
+    }
+    assert!(freed >= 0.0, "{state}");
     thread::sleep(SETTLE);
     probe.reset();
     let settled_mib = mib(probe.peak());
@@ -593,8 +600,4 @@ fn governor_at_red_frees_memory_and_the_next_call_still_succeeds() {
     assert!(settled_mib < high_mib, "settled {settled_mib:.1} MiB did not drop below the high-water {high_mib:.1} MiB");
     let resp = server.search();
     assert!(resp["result"]["isError"] != json!(true), "the call after the release failed: {resp}");
-    let end = usage_memory(&mut server);
-    if end["level"] == json!("red") || after["level"] == json!("red") {
-        assert!(end["reopens"].as_u64().expect("reopens") >= 1, "{end}");
-    }
 }
