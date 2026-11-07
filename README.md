@@ -91,7 +91,7 @@ Both names can be registered, but they open the same database file, which has on
 |---|---|
 | `uriel` / `uriel banner` | The flame banner (plain when `NO_COLOR` is set or stdout is not a terminal). |
 | `uriel index <path> [--db]` | Chunks and indexes a directory; re-running is incremental. |
-| `uriel mcp [--db --root --read-only --format compact\|json --placement local\|planned --mode normal\|house --terse off\|data\|prose --memory-mib N]` | The stdio MCP server. Never writes the banner. Default memory budget 50 MiB, minimum 16. |
+| `uriel mcp [--db --root --read-only --format compact\|json --placement local\|planned --mode normal\|house --terse off\|data\|prose --memory-mib N]` | The stdio MCP server. Never writes the banner. Memory budget: `--memory-mib N` as given (minimum 16), otherwise auto, at most 50 MiB and less when under 2 GiB is free; see `docs/PLATFORMS.md`. |
 | `uriel calibrate [--secs]` | Measures this machine's memory-latency staircase and suggests a hot-tier size. |
 | `uriel doctor [--db]` | Checks the database directory is writable, free RAM, and the large-page privilege. |
 | `uriel install` | Registers the server with Claude Code. |
@@ -320,7 +320,7 @@ The record is an embedded property graph on [redb](https://github.com/cberner/re
 ```
 
 - **A gate, not just a cache.** A record enters T0 only if its estimated frequency (a count-min sketch with periodic halving, TinyLFU) beats the entry it would evict, so a one-pass scan cannot flush the hot set.
-- **One budget.** `--memory-mib` (default 50) is split in fixed shares: unmanaged reserve 25 %, redb page cache 25 %, RAG index 24 %, hot tier 8 %, warm tier 8 %, query cache 8 %, session 2 %.
+- **One budget.** `--memory-mib` (default: auto, 50 at most) is split in fixed shares: unmanaged reserve 25 %, redb page cache 25 %, RAG index 24 %, hot tier 8 %, warm tier 8 %, query cache 8 %, session 2 %.
 - **A deterministic scheduler.** `uriel-place` decides which regions are hot, warm or cold as a pure function of an ordered event log: integer fixed-point scores, a logical clock instead of wall time. Shuffling arrival across threads changes nothing; `replay` returns the SHA-256 of the decision sequence. It also contains a gap-aware best-fit arena planner (lineage below).
 - **Topology as layout.** `uriel-topo` computes 0-dimensional persistence over block centroids, a causal `SINK + LOCAL + RELEVANT` context schedule, and a topology-sorted node layout. The schedule exports as a block-sparse CSR (`UCSR` v1) for a Triton attention kernel; a parity harness checks the exported mask against that kernel on a GPU. The topological salience term itself lost to plain top-k in the needle-recall evaluation, so it is not wired into retrieval.
 - **Integrity.** Every record carries a CRC-32C; `scrub` reports a changed record and drops the graph to read-only; `repair_from` restores it from a replica. Degraded modes (Full, ReadOnly, CacheOnly) have deterministic transitions, and every write boundary of a 500-operation workload reopens to a committed prefix.

@@ -1,5 +1,3 @@
-#![cfg_attr(not(windows), allow(dead_code))]
-
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -441,8 +439,13 @@ fn rss_at_idle_and_after_one_rag_search_on_100k_chunks_is_within_budget() {
     gate(100_000);
 }
 
+#[cfg(not(windows))]
+fn os_peak_working_set(_pid: u32, probe: &Probe) -> u64 {
+    probe.peak()
+}
+
 #[cfg(windows)]
-fn os_peak_working_set(pid: u32) -> u64 {
+fn os_peak_working_set(pid: u32, _probe: &Probe) -> u64 {
     let script = format!("(Get-Process -Id {pid}).PeakWorkingSet64");
     let out = Command::new("powershell")
         .args(["-NoProfile", "-Command", &script])
@@ -454,69 +457,144 @@ fn os_peak_working_set(pid: u32) -> u64 {
         .expect("PeakWorkingSet64 is a number")
 }
 
-#[cfg(windows)]
-fn full_server_peaks(bin: &Path, tree: &Path) -> Vec<(&'static str, f64)> {
+struct FullRun {
+    peaks: Vec<(&'static str, f64)>,
+    memory: Json,
+}
+
+fn usage_memory(server: &mut Server) -> Json {
+    let resp = server.call("usage", json!({}));
+    let text = resp["result"]["content"][0]["text"].as_str().expect("usage text");
+    let usage: Json = serde_json::from_str(text).expect("usage json");
+    usage["memory"].clone()
+}
+
+fn full_server_peaks(bin: &Path, tree: &Path) -> FullRun {
     let dir = db_dir().join(format!("full-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("full dir");
     let db = dir.join("full.uriel");
     let memory = std::env::var("URIEL_RSS_MEMORY_MIB").ok();
     let extra: Vec<&str> = match &memory {
         Some(m) => vec!["--memory-mib", m],
-        None => Vec::new(),
+        None => vec!["--memory-mib", "50"],
     };
     let mut server = Server::spawn(bin, &db, tree, &extra);
     let pid = server.pid();
+    let probe = Probe::start(pid);
     let mut peaks = Vec::new();
     server.init();
     thread::sleep(SETTLE);
-    peaks.push(("idle", mib(os_peak_working_set(pid))));
+    peaks.push(("idle", mib(os_peak_working_set(pid, &probe))));
     let path = tree.to_string_lossy().to_string();
     server.call("rag_index", json!({ "path": path }));
-    peaks.push(("rag_index", mib(os_peak_working_set(pid))));
+    peaks.push(("rag_index", mib(os_peak_working_set(pid, &probe))));
     for i in 0..SEARCHES {
         server.call(
             "rag_search",
             json!({"query": QUERIES[i % QUERIES.len()], "k": 8, "budget_tokens": 1500, "fresh": true}),
         );
     }
-    peaks.push(("rag_search_x100", mib(os_peak_working_set(pid))));
+    peaks.push(("rag_search_x100", mib(os_peak_working_set(pid, &probe))));
     for i in 0..VIEWS {
         server.call(
             "view",
             json!({"question": QUERIES[i % QUERIES.len()], "budget_tokens": 3000}),
         );
     }
-    peaks.push(("view_x20", mib(os_peak_working_set(pid))));
+    peaks.push(("view_x20", mib(os_peak_working_set(pid, &probe))));
     for i in 0..SOULS {
         server.call("soul", json!({"budget_tokens": 300 + 100 * i}));
     }
-    peaks.push(("soul_x20", mib(os_peak_working_set(pid))));
+    peaks.push(("soul_x20", mib(os_peak_working_set(pid, &probe))));
+    let memory = usage_memory(&mut server);
     drop(server);
     let _ = std::fs::remove_dir_all(&dir);
-    peaks
+    FullRun { peaks, memory }
 }
 
-#[cfg(windows)]
-fn print_peaks(label: &str, peaks: &[(&str, f64)]) {
-    let cells: Vec<String> = peaks.iter().map(|(n, p)| format!("{n}={p:.1}")).collect();
-    println!("FULLRSS {label} profile={} peak_mib {}", if cfg!(debug_assertions) { "debug" } else { "release" }, cells.join(" "));
+fn print_peaks(label: &str, run: &FullRun) {
+    let cells: Vec<String> = run.peaks.iter().map(|(n, p)| format!("{n}={p:.1}")).collect();
+    println!(
+        "FULLRSS {label} profile={} os={} peak_mib {} governor level={} shrinks={} reopens={}",
+        if cfg!(debug_assertions) { "debug" } else { "release" },
+        std::env::consts::OS,
+        cells.join(" "),
+        run.memory["level"],
+        run.memory["shrinks"],
+        run.memory["reopens"]
+    );
 }
 
-#[cfg(windows)]
 #[test]
 fn full_server_peak_working_set_over_the_workspace_tree_stays_under_60_mib_in_release() {
     let tree = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").canonicalize().expect("crates dir");
     let bin = PathBuf::from(env!("CARGO_BIN_EXE_uriel"));
-    let peaks = full_server_peaks(&bin, &tree);
-    print_peaks("candidate", &peaks);
+    let run = full_server_peaks(&bin, &tree);
+    print_peaks("candidate", &run);
     if let Some(control) = std::env::var_os("URIEL_CONTROL_BIN") {
         let c = full_server_peaks(Path::new(&control), &tree);
         print_peaks("control", &c);
     }
+    assert_ne!(run.memory["level"], json!("red"), "governor ended red: {}", run.memory);
+    assert_eq!(run.memory["reopens"], json!(0), "governor released the database: {}", run.memory);
     if !cfg!(debug_assertions) {
-        for (stage, peak) in &peaks {
+        for (stage, peak) in &run.peaks {
             assert!(*peak <= PEAK_LIMIT_MIB, "peak after {stage} {peak:.1} MiB over {PEAK_LIMIT_MIB} MiB");
             assert!(*peak <= PEAK_TARGET_MIB, "peak after {stage} {peak:.1} MiB eats the 4 MiB margin under {PEAK_LIMIT_MIB} MiB");
         }
+    }
+}
+
+const RED_BUDGET_MIB: &str = "16";
+const RED_ROUNDS: usize = 40;
+
+#[test]
+fn governor_at_red_frees_memory_and_the_next_call_still_succeeds() {
+    let owned = std::env::var_os("URIEL_RSS_DB_DIR").is_none();
+    let mut cleanup = Cleanup(Vec::new());
+    if owned {
+        cleanup.0.push(db_dir().join("synthetic-12000.uriel"));
+        cleanup.0.push(db_dir().join(format!("run-{}", std::process::id())).join("synthetic-12000.uriel"));
+    }
+    let root = db_dir().join("root");
+    std::fs::create_dir_all(&root).expect("root");
+    let db = scratch_copy(&prepared(12_000));
+    let bin = PathBuf::from(env!("CARGO_BIN_EXE_uriel"));
+    let mut server = Server::spawn(&bin, &db, &root, &["--memory-mib", RED_BUDGET_MIB, "--idle-release-secs", "0"]);
+    let probe = Probe::start(server.pid());
+    server.init();
+    let limit_mib = usage_memory(&mut server)["limit_mib"].as_f64().expect("limit_mib");
+    let mut high_mib = 0.0f64;
+    let mut shrinks = 0u64;
+    for i in 0..RED_ROUNDS {
+        server.call(
+            "rag_search",
+            json!({"query": QUERIES[i % QUERIES.len()], "k": 8, "budget_tokens": 1500, "fresh": true}),
+        );
+        high_mib = high_mib.max(mib(probe.peak()));
+        thread::sleep(Duration::from_millis(500));
+        let m = usage_memory(&mut server);
+        shrinks = m["shrinks"].as_u64().expect("shrinks");
+        if shrinks > 0 {
+            break;
+        }
+    }
+    println!("GOVERNOR limit_mib={limit_mib:.1} high_mib={high_mib:.1} shrinks={shrinks}");
+    assert!(shrinks > 0, "RSS peaked at {high_mib:.1} MiB and never crossed the {limit_mib:.1} MiB limit");
+    let after = usage_memory(&mut server);
+    println!("GOVERNOR after {after}");
+    assert!(after["last_freed_mib"].as_f64().expect("freed") >= 0.0);
+    #[cfg(windows)]
+    assert!(after["last_freed_mib"].as_f64().expect("freed") > 0.0, "{after}");
+    thread::sleep(SETTLE);
+    probe.reset();
+    let settled_mib = mib(probe.peak());
+    println!("GOVERNOR settled_mib={settled_mib:.1} high_mib={high_mib:.1}");
+    assert!(settled_mib < high_mib, "settled {settled_mib:.1} MiB did not drop below the high-water {high_mib:.1} MiB");
+    let resp = server.search();
+    assert!(resp["result"]["isError"] != json!(true), "the call after the release failed: {resp}");
+    let end = usage_memory(&mut server);
+    if end["level"] == json!("red") || after["level"] == json!("red") {
+        assert!(end["reopens"].as_u64().expect("reopens") >= 1, "{end}");
     }
 }
