@@ -43,6 +43,7 @@ pub enum Group {
     House,
     Research,
     Dispatch,
+    Graph,
 }
 
 impl Group {
@@ -54,6 +55,7 @@ impl Group {
         Group::House,
         Group::Research,
         Group::Dispatch,
+        Group::Graph,
     ];
 
     pub fn name(self) -> &'static str {
@@ -66,6 +68,7 @@ impl Group {
             Group::House => "house",
             Group::Research => "research",
             Group::Dispatch => "dispatch",
+            Group::Graph => "graph",
         }
     }
 
@@ -92,6 +95,7 @@ pub fn group_of(name: &str) -> Group {
         n if n.starts_with("house_") => Group::House,
         n if n.starts_with("research_") => Group::Research,
         n if n.starts_with("dispatch_") => Group::Dispatch,
+        n if n.starts_with("graph_") => Group::Graph,
         _ => Group::Core,
     }
 }
@@ -471,7 +475,7 @@ fn usage_schema() -> Json {
 fn enable_schema() -> Json {
     object(
         json!({
-            "group": str_prop("memory, write, place, rag, house, research or dispatch."),
+            "group": str_prop("memory, write, place, rag, house, research, dispatch or graph."),
             "off": {"type": "boolean", "description": "Hide the group again."}
         }),
         &["group"],
@@ -496,7 +500,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: ENABLE,
         title: "List or hide a tool group",
-        description: "List a group of tools: memory, write, place, rag, house, research, dispatch. Calling a tool of a group also lists it.",
+        description: "List a group of tools: memory, write, place, rag, house, research, dispatch, graph. Calling a tool of a group also lists it.",
         writes: false,
         schema: enable_schema,
     },
@@ -543,7 +547,7 @@ pub fn call(ctx: &Context, name: &str, args: &Json, limit: usize) -> ToolResult 
             let group = req_str(args, "group")?;
             let grp = Group::parse(group).ok_or_else(|| {
                 format!(
-                    "unknown group '{group}': memory, write, place, rag, house, research, dispatch"
+                    "unknown group '{group}': memory, write, place, rag, house, research, dispatch, graph"
                 )
             })?;
             let on = !args.get("off").and_then(Json::as_bool).unwrap_or(false);
