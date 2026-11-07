@@ -337,6 +337,7 @@ impl McpArgs {
                 self.memory_mib
                     .map_or(DEFAULT_MEMORY_MIB, |m| usize::try_from(m).unwrap_or(DEFAULT_MEMORY_MIB)),
             ),
+            memory_auto: self.memory_mib.is_none(),
             mode: ServerMode::resolve(mode_flag, mode_env)?,
             terse: Terse::resolve(terse_flag, terse_env)?,
             idle_release_secs: self.idle_release_secs.unwrap_or(DEFAULT_IDLE_RELEASE_SECS),

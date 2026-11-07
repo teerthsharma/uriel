@@ -213,6 +213,7 @@ pub struct Config {
     pub format: Format,
     pub placement: PlacementMode,
     pub memory: MemoryBudget,
+    pub memory_auto: bool,
     pub mode: Mode,
     pub terse: Terse,
     pub idle_release_secs: u64,
@@ -258,7 +259,10 @@ OPTIONS:
     --format <F>         Result format of rag_search, seal_recall and read_neo4j_cypher:
                          compact (default; fewer tokens) or json (exact v1 output)
     --memory-mib <N>     Memory budget in MiB split between the page cache, the node tiers, the
-                         query cache and the RAG index (default: 50, minimum: 16)
+                         query cache and the RAG index (minimum: 16). Default and `auto`: 50, or
+                         less when under 2 GiB of RAM is free; an explicit N is used as given.
+                         A governor sheds caches at 80% and releases the database at 100% of
+                         the budget plus its reserve, and the `usage` tool reports it
     --placement <M>      local (default) or planned: planned keeps a placement model fed by the
                          nodes the tools read, which why_hot and pin explain and steer
     --mode <M>           normal (default) or house: normal serves the cypher, memory, rag and view
@@ -283,11 +287,26 @@ ENVIRONMENT:
                          and carries prefix_id and stable_prefix_bytes
 ";
 
-pub fn default_db_path() -> PathBuf {
-    let home = std::env::var_os("USERPROFILE")
+pub fn pick_home(
+    windows: bool,
+    userprofile: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let (first, second) = if windows { (userprofile, home) } else { (home, userprofile) };
+    first
         .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()))
-        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+        .or(second.filter(|v| !v.is_empty()))
+        .map(PathBuf::from)
+}
+
+pub fn default_db_path() -> PathBuf {
+    let home = pick_home(
+        cfg!(windows),
+        std::env::var_os("USERPROFILE"),
+        std::env::var_os("HOME"),
+    )
+    .or_else(std::env::home_dir)
+    .unwrap_or_else(|| PathBuf::from("."));
     home.join(".seal").join("graph.seal")
 }
 
@@ -357,6 +376,7 @@ where
         format: Format::Compact,
         placement: PlacementMode::Local,
         memory: MemoryBudget::mib(DEFAULT_MEMORY_MIB),
+        memory_auto: true,
         mode: Mode::Normal,
         terse: Terse::Off,
         idle_release_secs: DEFAULT_IDLE_RELEASE_SECS,
@@ -447,6 +467,10 @@ where
             }
             "--memory-mib" => {
                 let v = value(&flag, inline, &mut it)?;
+                if v == "auto" {
+                    cfg.memory_auto = true;
+                    continue;
+                }
                 let mib = v
                     .parse::<usize>()
                     .ok()
@@ -458,6 +482,7 @@ where
                         )
                     })?;
                 cfg.memory = MemoryBudget::mib(mib);
+                cfg.memory_auto = false;
             }
             other => return Err(format!("unknown argument '{other}'")),
         }

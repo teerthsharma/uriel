@@ -144,17 +144,37 @@ pub fn doctor<W: Write>(out: &mut W, db: &Path) -> Result<(), String> {
         Ok(()) => verdict(out, true, "db path", &format!("{} is writable", db.display()))?,
         Err(e) => verdict(out, false, "db path", &e)?,
     }
-    let mut system = sysinfo::System::new();
-    system.refresh_memory();
-    let free = system.available_memory();
-    verdict(
-        out,
-        free >= LOW_RAM_BYTES,
-        "free RAM",
-        &format!("{} available of {}", fmt_bytes(free), fmt_bytes(system.total_memory())),
-    )?;
-    let (ok, detail) = lock_memory_report();
-    verdict(out, ok, "lock memory privilege", &detail)
+    let report = uriel_mcp::governor::platform_report();
+    match (report.free_bytes, report.total_bytes) {
+        (Some(free), Some(total)) => verdict(
+            out,
+            free >= LOW_RAM_BYTES,
+            "free RAM",
+            &format!(
+                "{} available of {} ({}); `--memory-mib auto` would pick {} MiB",
+                fmt_bytes(free),
+                fmt_bytes(total),
+                report.free_source.unwrap_or("unknown source"),
+                report.auto_mib
+            ),
+        )?,
+        _ => verdict(out, false, "free RAM", "unreadable on this OS; the default 50 MiB budget applies")?,
+    }
+    match report.rss_bytes {
+        Some(rss) => verdict(
+            out,
+            true,
+            "process memory",
+            &format!("{} resident now on {} ({})", fmt_bytes(rss), report.os, report.rss_source),
+        )?,
+        None => verdict(out, false, "process memory", "resident set unreadable")?,
+    }
+    if cfg!(windows) {
+        let (ok, detail) = lock_memory_report();
+        verdict(out, ok, "lock memory privilege", &detail)
+    } else {
+        verdict(out, true, "large pages", &report.large_pages)
+    }
 }
 
 pub fn install_args(exe: &Path, db: &Path) -> Vec<String> {
@@ -295,7 +315,7 @@ mod tests {
         doctor(&mut out, &dir.path().join("graph.seal")).expect("doctor");
         let text = String::from_utf8(out).expect("utf8");
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
         assert!(lines.iter().all(|l| l.starts_with("PASS") || l.starts_with("WARN")));
         assert!(lines[0].starts_with("PASS"));
     }

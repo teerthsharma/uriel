@@ -489,7 +489,7 @@ pub const TOOLS: &[ToolDef] = &[
     ToolDef {
         name: USAGE,
         title: "Session token use",
-        description: "Tokens sent this session, output pressure, listed groups, repeats avoided.",
+        description: "Tokens sent this session, output pressure, listed groups, repeats avoided, memory.",
         writes: false,
         schema: usage_schema,
     },
@@ -527,6 +527,7 @@ pub fn call(ctx: &Context, name: &str, args: &Json, limit: usize) -> ToolResult 
             "hard": g.hard,
             "listed": g.active().iter().map(|x| x.name()).collect::<Vec<_>>(),
             "repeats_stubbed": g.stubbed.load(Ordering::Relaxed),
+            "memory": ctx.governor.snapshot(),
             "cut_results": g.spilled.load(Ordering::Relaxed),
             "kept_bytes": g.spill.bytes(),
             "reducer": {

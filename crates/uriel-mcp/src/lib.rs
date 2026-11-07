@@ -5,6 +5,7 @@ pub mod compact;
 pub mod config;
 pub mod db;
 pub mod dispatch_tools;
+pub mod governor;
 pub mod guard;
 pub mod house_tools;
 pub mod ledger_tools;
@@ -45,7 +46,10 @@ fn persist_dir(cfg: &Config) -> Option<std::path::PathBuf> {
 }
 
 pub fn build_server(cfg: &Config) -> Result<Server, String> {
+    let resolved = governor::resolve(cfg);
+    let cfg = &resolved;
     let ctx = Context {
+        governor: governor::Governor::new(cfg.memory),
         db: Db::new(cfg)?,
         read_only: cfg.read_only,
         mode: cfg.mode,
