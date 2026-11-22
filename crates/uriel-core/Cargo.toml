@@ -8,7 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-redb = "4.4.0"
+redb = "5.0.0"
 uriel-place = { path = "../uriel-place" }
 uriel-tier = { path = "../uriel-tier" }
 serde = { version = "1.0.229", features = ["derive"] }

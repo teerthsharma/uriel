@@ -17,5 +17,5 @@ thiserror = "2.0.21"
 
 [dev-dependencies]
 uriel-query = { path = "../uriel-query" }
-redb = "4.4.0"
+redb = "5.0.0"
 sha2 = "0.11"
